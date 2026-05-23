@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from app_auth.models import StravaProfile
+from django.shortcuts import get_object_or_404
 
 class StravaBikesView(APIView):
     authentication_classes = [SessionAuthentication, BasicAuthentication]
@@ -12,7 +13,7 @@ class StravaBikesView(APIView):
 
     def get(self, request, athlete_id):
         try:
-            profile = StravaProfile.objects.get(strava_athlete_id=athlete_id)
+             profile = get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
         except StravaProfile.DoesNotExist:
             return Response({'error': 'Profil nicht gefunden.'}, status=status.HTTP_404_NOT_FOUND)
         
@@ -40,4 +41,22 @@ class StravaBikesView(APIView):
         except requests.exceptions.RequestException as e:
             return Response({'error': 'Verbindungsfehler zu Strava', 'details': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+
+class StravaActivitiesView(APIView):
+    def get(self, request):
+        try:
+             profile = get_object_or_404(StravaProfile, strava_athlete_id=request.session.get('strava_athlete_id'))
+        except StravaProfile.DoesNotExist:
+            return Response({'error': 'Profil nicht gefunden.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Strava API Call
+        strava_url = "https://www.strava.com/api/v3/athlete/activities"
+        headers = {'Authorization': f'Bearer {profile.access_token}'}
+        params = {'per_page': 5} 
+        response = requests.get(strava_url, headers=headers, params=params)
+        
+        if response.status_code == 200:
+            return Response(response.json())
+        return Response({'error': 'Aktivitäten nicht abrufbar'}, status=response.status_code)
 

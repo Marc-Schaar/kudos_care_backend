@@ -22,6 +22,7 @@ class CsrfExemptSessionAuthentication(SessionAuthentication):
 
 class StravaAuthCallbackView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = [CsrfExemptSessionAuthentication]
 
     def post(self, request, *args, **kwargs):
         serializer = StravaAuthSerializer(data=request.data)
