@@ -90,5 +90,5 @@ class ActivityDetailView(APIView):
         return Response({
             'name': ride.name,
             'geo_json_full': json.loads(geo_json_str),
-            'weather_timeline': ride.weather_data.get('hourly', {}) if ride.weather_data else {}
+            'weather_timeline': ride.weather_data if ride.weather_data else {}
         })

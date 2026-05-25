@@ -1,11 +1,13 @@
-from django.contrib.gis.geos import  Point
+from datetime import datetime, timedelta, timezone
 import requests
+import dateutil.parser
+from shapely.geometry import LineString as ShapelyLineString
+import polyline 
+
+from django.contrib.gis.geos import  Point,  LineString as DjangoLineString
 from ..models import Ride, RideStream
 
-import polyline 
-from shapely.geometry import LineString as ShapelyLineString
 
-from django.contrib.gis.geos import LineString as DjangoLineString
 
 class StravaImportService:
     @staticmethod
@@ -33,7 +35,8 @@ class StravaImportService:
                 'track': track,
                 'start_latlng': point,
                 'distance': activity_data.get('distance'),
-                'start_date': activity_data.get('start_date_local')
+                'start_date': activity_data.get('start_date_local'),
+                'elapsed_time': activity_data.get('elapsed_time')
             }
         )
 
@@ -56,7 +59,7 @@ class StravaImportService:
             weather_info = WeatherService.get_historical_weather(
                 start_latlng[0], start_latlng[1], start_date
             )
-            ride.weather_data = weather_info
+            ride.weather_data = get_filtered_weather(ride, weather_info)
             ride.save()
 
         return ride
@@ -107,3 +110,46 @@ class WeatherService:
         if response.status_code == 200:
             return response.json()
         return None
+    
+
+def get_filtered_weather(ride, weather_data=None):
+    if not weather_data or 'hourly' not in weather_data:
+        return {}
+
+    hourly = weather_data['hourly']
+    
+    if isinstance(ride.start_date, str):
+        start_time = dateutil.parser.isoparse(ride.start_date)
+    else:
+        start_time = ride.start_date
+        
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+        
+    duration_seconds = ride.elapsed_time or 0
+    end_time = start_time + timedelta(seconds=duration_seconds)
+    
+    filtered_indices = []
+    
+    for i, time_str in enumerate(hourly['time']):
+        weather_time = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+
+        if weather_time.tzinfo is None:
+            weather_time = weather_time.replace(tzinfo=timezone.utc)
+
+       
+        start_hour = start_time.replace(minute=0, second=0, microsecond=0)
+        end_hour = end_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+        if start_hour <= weather_time <= end_hour:
+            filtered_indices.append(i)
+
+        
+
+    
+    return {
+        "time": [hourly['time'][i] for i in filtered_indices],
+        "temperature_2m": [hourly['temperature_2m'][i] for i in filtered_indices],
+        "wind_speed_10m": [hourly['wind_speed_10m'][i] for i in filtered_indices],
+        "precipitation": [hourly['precipitation'][i] for i in filtered_indices],
+    }

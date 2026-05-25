@@ -8,6 +8,7 @@ class Ride(models.Model):
     weather_data = models.JSONField(null=True, blank=True)
     distance = models.FloatField(null=True, blank=True)
     start_date = models.DateTimeField(null=True, blank=True)
+    elapsed_time = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
