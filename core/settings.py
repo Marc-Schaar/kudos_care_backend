@@ -3,6 +3,13 @@ from pathlib import Path
 from dotenv import load_dotenv 
 
 load_dotenv()
+if os.name == 'nt':
+    qgis_bin_path = r'C:\Program Files\QGIS 3.44.10\bin'
+        
+    os.environ['PATH'] = qgis_bin_path + os.pathsep + os.environ['PATH']
+        
+    GDAL_LIBRARY_PATH = os.path.join(qgis_bin_path, 'gdal312.dll')
+    GEOS_LIBRARY_PATH = os.path.join(qgis_bin_path, 'geos_c.dll')
 
 STRAVA_CLIENT_ID = os.environ.get('STRAVA_CLIENT_ID')
 STRAVA_CLIENT_SECRET = os.environ.get('STRAVA_CLIENT_SECRET')
@@ -57,6 +64,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.gis',
     'rest_framework',
     'app_auth',
     'app_dashboard',
@@ -98,11 +106,14 @@ WSGI_APPLICATION = 'core.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.contrib.gis.db.backends.postgis',
+        'NAME': os.environ.get('DB_NAME'),
+        'USER': os.environ.get('DB_USER'),
+        'PASSWORD': os.environ.get('DB_PASSWORD'),
+        'HOST': os.environ.get('DB_HOST', 'localhost'),
+        'PORT': os.environ.get('DB_PORT', '5432'),
     }
 }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
