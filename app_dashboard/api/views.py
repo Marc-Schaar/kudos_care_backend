@@ -1,15 +1,23 @@
 import requests
+import json
+from django.core.serializers import serialize
+from django.shortcuts import get_object_or_404
+
 from rest_framework.authentication import SessionAuthentication, BasicAuthentication
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from app_auth.models import StravaProfile
-from django.shortcuts import get_object_or_404
 from .services import StravaImportService
-from django.core.serializers import serialize
-from django.http import JsonResponse
 from ..models import Ride
+
+PAGE_COUNT = 1
+
+
+class CsrfExemptSessionAuthentication(SessionAuthentication):
+    def enforce_csrf(self, request):
+        return
 
 class StravaBikesView(APIView):
     authentication_classes = [SessionAuthentication, BasicAuthentication]
@@ -45,34 +53,42 @@ class StravaBikesView(APIView):
         except requests.exceptions.RequestException as e:
             return Response({'error': 'Verbindungsfehler zu Strava', 'details': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+class StravaSyncView(APIView):
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [IsAuthenticated]
 
-
-class StravaActivitiesView(APIView):
-    def get(self, request):
-        try:
-             profile = get_object_or_404(StravaProfile, strava_athlete_id=request.session.get('strava_athlete_id'))
-        except StravaProfile.DoesNotExist:
-            return Response({'error': 'Profil nicht gefunden.'}, status=status.HTTP_404_NOT_FOUND)
-
+    """POST /api/sync/ - Lädt neue Aktivitäten von Strava"""
+    def post(self, request):
+        profile = get_object_or_404(StravaProfile, strava_athlete_id=request.session.get('strava_athlete_id'))
+        
         strava_url = "https://www.strava.com/api/v3/athlete/activities"
         headers = {'Authorization': f'Bearer {profile.access_token}'}
-        params = {'per_page': 1} 
+        params = {'per_page': PAGE_COUNT} 
+        
         response = requests.get(strava_url, headers=headers, params=params)
         
         if response.status_code == 200:
-         
             activities = response.json()
-            access_token = profile.access_token
-            
             for activity in activities:
-                StravaImportService.sync_activity_to_db(activity, access_token=access_token)
-                
-            return Response(activities)
-        return Response({'error': 'Aktivitäten nicht abrufbar'}, status=response.status_code)
+                StravaImportService.sync_activity_to_db(activity, access_token=profile.access_token)
+            return Response({"status": "Erfolgreich synchronisiert", "count": len(activities)})
+        
+        return Response({'error': 'Sync fehlgeschlagen'}, status=response.status_code)
 
-def ride_geojson_view(request):
-    data = serialize('geojson', Ride.objects.all(), 
-                     geometry_field='track', 
-                     fields=('name', 'strava_id'))
-    import json
-    return JsonResponse(json.loads(data))
+
+
+class ActivityListView(APIView):
+    def get(self, request):
+        rides = Ride.objects.all().values('id', 'strava_id', 'name', 'distance', 'start_date')
+        return Response(list(rides))
+
+class ActivityDetailView(APIView):
+    def get(self, request, id):
+        ride = get_object_or_404(Ride, id=id)
+        geo_json_str = serialize('geojson', [ride], geometry_field='track')
+        
+        return Response({
+            'name': ride.name,
+            'geo_json_full': json.loads(geo_json_str),
+            'weather_timeline': ride.weather_data.get('hourly', {}) if ride.weather_data else {}
+        })

@@ -5,6 +5,9 @@ class Ride(models.Model):
     name = models.CharField(max_length=255)
     track = models.LineStringField(srid=4326, null=True, blank=True) 
     start_latlng = models.PointField(srid=4326, null=True, blank=True)
+    weather_data = models.JSONField(null=True, blank=True)
+    distance = models.FloatField(null=True, blank=True)
+    start_date = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
