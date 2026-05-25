@@ -6,13 +6,13 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('app_dashboard', '0002_ridestream'),
+        ("app_dashboard", "0002_ridestream"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='ride',
-            name='weather_data',
+            model_name="ride",
+            name="weather_data",
             field=models.JSONField(blank=True, null=True),
         ),
     ]

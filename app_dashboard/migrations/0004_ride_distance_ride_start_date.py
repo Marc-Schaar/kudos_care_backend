@@ -6,18 +6,18 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('app_dashboard', '0003_ride_weather_data'),
+        ("app_dashboard", "0003_ride_weather_data"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='ride',
-            name='distance',
+            model_name="ride",
+            name="distance",
             field=models.FloatField(blank=True, null=True),
         ),
         migrations.AddField(
-            model_name='ride',
-            name='start_date',
+            model_name="ride",
+            name="start_date",
             field=models.DateTimeField(blank=True, null=True),
         ),
     ]

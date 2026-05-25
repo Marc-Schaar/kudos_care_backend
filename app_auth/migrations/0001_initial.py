@@ -15,16 +15,32 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
-            name='StravaProfile',
+            name="StravaProfile",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('strava_athlete_id', models.IntegerField(unique=True)),
-                ('firstname', models.CharField(blank=True, max_length=100)),
-                ('lastname', models.CharField(blank=True, max_length=100)),
-                ('access_token', models.CharField(max_length=255)),
-                ('refresh_token', models.CharField(max_length=255)),
-                ('expires_at', models.IntegerField()),
-                ('user', models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("strava_athlete_id", models.IntegerField(unique=True)),
+                ("firstname", models.CharField(blank=True, max_length=100)),
+                ("lastname", models.CharField(blank=True, max_length=100)),
+                ("access_token", models.CharField(max_length=255)),
+                ("refresh_token", models.CharField(max_length=255)),
+                ("expires_at", models.IntegerField()),
+                (
+                    "user",
+                    models.OneToOneField(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
             ],
         ),
     ]

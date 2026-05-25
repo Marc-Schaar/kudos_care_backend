@@ -8,19 +8,36 @@ class Migration(migrations.Migration):
 
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='Ride',
+            name="Ride",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('strava_id', models.BigIntegerField(unique=True)),
-                ('name', models.CharField(max_length=255)),
-                ('track', django.contrib.gis.db.models.fields.LineStringField(blank=True, null=True, srid=4326)),
-                ('start_latlng', django.contrib.gis.db.models.fields.PointField(blank=True, null=True, srid=4326)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("strava_id", models.BigIntegerField(unique=True)),
+                ("name", models.CharField(max_length=255)),
+                (
+                    "track",
+                    django.contrib.gis.db.models.fields.LineStringField(
+                        blank=True, null=True, srid=4326
+                    ),
+                ),
+                (
+                    "start_latlng",
+                    django.contrib.gis.db.models.fields.PointField(
+                        blank=True, null=True, srid=4326
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
             ],
         ),
     ]

@@ -6,13 +6,13 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('app_dashboard', '0004_ride_distance_ride_start_date'),
+        ("app_dashboard", "0004_ride_distance_ride_start_date"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='ride',
-            name='elapsed_time',
+            model_name="ride",
+            name="elapsed_time",
             field=models.IntegerField(blank=True, null=True),
         ),
     ]

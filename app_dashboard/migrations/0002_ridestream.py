@@ -7,17 +7,32 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('app_dashboard', '0001_initial'),
+        ("app_dashboard", "0001_initial"),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='RideStream',
+            name="RideStream",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('latlngs', models.JSONField()),
-                ('time_series', models.JSONField()),
-                ('ride', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='streams', to='app_dashboard.ride')),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("latlngs", models.JSONField()),
+                ("time_series", models.JSONField()),
+                (
+                    "ride",
+                    models.OneToOneField(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="streams",
+                        to="app_dashboard.ride",
+                    ),
+                ),
             ],
         ),
     ]
