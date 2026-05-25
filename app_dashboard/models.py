@@ -9,3 +9,8 @@ class Ride(models.Model):
 
     def __str__(self):
         return self.name
+    
+class RideStream(models.Model):
+    ride = models.OneToOneField('Ride', on_delete=models.CASCADE, related_name='streams')
+    latlngs = models.JSONField() 
+    time_series = models.JSONField()
