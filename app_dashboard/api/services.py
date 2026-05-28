@@ -80,7 +80,7 @@ class StravaImportService:
                 defaults={
                     "latlngs": stream_data.get("latlng", {}).get("data"),
                     "time_series": stream_data.get("time", {}).get("data"),
-                    "avg_headwind": ride.weather_data.get("avg_headwind", 0.0),
+                    "avg_headwind": (ride.weather_data or {}).get("avg_headwind", 0.0),
                 },
             )
 
