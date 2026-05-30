@@ -20,6 +20,7 @@ jobs:
           debug: true
           script: |
             cd /home/marc/projects/kudo_care/kudos_care_backend
+            export $(cat .env | xargs)
             git pull origin dev
             source venv/bin/activate
             pip install -r requirements.txt
