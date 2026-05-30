@@ -33,6 +33,11 @@ class StravaAuthCallbackView(APIView):
 
         code = serializer.validated_data["code"]
 
+        print("CLIENT_ID:", settings.STRAVA_CLIENT_ID)
+        print("CLIENT_SECRET:", settings.STRAVA_CLIENT_SECRET[:6], "...")
+        print("CODE:", code)
+        print("STRAVA RESPONSE:", response_data)
+
         strava_url = "https://www.strava.com/oauth/token"
         payload = {
             "client_id": settings.STRAVA_CLIENT_ID,
