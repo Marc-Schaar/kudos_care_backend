@@ -44,10 +44,12 @@ class StravaAuthCallbackView(APIView):
             "client_secret": settings.STRAVA_CLIENT_SECRET,
             "code": code,
             "grant_type": "authorization_code",
+            "redirect_uri": "https://kudos-care.marc-schaar.com/api/strava/auth/",
         }
 
         try:
             response = requests.post(strava_url, data=payload)
+            print("Strava API Response:", response.text)
             response_data = response.json()
 
             if response.status_code != 200:
