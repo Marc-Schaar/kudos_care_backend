@@ -17,6 +17,8 @@ jobs:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key_format: "openssh"
+          base64: true
           debug: true
           script: |
             cd /home/marc/projects/kudo_care/kudos_care_backend
