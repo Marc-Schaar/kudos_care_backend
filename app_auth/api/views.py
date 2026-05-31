@@ -13,7 +13,7 @@ from app_auth.models import StravaProfile
 from .serializers import StravaAuthSerializer
 
 from app_auth.mixins import CsrfExemptSessionAuthentication
-
+from .utils import sync_bikes_from_strava
 
 
 
@@ -69,6 +69,7 @@ class StravaAuthCallbackView(APIView):
                 )
                 profile.user = user
                 profile.save()
+                sync_bikes_from_strava(athlete_data, profile)
 
             login(request, profile.user)
 
@@ -117,3 +118,5 @@ class CurrentUserView(APIView):
         return Response(
             {"athlete_id": profile.strava_athlete_id, "firstname": profile.firstname}
         )
+
+

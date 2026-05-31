@@ -1,6 +1,18 @@
 import time
 import requests
 from django.conf import settings
+from app_maintenance.models import Bike, BikeType
+
+def sync_bikes_from_strava(athlete_data, profile):
+    for bike_data in athlete_data.get("bikes", []):
+        Bike.objects.update_or_create(
+            strava_bike_id=bike_data["id"],
+            defaults={
+                "athlete": profile,
+                "name": bike_data.get("name", "Unbekanntes Rad"),
+                "bike_type": BikeType.OTHER,  
+            },
+        )
 
 def get_valid_access_token(profile):
     if profile.expires_at < time.time():

@@ -1,0 +1,7 @@
+from django.apps import AppConfig
+
+
+class AppMaintenanceConfig(AppConfig):
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "app_maintenance"
+    verbose_name = "Wartung"

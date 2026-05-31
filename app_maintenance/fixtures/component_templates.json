@@ -1,0 +1,841 @@
+[
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 1,
+    "fields": {
+      "name": "Kette",
+      "category": "drivetrain",
+      "applicable_bike_types": [],
+      "warn_km": 2000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Kettenverschleiß mit Kettenmessgerät prüfen. Empfehlung: ab 0.75% Streckung tauschen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 2,
+    "fields": {
+      "name": "Kassette",
+      "category": "drivetrain",
+      "applicable_bike_types": [],
+      "warn_km": 8000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Spätestens nach 3 Ketten tauschen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 3,
+    "fields": {
+      "name": "Schaltwerk",
+      "category": "drivetrain",
+      "applicable_bike_types": [
+        "road",
+        "mtb",
+        "gravel",
+        "cx",
+        "ebike_road",
+        "ebike_mtb",
+        "other"
+      ],
+      "warn_km": 20000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Schaltauge und Rollen regelmäßig prüfen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 4,
+    "fields": {
+      "name": "Umwerfer",
+      "category": "drivetrain",
+      "applicable_bike_types": [
+        "road",
+        "mtb",
+        "gravel",
+        "cx",
+        "ebike_road",
+        "ebike_mtb",
+        "other"
+      ],
+      "warn_km": 20000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 5,
+    "fields": {
+      "name": "Tretlager",
+      "category": "drivetrain",
+      "applicable_bike_types": [],
+      "warn_km": 15000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Auf Spiel und Knarzen prüfen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 6,
+    "fields": {
+      "name": "Kurbel",
+      "category": "drivetrain",
+      "applicable_bike_types": [],
+      "warn_km": 30000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 7,
+    "fields": {
+      "name": "Schaltröllchen",
+      "category": "drivetrain",
+      "applicable_bike_types": [
+        "road",
+        "mtb",
+        "gravel",
+        "cx",
+        "ebike_road",
+        "ebike_mtb",
+        "other"
+      ],
+      "warn_km": 8000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 8,
+    "fields": {
+      "name": "Zahnriemen",
+      "category": "drivetrain",
+      "applicable_bike_types": ["city", "ebike_city"],
+      "warn_km": 15000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Nur bei Riemenantrieb relevant."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 9,
+    "fields": {
+      "name": "Ritzel (Single Speed)",
+      "category": "drivetrain",
+      "applicable_bike_types": ["city", "other"],
+      "warn_km": 8000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 10,
+    "fields": {
+      "name": "Bremsbeläge Scheibe vorne",
+      "category": "brakes",
+      "applicable_bike_types": [
+        "mtb",
+        "gravel",
+        "cx",
+        "ebike_road",
+        "ebike_mtb",
+        "ebike_city",
+        "city"
+      ],
+      "warn_km": 3000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Mindeststärke 1.5 mm. Bei Quietschen einschleifen oder tauschen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 11,
+    "fields": {
+      "name": "Bremsbeläge Scheibe hinten",
+      "category": "brakes",
+      "applicable_bike_types": [
+        "mtb",
+        "gravel",
+        "cx",
+        "ebike_road",
+        "ebike_mtb",
+        "ebike_city",
+        "city"
+      ],
+      "warn_km": 3000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 12,
+    "fields": {
+      "name": "Bremsbeläge Felge vorne",
+      "category": "brakes",
+      "applicable_bike_types": ["road", "city", "cx", "other"],
+      "warn_km": 5000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Verschleißmarken beachten."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 13,
+    "fields": {
+      "name": "Bremsbeläge Felge hinten",
+      "category": "brakes",
+      "applicable_bike_types": ["road", "city", "cx", "other"],
+      "warn_km": 5000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 14,
+    "fields": {
+      "name": "Bremsflüssigkeit (DOT/Mineral)",
+      "category": "brakes",
+      "applicable_bike_types": [
+        "mtb",
+        "gravel",
+        "ebike_mtb",
+        "ebike_city",
+        "ebike_road"
+      ],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 730,
+      "is_system": true,
+      "notes": "Alle 2 Jahre wechseln, bei DOT früher da hygroskopisch."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 15,
+    "fields": {
+      "name": "Bremsscheibe vorne",
+      "category": "brakes",
+      "applicable_bike_types": [
+        "mtb",
+        "gravel",
+        "cx",
+        "ebike_road",
+        "ebike_mtb",
+        "ebike_city",
+        "city"
+      ],
+      "warn_km": 15000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Mindeststärke je nach Hersteller (meist 1.5–1.8 mm) prüfen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 16,
+    "fields": {
+      "name": "Bremsscheibe hinten",
+      "category": "brakes",
+      "applicable_bike_types": [
+        "mtb",
+        "gravel",
+        "cx",
+        "ebike_road",
+        "ebike_mtb",
+        "ebike_city",
+        "city"
+      ],
+      "warn_km": 15000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 17,
+    "fields": {
+      "name": "Bremszug vorne",
+      "category": "brakes",
+      "applicable_bike_types": ["road", "city", "cx", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 365,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 18,
+    "fields": {
+      "name": "Bremszug hinten",
+      "category": "brakes",
+      "applicable_bike_types": ["road", "city", "cx", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 365,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 19,
+    "fields": {
+      "name": "Reifen vorne",
+      "category": "wheels",
+      "applicable_bike_types": [],
+      "warn_km": 5000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Auf Schnitte, Risse und Profiltiefe prüfen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 20,
+    "fields": {
+      "name": "Reifen hinten",
+      "category": "wheels",
+      "applicable_bike_types": [],
+      "warn_km": 4000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Hinterreifen verschleißt schneller als vorne."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 21,
+    "fields": {
+      "name": "Schlauch vorne",
+      "category": "wheels",
+      "applicable_bike_types": ["road", "city", "cx", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 730,
+      "is_system": true,
+      "notes": "Bei Tubeless nicht relevant."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 22,
+    "fields": {
+      "name": "Schlauch hinten",
+      "category": "wheels",
+      "applicable_bike_types": ["road", "city", "cx", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 730,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 23,
+    "fields": {
+      "name": "Tubeless Dichtmilch vorne",
+      "category": "wheels",
+      "applicable_bike_types": [
+        "road",
+        "mtb",
+        "gravel",
+        "cx",
+        "ebike_road",
+        "ebike_mtb"
+      ],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 120,
+      "is_system": true,
+      "notes": "Alle 3–4 Monate erneuern."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 24,
+    "fields": {
+      "name": "Tubeless Dichtmilch hinten",
+      "category": "wheels",
+      "applicable_bike_types": [
+        "road",
+        "mtb",
+        "gravel",
+        "cx",
+        "ebike_road",
+        "ebike_mtb"
+      ],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 120,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 25,
+    "fields": {
+      "name": "Felge vorne",
+      "category": "wheels",
+      "applicable_bike_types": [],
+      "warn_km": 20000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Verschleißmarke bei Felgenbremsen beachten."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 26,
+    "fields": {
+      "name": "Felge hinten",
+      "category": "wheels",
+      "applicable_bike_types": [],
+      "warn_km": 20000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 27,
+    "fields": {
+      "name": "Nabenlager vorne",
+      "category": "wheels",
+      "applicable_bike_types": [],
+      "warn_km": 20000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Auf Spiel und Rauigkeit prüfen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 28,
+    "fields": {
+      "name": "Nabenlager hinten",
+      "category": "wheels",
+      "applicable_bike_types": [],
+      "warn_km": 20000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 29,
+    "fields": {
+      "name": "Freilaufkörper",
+      "category": "wheels",
+      "applicable_bike_types": [
+        "road",
+        "mtb",
+        "gravel",
+        "cx",
+        "ebike_road",
+        "ebike_mtb",
+        "other"
+      ],
+      "warn_km": 15000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Auf Durchrutschen und Geräusche prüfen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 30,
+    "fields": {
+      "name": "Speichen vorne",
+      "category": "wheels",
+      "applicable_bike_types": [],
+      "warn_km": 30000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Laufrad auf Seitenschlag einspannen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 31,
+    "fields": {
+      "name": "Speichen hinten",
+      "category": "wheels",
+      "applicable_bike_types": [],
+      "warn_km": 30000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 32,
+    "fields": {
+      "name": "Gabelöl / Lower Leg Service",
+      "category": "suspension",
+      "applicable_bike_types": ["mtb", "ebike_mtb"],
+      "warn_km": 5000,
+      "warn_hours": 125,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Standrohre reinigen, Öl und Dichtungen tauschen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 33,
+    "fields": {
+      "name": "Gabel Full Service (Kartusche)",
+      "category": "suspension",
+      "applicable_bike_types": ["mtb", "ebike_mtb"],
+      "warn_km": 15000,
+      "warn_hours": 400,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 34,
+    "fields": {
+      "name": "Dämpfer Service (Basic)",
+      "category": "suspension",
+      "applicable_bike_types": ["mtb", "ebike_mtb"],
+      "warn_km": 5000,
+      "warn_hours": 125,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 35,
+    "fields": {
+      "name": "Dämpfer Full Service",
+      "category": "suspension",
+      "applicable_bike_types": ["mtb", "ebike_mtb"],
+      "warn_km": 15000,
+      "warn_hours": 400,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 36,
+    "fields": {
+      "name": "Federgabel Dichtungen",
+      "category": "suspension",
+      "applicable_bike_types": ["mtb", "ebike_mtb"],
+      "warn_km": 10000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 37,
+    "fields": {
+      "name": "Lenkerband",
+      "category": "cockpit",
+      "applicable_bike_types": ["road", "gravel", "cx", "ebike_road"],
+      "warn_km": 10000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 38,
+    "fields": {
+      "name": "Schaltzug vorne",
+      "category": "cockpit",
+      "applicable_bike_types": ["road", "mtb", "gravel", "cx", "city", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 365,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 39,
+    "fields": {
+      "name": "Schaltzug hinten",
+      "category": "cockpit",
+      "applicable_bike_types": ["road", "mtb", "gravel", "cx", "city", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 365,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 40,
+    "fields": {
+      "name": "Griffe",
+      "category": "cockpit",
+      "applicable_bike_types": [
+        "mtb",
+        "city",
+        "ebike_city",
+        "ebike_mtb",
+        "other"
+      ],
+      "warn_km": 10000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 41,
+    "fields": {
+      "name": "Sattel",
+      "category": "cockpit",
+      "applicable_bike_types": [],
+      "warn_km": 20000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 42,
+    "fields": {
+      "name": "Sattelstütze (Teleskop) Service",
+      "category": "cockpit",
+      "applicable_bike_types": ["mtb", "gravel", "ebike_mtb"],
+      "warn_km": 5000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Öl und Dichtungen tauschen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 43,
+    "fields": {
+      "name": "Pedale",
+      "category": "cockpit",
+      "applicable_bike_types": [],
+      "warn_km": 20000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 44,
+    "fields": {
+      "name": "Klickpedale Cleats",
+      "category": "cockpit",
+      "applicable_bike_types": ["road", "mtb", "gravel", "cx", "ebike_road"],
+      "warn_km": 5000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Auf Auslöseforce und Verschleiß prüfen."
+    }
+  },
+
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 45,
+    "fields": {
+      "name": "Steuersatz",
+      "category": "frame",
+      "applicable_bike_types": [],
+      "warn_km": 20000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Auf Spiel und Rauigkeit prüfen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 46,
+    "fields": {
+      "name": "Umlenkrollen Hinterbau",
+      "category": "frame",
+      "applicable_bike_types": ["mtb", "ebike_mtb"],
+      "warn_km": 10000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 47,
+    "fields": {
+      "name": "Hinterbaulager",
+      "category": "frame",
+      "applicable_bike_types": ["mtb", "gravel", "ebike_mtb"],
+      "warn_km": 15000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 48,
+    "fields": {
+      "name": "Akku",
+      "category": "electric",
+      "applicable_bike_types": ["ebike_road", "ebike_mtb", "ebike_city"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 1095,
+      "is_system": true,
+      "notes": "Ladezyklen beachten. Herstellerangaben variieren (meist 500–1000 Zyklen)."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 49,
+    "fields": {
+      "name": "Motor Service",
+      "category": "electric",
+      "applicable_bike_types": ["ebike_road", "ebike_mtb", "ebike_city"],
+      "warn_km": 10000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Herstellerservice empfohlen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 50,
+    "fields": {
+      "name": "Motoröl / Getriebeöl",
+      "category": "electric",
+      "applicable_bike_types": ["ebike_road", "ebike_mtb", "ebike_city"],
+      "warn_km": 5000,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Nur bei Motoren mit Getriebeöl (z.B. Bosch CX Gen4, Shimano EP8)."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 51,
+    "fields": {
+      "name": "Display / Bedieneinheit",
+      "category": "electric",
+      "applicable_bike_types": ["ebike_road", "ebike_mtb", "ebike_city"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Firmware-Updates prüfen."
+    }
+  },
+
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 52,
+    "fields": {
+      "name": "Frontlicht Akku",
+      "category": "lighting",
+      "applicable_bike_types": ["city", "ebike_city", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 730,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 53,
+    "fields": {
+      "name": "Rücklicht Akku",
+      "category": "lighting",
+      "applicable_bike_types": ["city", "ebike_city", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 730,
+      "is_system": true,
+      "notes": ""
+    }
+  }
+]
