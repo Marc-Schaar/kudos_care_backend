@@ -59,6 +59,11 @@ class BikeListView(AthleteMixin, generics.ListCreateAPIView):
 
     def get_serializer_class(self):
         return BikeSerializer if self.request.method == "POST" else BikeListSerializer
+    
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({"bikes": serializer.data})
 
     def perform_create(self, serializer):
         serializer.save(athlete=self.get_athlete())
