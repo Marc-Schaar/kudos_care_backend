@@ -19,7 +19,7 @@ from app_auth.api.utils import get_valid_access_token
 from app_auth.mixins import CsrfExemptSessionAuthentication
 
 import logging
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('my_app_debug')
 
 
 class StravaBikesView(APIView):

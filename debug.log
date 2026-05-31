@@ -1391,3 +1391,6 @@ File C:\Users\Marc\dev\kudos_care_backend\venv\Lib\site-packages\django\db\migra
 File C:\Users\Marc\dev\kudos_care_backend\venv\Lib\site-packages\django\contrib\auth\migrations\0007_alter_validators_add_error_messages.py first seen with mtime 1779546375.8242152
 File C:\Users\Marc\dev\kudos_care_backend\venv\Lib\site-packages\django\contrib\admin\migrations\0003_logentry_add_action_flag_choices.py first seen with mtime 1779546375.1570687
 File C:\Users\Marc\dev\kudos_care_backend\app_dashboard\migrations\0007_ride_athlete_ride_bike.py first seen with mtime 1780217256.8528056
+File C:\Users\Marc\dev\kudos_care_backend\core\settings.py previous mtime: 1780219700.4720466, current mtime: 1780220066.059717
+C:\Users\Marc\dev\kudos_care_backend\core\settings.py notified as changed. Signal results: [(<function template_changed at 0x000002804079ACF0>, None), (<function translation_file_changed at 0x0000028048956AE0>, None)].
+C:\Users\Marc\dev\kudos_care_backend\core\settings.py changed, reloading.

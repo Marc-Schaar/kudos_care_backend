@@ -175,10 +175,14 @@ LOGGING = {
         },
     },
     'loggers': {
-        'django': {
+            'my_app_debug': {
             'handlers': ['file'],
             'level': 'DEBUG',
-            'propagate': True,
+            'propagate': False,
+        },
+        'django.db.backends': {
+            'level': 'INFO',
+            'handlers': ['file'],
         },
     },
 }
