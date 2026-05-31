@@ -43,8 +43,7 @@ class StravaSyncView(APIView):
                 params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE},
                 timeout=10,
             )
-            athlete_data = response.json()
-            bikes_data = athlete_data.get("bikes", [])
+            
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logger.error("Strava-Sync fehlgeschlagen: %s", e)
@@ -52,9 +51,14 @@ class StravaSyncView(APIView):
                 {"error": "Verbindungsfehler zu Strava"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+        logger.debug(f"DEBUG: Strava Athlete Response Type: {type(athlete_data)}")
+        logger.debug(f"DEBUG: Strava Athlete Response Content: {athlete_data}")
 
         athlete_data = response.json()
+        if isinstance(athlete_data, list):
+            athlete_data = athlete_data[0] if athlete_data else {}
         bikes_data = athlete_data.get("bikes", [])
+
 
         for bike_info in bikes_data:
             Bike.objects.update_or_create(
