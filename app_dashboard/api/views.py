@@ -18,7 +18,7 @@ from .serializers import RideSerializer
 from app_auth.models import StravaProfile
 from app_auth.api.utils import get_valid_access_token
 from app_auth.mixins import CsrfExemptSessionAuthentication
-
+from app_maintenance.models import Bike
 import logging
 logger = logging.getLogger('my_app_debug')
 
@@ -43,6 +43,8 @@ class StravaSyncView(APIView):
                 params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE},
                 timeout=10,
             )
+            athlete_data = response.json()
+            bikes_data = athlete_data.get("bikes", [])
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logger.error("Strava-Sync fehlgeschlagen: %s", e)
@@ -51,6 +53,18 @@ class StravaSyncView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        athlete_data = response.json()
+        bikes_data = athlete_data.get("bikes", [])
+
+        for bike_info in bikes_data:
+            Bike.objects.update_or_create(
+                strava_id=bike_info["id"], 
+                defaults={
+                    "name": bike_info.get("name"),
+                    "athlete": profile,
+                    # weitere Felder wie 'frame_type' falls vorhanden
+                },
+            )
         activities = response.json()
         for activity in activities:
             StravaImportService.sync_activity_to_db(activity, profile)
