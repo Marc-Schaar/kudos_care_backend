@@ -28,6 +28,11 @@ class StravaImportService:
         """
         Wandelt Strava-JSON in ein Ride-Objekt um und speichert es in PostGIS.
         """
+
+        strava_id = activity_data["id"]
+        if Ride.objects.filter(strava_id=strava_id).exists():
+            return None
+        
         access_token = profile.access_token
         polyline_str = activity_data.get("map", {}).get("summary_polyline")
         start_date = activity_data.get("start_date_local", "").split("T")[0]
