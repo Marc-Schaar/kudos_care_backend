@@ -51,10 +51,10 @@ class StravaSyncView(APIView):
                 {"error": "Verbindungsfehler zu Strava"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
-        logger.debug(f"DEBUG: Strava Athlete Response Type: {type(athlete_data)}")
-        logger.debug(f"DEBUG: Strava Athlete Response Content: {athlete_data}")
 
         athlete_data = response.json()
+        logger.debug(f"DEBUG: Strava Athlete Response Type: {type(athlete_data)}")
+        logger.debug(f"DEBUG: Strava Athlete Response Content: {athlete_data}")
         if isinstance(athlete_data, list):
             athlete_data = athlete_data[0] if athlete_data else {}
         bikes_data = athlete_data.get("bikes", [])
