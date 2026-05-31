@@ -43,11 +43,19 @@ class BikeListView(AthleteMixin, generics.ListCreateAPIView):
     """
 
     def get_queryset(self):
-        logging.debug(f"Fetching bikes for athlete: {self.get_athlete()}")
-        logger.debug(f" Bikes: {Bike.objects.filter(athlete=self.get_athlete())}")
-        return Bike.objects.filter(athlete=self.get_athlete()).prefetch_related(
-            "slots__template", "slots__components", "rides"
-        )
+        profile = self.get_athlete()
+        logger.debug(f"DEBUG: Suche Fahrräder für Profile ID: {profile.id} (Strava-ID: {profile.strava_athlete_id})")
+        
+        all_bikes = Bike.objects.all()
+        for b in all_bikes:
+            logger.debug(f"DEBUG: Bike gefunden: {b.name}, verknüpft mit Profile ID: {getattr(b, 'athlete_id', 'None')}")
+            
+        return Bike.objects.filter(athlete=profile).prefetch_related("slots__template", "slots__components", "rides")
+        # logging.debug(f"Fetching bikes for athlete: {self.get_athlete()}")
+        # logger.debug(f" Bikes: {Bike.objects.filter(athlete=self.get_athlete())}")
+        # return Bike.objects.filter(athlete=self.get_athlete()).prefetch_related(
+        #     "slots__template", "slots__components", "rides"
+        # )
 
     def get_serializer_class(self):
         return BikeSerializer if self.request.method == "POST" else BikeListSerializer
