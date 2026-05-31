@@ -10,11 +10,16 @@ from shapely.geometry import LineString as ShapelyLineString
 from django.contrib.gis.geos import LineString as DjangoLineString, Point
 
 from ..models import Ride, RideStream
-from .utils import find_hourly_index, calculate_headwind, calculate_heading, get_filtered_weather
+from .utils import (
+    find_hourly_index,
+    calculate_headwind,
+    calculate_heading,
+    get_filtered_weather,
+)
 
 logger = logging.getLogger(__name__)
 
-REQUEST_TIMEOUT = 10  
+REQUEST_TIMEOUT = 10
 
 
 class StravaImportService:
@@ -23,7 +28,7 @@ class StravaImportService:
         """
         Wandelt Strava-JSON in ein Ride-Objekt um und speichert es in PostGIS.
         """
-        access_token= profile.access_token
+        access_token = profile.access_token
         polyline_str = activity_data.get("map", {}).get("summary_polyline")
         start_date = activity_data.get("start_date_local", "").split("T")[0]
         start_latlng = activity_data.get("start_latlng")
@@ -58,7 +63,9 @@ class StravaImportService:
                 ride.strava_id, access_token
             )
         except requests.exceptions.RequestException as e:
-            logger.error("Stream-Abruf fehlgeschlagen für Ride %s: %s", ride.strava_id, e)
+            logger.error(
+                "Stream-Abruf fehlgeschlagen für Ride %s: %s", ride.strava_id, e
+            )
             stream_data = None
 
         if start_latlng and start_date:
@@ -96,7 +103,9 @@ class StravaStreamService:
         params = {"keys": "latlng,time", "key_by_type": "true"}
         headers = {"Authorization": f"Bearer {access_token}"}
 
-        response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+        response = requests.get(
+            url, headers=headers, params=params, timeout=REQUEST_TIMEOUT
+        )
         response.raise_for_status()
         return response.json()
 
@@ -160,6 +169,3 @@ class WeatherService:
             latlngs[0][0], latlngs[0][1], latlngs[-1][0], latlngs[-1][1]
         )
         return calculate_headwind(heading, w_dir, w_speed)
-
-
-

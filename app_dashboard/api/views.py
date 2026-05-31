@@ -18,10 +18,7 @@ from ..models import Ride
 from app_auth.api.utils import get_valid_access_token
 from app_auth.mixins import CsrfExemptSessionAuthentication
 
-
 logger = logging.getLogger(__name__)
-
-
 
 
 class StravaBikesView(APIView):
@@ -44,7 +41,9 @@ class StravaBikesView(APIView):
             )
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            logger.error("Strava-Athlete-Abruf fehlgeschlagen (athlete %s): %s", athlete_id, e)
+            logger.error(
+                "Strava-Athlete-Abruf fehlgeschlagen (athlete %s): %s", athlete_id, e
+            )
             return Response(
                 {"error": "Verbindungsfehler zu Strava"},
                 status=status.HTTP_502_BAD_GATEWAY,
@@ -85,7 +84,9 @@ class StravaSyncView(APIView):
         for activity in activities:
             StravaImportService.sync_activity_to_db(activity, profile)
 
-        return Response({"status": "Erfolgreich synchronisiert", "count": len(activities)})
+        return Response(
+            {"status": "Erfolgreich synchronisiert", "count": len(activities)}
+        )
 
 
 class ActivityListView(APIView):
@@ -104,8 +105,10 @@ class ActivityDetailView(APIView):
         ride = get_object_or_404(Ride, id=id)
         geo_json = json.loads(serialize("geojson", [ride], geometry_field="track"))
 
-        return Response({
-            "name": ride.name,
-            "geo_json_full": geo_json,
-            "weather_timeline": ride.weather_data or {},
-        })
+        return Response(
+            {
+                "name": ride.name,
+                "geo_json_full": geo_json,
+                "weather_timeline": ride.weather_data or {},
+            }
+        )

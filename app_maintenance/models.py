@@ -50,15 +50,15 @@ class Bike(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.get_bike_type_display()})"
-    
+
     @property
     def total_distance_km(self) -> float | None:
         from django.db.models import Sum
+
         result = self.rides.aggregate(total=Sum("distance"))["total"]
         if result is None:
             return None
         return result / 1000  # Strava liefert Meter
-
 
 
 class ComponentTemplate(models.Model):
@@ -74,9 +74,7 @@ class ComponentTemplate(models.Model):
         help_text="Liste von BikeType-Keys. Leer = gilt für alle.",
     )
     # Verschleißgrenzen — alle optional, Frontend zeigt Warnung wenn erreicht
-    warn_km = models.FloatField(
-        null=True, blank=True, help_text="Warnung nach X km"
-    )
+    warn_km = models.FloatField(null=True, blank=True, help_text="Warnung nach X km")
     warn_hours = models.FloatField(
         null=True, blank=True, help_text="Warnung nach X Fahrstunden"
     )
@@ -194,9 +192,9 @@ class Component(models.Model):
     def clean(self):
         """Stellt sicher dass pro Slot maximal eine Komponente montiert ist."""
         if self.is_mounted:
-            qs = Component.objects.filter(
-                slot=self.slot, is_mounted=True
-            ).exclude(pk=self.pk)
+            qs = Component.objects.filter(slot=self.slot, is_mounted=True).exclude(
+                pk=self.pk
+            )
             if qs.exists():
                 raise ValidationError(
                     f"Im Slot '{self.slot.display_name}' ist bereits eine "

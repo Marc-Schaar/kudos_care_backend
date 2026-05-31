@@ -11,9 +11,7 @@ class StravaProfile(models.Model):
 
     access_token = models.CharField(max_length=255)
     refresh_token = models.CharField(max_length=255)
-    expires_at = (
-        models.IntegerField()
-    ) 
+    expires_at = models.IntegerField()
 
     def __str__(self):
         return f"{self.firstname} {self.lastname} (Strava ID: {self.strava_athlete_id})"

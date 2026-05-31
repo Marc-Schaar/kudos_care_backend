@@ -19,7 +19,13 @@ class ComponentTemplateAdmin(admin.ModelAdmin):
 class ComponentInline(admin.TabularInline):
     model = Component
     extra = 0
-    fields = ["brand", "model_name", "is_mounted", "installed_at", "distance_at_install"]
+    fields = [
+        "brand",
+        "model_name",
+        "is_mounted",
+        "installed_at",
+        "distance_at_install",
+    ]
 
 
 @admin.register(ComponentSlot)

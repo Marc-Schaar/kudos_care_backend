@@ -16,7 +16,6 @@ from app_auth.mixins import CsrfExemptSessionAuthentication
 from .utils import sync_bikes_from_strava
 
 
-
 class StravaAuthCallbackView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = [CsrfExemptSessionAuthentication]
@@ -27,7 +26,6 @@ class StravaAuthCallbackView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         code = serializer.validated_data["code"]
-
 
         strava_url = "https://www.strava.com/oauth/token"
         payload = {
@@ -118,5 +116,3 @@ class CurrentUserView(APIView):
         return Response(
             {"athlete_id": profile.strava_athlete_id, "firstname": profile.firstname}
         )
-
-

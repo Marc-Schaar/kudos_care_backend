@@ -2,6 +2,7 @@ from django.contrib.gis.db import models
 from app_auth.models import StravaProfile
 from app_maintenance.models import Bike
 
+
 class Ride(models.Model):
     strava_id = models.BigIntegerField(unique=True)
     name = models.CharField(max_length=255)
@@ -13,12 +14,16 @@ class Ride(models.Model):
     elapsed_time = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     athlete = models.ForeignKey(
-        StravaProfile, on_delete=models.CASCADE, 
-        null=True, blank=True, related_name='rides'
+        StravaProfile,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="rides",
     )
 
     bike = models.ForeignKey(
-        Bike, on_delete=models.SET_NULL,
+        Bike,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name="rides",
