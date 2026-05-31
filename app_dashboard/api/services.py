@@ -54,7 +54,7 @@ class StravaImportService:
                 "distance": activity_data.get("distance"),
                 "start_date": activity_data.get("start_date_local"),
                 "elapsed_time": activity_data.get("elapsed_time"),
-                "athlete": profile.id,
+                "athlete": profile,
             },
         )
 
