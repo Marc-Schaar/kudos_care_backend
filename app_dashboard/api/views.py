@@ -94,7 +94,10 @@ class ActivityListView(APIView):
 
     def get(self, request):
         athlete_id = request.session.get("strava_athlete_id")
+        print(f"Fetching activities for athlete_id: {athlete_id}")
+    
         rides = Ride.objects.filter(athlete__strava_athlete_id=athlete_id)
+        print(f"Found rides for athlete_id {athlete_id}: {len(rides)}")
         return Response(list(rides))
 
 
