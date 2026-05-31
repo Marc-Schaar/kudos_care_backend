@@ -12,9 +12,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from app_auth.models import StravaProfile
 from .services import StravaImportService
 from ..models import Ride
+from .serializers import RideSerializer
+from app_auth.models import StravaProfile
 from app_auth.api.utils import get_valid_access_token
 from app_auth.mixins import CsrfExemptSessionAuthentication
 
@@ -69,7 +70,8 @@ class ActivityListView(APIView):
         rides = Ride.objects.filter(athlete__strava_athlete_id=athlete_id)
         logger.debug(f"Found rides for athlete_id {athlete_id}: {len(rides)}")
         logger.debug(f"All rides: {Ride.objects.all()}")
-        return Response(list(rides))
+        serializer = RideSerializer(rides, many=True)
+        return Response(serializer.data)
 
 
 class ActivityDetailView(APIView):
