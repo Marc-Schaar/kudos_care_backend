@@ -22,36 +22,36 @@ import logging
 logger = logging.getLogger('my_app_debug')
 
 
-class StravaBikesView(APIView):
-    authentication_classes = [SessionAuthentication, BasicAuthentication]
-    permission_classes = [IsAuthenticated]
+# class StravaBikesView(APIView):
+#     authentication_classes = [SessionAuthentication, BasicAuthentication]
+#     permission_classes = [IsAuthenticated]
 
-    def get(self, request, athlete_id):
-        if str(request.session.get("strava_athlete_id")) != str(athlete_id):
-            return Response(
-                {"error": "Zugriff verweigert"}, status=status.HTTP_403_FORBIDDEN
-            )
+#     def get(self, request, athlete_id):
+#         if str(request.session.get("strava_athlete_id")) != str(athlete_id):
+#             return Response(
+#                 {"error": "Zugriff verweigert"}, status=status.HTTP_403_FORBIDDEN
+#             )
 
-        profile = get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
-        token = get_valid_access_token(profile)
-        try:
-            response = requests.get(
-                "https://www.strava.com/api/v3/athlete",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10,
-            )
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            logger.error(
-                "Strava-Athlete-Abruf fehlgeschlagen (athlete %s): %s", athlete_id, e
-            )
-            return Response(
-                {"error": "Verbindungsfehler zu Strava"},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+#         profile = get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
+#         token = get_valid_access_token(profile)
+#         try:
+#             response = requests.get(
+#                 "https://www.strava.com/api/v3/athlete",
+#                 headers={"Authorization": f"Bearer {token}"},
+#                 timeout=10,
+#             )
+#             response.raise_for_status()
+#         except requests.exceptions.RequestException as e:
+#             logger.error(
+#                 "Strava-Athlete-Abruf fehlgeschlagen (athlete %s): %s", athlete_id, e
+#             )
+#             return Response(
+#                 {"error": "Verbindungsfehler zu Strava"},
+#                 status=status.HTTP_502_BAD_GATEWAY,
+#             )
 
-        bikes = response.json().get("bikes", [])
-        return Response({"athlete_id": athlete_id, "bikes": bikes})
+#         bikes = response.json().get("bikes", [])
+#         return Response({"athlete_id": athlete_id, "bikes": bikes})
 
 
 class StravaSyncView(APIView):
