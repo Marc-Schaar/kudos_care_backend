@@ -1,5 +1,5 @@
 from django.contrib.gis.db import models
-
+from app_auth.models import StravaProfile
 
 class Ride(models.Model):
     strava_id = models.BigIntegerField(unique=True)
@@ -11,6 +11,10 @@ class Ride(models.Model):
     start_date = models.DateTimeField(null=True, blank=True)
     elapsed_time = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    athlete = models.ForeignKey(
+        StravaProfile, on_delete=models.CASCADE, 
+        null=True, blank=True, related_name='rides'
+    )
 
     def __str__(self):
         return self.name

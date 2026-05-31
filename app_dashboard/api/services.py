@@ -19,10 +19,11 @@ REQUEST_TIMEOUT = 10
 
 class StravaImportService:
     @staticmethod
-    def sync_activity_to_db(activity_data, access_token):
+    def sync_activity_to_db(activity_data, profile):
         """
         Wandelt Strava-JSON in ein Ride-Objekt um und speichert es in PostGIS.
         """
+        access_token= profile.access_token
         polyline_str = activity_data.get("map", {}).get("summary_polyline")
         start_date = activity_data.get("start_date_local", "").split("T")[0]
         start_latlng = activity_data.get("start_latlng")
@@ -48,6 +49,7 @@ class StravaImportService:
                 "distance": activity_data.get("distance"),
                 "start_date": activity_data.get("start_date_local"),
                 "elapsed_time": activity_data.get("elapsed_time"),
+                "athlete": profile.id,
             },
         )
 

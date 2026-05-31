@@ -4,6 +4,7 @@ import logging
 import requests
 from django.core.serializers import serialize
 from django.shortcuts import get_object_or_404
+from django.conf import settings
 
 from rest_framework import status
 from rest_framework.authentication import BasicAuthentication, SessionAuthentication
@@ -14,14 +15,13 @@ from rest_framework.views import APIView
 from app_auth.models import StravaProfile
 from .services import StravaImportService
 from ..models import Ride
+from app_auth.api.utils import get_valid_access_token
+from app_auth.mixins import CsrfExemptSessionAuthentication
+
 
 logger = logging.getLogger(__name__)
 
-STRAVA_SYNC_PAGE_SIZE = 2  # Anzahl Aktivitäten pro API-Abruf
 
-class CsrfExemptSessionAuthentication(SessionAuthentication):
-    def enforce_csrf(self, request):
-        return
 
 
 class StravaBikesView(APIView):
@@ -35,11 +35,11 @@ class StravaBikesView(APIView):
             )
 
         profile = get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
-
+        token = get_valid_access_token(profile)
         try:
             response = requests.get(
                 "https://www.strava.com/api/v3/athlete",
-                headers={"Authorization": f"Bearer {profile.access_token}"},
+                headers={"Authorization": f"Bearer {token}"},
                 timeout=10,
             )
             response.raise_for_status()
@@ -70,7 +70,7 @@ class StravaSyncView(APIView):
             response = requests.get(
                 "https://www.strava.com/api/v3/athlete/activities",
                 headers={"Authorization": f"Bearer {profile.access_token}"},
-                params={"per_page": STRAVA_SYNC_PAGE_SIZE},
+                params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE},
                 timeout=10,
             )
             response.raise_for_status()
@@ -83,7 +83,7 @@ class StravaSyncView(APIView):
 
         activities = response.json()
         for activity in activities:
-            StravaImportService.sync_activity_to_db(activity, access_token=profile.access_token)
+            StravaImportService.sync_activity_to_db(activity, profile)
 
         return Response({"status": "Erfolgreich synchronisiert", "count": len(activities)})
 
@@ -92,11 +92,8 @@ class ActivityListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        rides = (
-            Ride.objects.all()
-            .values("id", "strava_id", "name", "distance", "start_date")
-            .order_by("-start_date")
-        )
+        athlete_id = request.session.get("strava_athlete_id")
+        rides = Ride.objects.filter(athlete__strava_athlete_id=athlete_id)
         return Response(list(rides))
 
 

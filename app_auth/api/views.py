@@ -1,6 +1,4 @@
 import requests
-from django.views.decorators.csrf import csrf_exempt
-from django.utils.decorators import method_decorator
 from django.conf import settings
 from django.contrib.auth import login, logout
 from django.contrib.auth.models import User
@@ -14,12 +12,9 @@ from rest_framework.views import APIView
 from app_auth.models import StravaProfile
 from .serializers import StravaAuthSerializer
 
-from rest_framework.authentication import SessionAuthentication
+from app_auth.mixins import CsrfExemptSessionAuthentication
 
 
-class CsrfExemptSessionAuthentication(SessionAuthentication):
-    def enforce_csrf(self, request):
-        return
 
 
 class StravaAuthCallbackView(APIView):
@@ -74,8 +69,6 @@ class StravaAuthCallbackView(APIView):
                 )
                 profile.user = user
                 profile.save()
-
-            athlete_id = profile.strava_athlete_id
 
             login(request, profile.user)
 

@@ -6,11 +6,9 @@ from app_dashboard.api.services import StravaImportService
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def process_strava_webhook(self, data):
-    print(f"DEBUG: Empfangener Payload: {data}")
     activity_id = data.get('object_id')
     athlete_id = data.get('owner_id')
-    event_type = data.get('aspect_type')
-    print(f"DEBUG: Verarbeiteter Payload - activity_id: {activity_id}, athlete_id: {athlete_id}, event_type: {event_type}")
+    event_type = data.get('aspect_type')  
     if event_type == 'delete':
         deleted_count, _ = Ride.objects.filter(
             strava_id=activity_id, 
@@ -23,10 +21,6 @@ def process_strava_webhook(self, data):
 
     if event_type == 'create':
         try:
-            activity_id = data.get('object_id')
-            athlete_id = data.get('owner_id')
-            event_type = data.get('aspect_type')  
-
             if not activity_id or event_type != 'create':
                 return "Kein Import nötig"
 
