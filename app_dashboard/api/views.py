@@ -42,10 +42,10 @@ class StravaSyncView(APIView):
             resp.raise_for_status()
             athlete_profile_data = resp.json() 
             
-            for b in athlete_profile_data.get("bikes", []):
+            for bike_info in athlete_profile_data.get("bikes", []):
                 Bike.objects.update_or_create(
-                    strava_id=b["id"],
-                    defaults={"name": b.get("name"), "athlete": profile}
+                    strava_bike_id=bike_info["id"],
+                    defaults={"name": bike_info.get("name"), "athlete": profile}
                 )
         except Exception as e:
             logger.error("Bike-Sync fehlgeschlagen: %s", e)
