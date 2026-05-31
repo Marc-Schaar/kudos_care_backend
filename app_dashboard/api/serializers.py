@@ -7,7 +7,6 @@ class StravaAuthSerializer(serializers.Serializer):
 
 
 
-
 class RideSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ride

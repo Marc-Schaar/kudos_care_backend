@@ -18,6 +18,8 @@ from .serializers import (
     ComponentSlotListSerializer,
     ComponentSerializer,
 )
+import logging 
+logger = logging.getLogger('my_app_debug')
 
 
 class AthleteMixin:
@@ -30,6 +32,7 @@ class AthleteMixin:
 
     def get_athlete(self) -> StravaProfile:
         athlete_id = self.request.session.get("strava_athlete_id")
+        logging.debug(f"Getting athlete for athlete_id: {athlete_id}")
         return get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
 
 
@@ -40,6 +43,8 @@ class BikeListView(AthleteMixin, generics.ListCreateAPIView):
     """
 
     def get_queryset(self):
+        logging.debug(f"Fetching bikes for athlete: {self.get_athlete()}")
+        logger.debug(f" Bikes: {Bike.objects.filter(athlete=self.get_athlete())}")
         return Bike.objects.filter(athlete=self.get_athlete()).prefetch_related(
             "slots__template", "slots__components", "rides"
         )
