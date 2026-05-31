@@ -18,6 +18,7 @@ from ..models import Ride
 from app_auth.api.utils import get_valid_access_token
 from app_auth.mixins import CsrfExemptSessionAuthentication
 
+import logging
 logger = logging.getLogger(__name__)
 
 
@@ -94,10 +95,10 @@ class ActivityListView(APIView):
 
     def get(self, request):
         athlete_id = request.session.get("strava_athlete_id")
-        print(f"Fetching activities for athlete_id: {athlete_id}")
+        logger.debug(f"Fetching activities for athlete_id: {athlete_id}")
     
         rides = Ride.objects.filter(athlete__strava_athlete_id=athlete_id)
-        print(f"Found rides for athlete_id {athlete_id}: {len(rides)}")
+        logger.debug(f"Found rides for athlete_id {athlete_id}: {len(rides)}")
         return Response(list(rides))
 
 
