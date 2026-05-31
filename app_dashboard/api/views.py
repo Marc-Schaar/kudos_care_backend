@@ -37,45 +37,32 @@ class StravaSyncView(APIView):
         )
 
         try:
-            response = requests.get(
-                "https://www.strava.com/api/v3/athlete/activities",
-                headers={"Authorization": f"Bearer {profile.access_token}"},
-                params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE},
-                timeout=10,
-            )
+            resp = requests.get("https://www.strava.com/api/v3/athlete", 
+                                headers={"Authorization": f"Bearer {profile.access_token}"}, timeout=10)
+            resp.raise_for_status()
+            athlete_profile_data = resp.json() 
             
-            response.raise_for_status()
+            for b in athlete_profile_data.get("bikes", []):
+                Bike.objects.update_or_create(
+                    strava_id=b["id"],
+                    defaults={"name": b.get("name"), "athlete": profile}
+                )
+        except Exception as e:
+            logger.error("Bike-Sync fehlgeschlagen: %s", e)
+
+        try:
+            resp = requests.get("https://www.strava.com/api/v3/athlete/activities", 
+                                headers={"Authorization": f"Bearer {profile.access_token}"},
+                                params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE}, timeout=10)
+            resp.raise_for_status()
+            activities = resp.json()
         except requests.exceptions.RequestException as e:
-            logger.error("Strava-Sync fehlgeschlagen: %s", e)
-            return Response(
-                {"error": "Verbindungsfehler zu Strava"},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+            return Response({"error": "Verbindungsfehler"}, status=502)
 
-        athlete_data = response.json()
-        logger.debug(f"DEBUG: Strava Athlete Response Type: {type(athlete_data)}")
-        logger.debug(f"DEBUG: Strava Athlete Response Content: {athlete_data}")
-        if isinstance(athlete_data, list):
-            athlete_data = athlete_data[0] if athlete_data else {}
-        bikes_data = athlete_data.get("bikes", [])
-
-
-        for bike_info in bikes_data:
-            Bike.objects.update_or_create(
-                strava_id=bike_info["id"], 
-                defaults={
-                    "name": bike_info.get("name"),
-                    "athlete": profile,
-                    # weitere Felder wie 'frame_type' falls vorhanden
-                },
-            )
-        activities = response.json()
         for activity in activities:
             StravaImportService.sync_activity_to_db(activity, profile)
 
-        return Response(
-            {"status": "Erfolgreich synchronisiert", "count": len(activities)}
-        )
+        return Response({"status": "Erfolgreich", "count": len(activities)})
 
 
 class ActivityListView(APIView):
