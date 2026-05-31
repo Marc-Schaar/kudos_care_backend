@@ -1,24 +1,20 @@
 import json
 import logging
 
-import requests
+
 from django.core.serializers import serialize
 from django.shortcuts import get_object_or_404
-from django.conf import settings
 
-from rest_framework import status
-from rest_framework.authentication import BasicAuthentication, SessionAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework import status
 
-from .services import StravaImportService
+from .services import StravaSyncService
 from ..models import Ride
 from .serializers import RideSerializer
 from app_auth.models import StravaProfile
-from app_auth.api.utils import get_valid_access_token
 from app_auth.mixins import CsrfExemptSessionAuthentication
-from app_maintenance.models import Bike
 import logging
 logger = logging.getLogger('my_app_debug')
 
@@ -37,32 +33,13 @@ class StravaSyncView(APIView):
         )
 
         try:
-            resp = requests.get("https://www.strava.com/api/v3/athlete", 
-                                headers={"Authorization": f"Bearer {profile.access_token}"}, timeout=10)
-            resp.raise_for_status()
-            athlete_profile_data = resp.json() 
-            
-            for bike_info in athlete_profile_data.get("bikes", []):
-                Bike.objects.update_or_create(
-                    strava_bike_id=bike_info["id"],
-                    defaults={"name": bike_info.get("name"), "athlete": profile}
-                )
+            count = StravaSyncService.full_sync(profile)
+            return Response({"status": "Erfolgreich", "count": count})
         except Exception as e:
-            logger.error("Bike-Sync fehlgeschlagen: %s", e)
-
-        try:
-            resp = requests.get("https://www.strava.com/api/v3/athlete/activities", 
-                                headers={"Authorization": f"Bearer {profile.access_token}"},
-                                params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE}, timeout=10)
-            resp.raise_for_status()
-            activities = resp.json()
-        except requests.exceptions.RequestException as e:
-            return Response({"error": "Verbindungsfehler"}, status=502)
-
-        for activity in activities:
-            StravaImportService.sync_activity_to_db(activity, profile)
-
-        return Response({"status": "Erfolgreich", "count": len(activities)})
+            return Response(
+                {"error": "Synchronisation fehlgeschlagen"}, 
+                status=status.HTTP_502_BAD_GATEWAY
+            )
 
 
 class ActivityListView(APIView):

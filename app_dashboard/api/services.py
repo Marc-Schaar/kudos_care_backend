@@ -1,12 +1,9 @@
 import logging
-import math
-from datetime import datetime, timedelta, timezone
-
-import dateutil.parser
 import polyline
 import requests
 from shapely.geometry import LineString as ShapelyLineString
 
+from django.conf import settings
 from django.contrib.gis.geos import LineString as DjangoLineString, Point
 
 from ..models import Ride, RideStream
@@ -16,14 +13,67 @@ from .utils import (
     calculate_heading,
     get_filtered_weather,
 )
+from app_auth.models import StravaProfile
+from app_maintenance.models import Bike
 
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 10
 
 
-class StravaImportService:
+class StravaSyncService:
     @staticmethod
+    def sync_bikes(profile: StravaProfile):
+        """Holt die Bikes vom /athlete Endpunkt und synchronisiert sie."""
+        try:
+            resp = requests.get(
+                "https://www.strava.com/api/v3/athlete",
+                headers={"Authorization": f"Bearer {profile.access_token}"},
+                timeout=10
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            
+            for bike_info in data.get("bikes", []):
+                Bike.objects.update_or_create(
+                    strava_bike_id=bike_info["id"],
+                    defaults={"name": bike_info.get("name"), "athlete": profile}
+                )
+            logger.info(f"Bikes für {profile.strava_athlete_id} erfolgreich synchronisiert.")
+        except Exception as e:
+            logger.error(f"Fehler beim Bike-Sync für {profile.strava_athlete_id}: {e}")
+            raise
+
+    @staticmethod
+    def sync_activities(profile: StravaProfile):
+        """Holt neue Aktivitäten und synchronisiert sie."""
+        try:
+            resp = requests.get(
+                "https://www.strava.com/api/v3/athlete/activities",
+                headers={"Authorization": f"Bearer {profile.access_token}"},
+                params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE},
+                timeout=10
+            )
+            resp.raise_for_status()
+            activities = resp.json()
+            
+            for activity in activities:
+                StravaImportService.sync_activity_to_db(activity, profile)
+            
+            return len(activities)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Fehler beim Activity-Sync: {e}")
+            raise
+
+    @classmethod
+    def full_sync(cls, profile: StravaProfile):
+        """Kombinierter Sync-Prozess."""
+        cls.sync_bikes(profile)
+        count = cls.sync_activities(profile)
+        return count
+
+
+class StravaImportService:
     def sync_activity_to_db(activity_data, profile):
         """
         Wandelt Strava-JSON in ein Ride-Objekt um und speichert es in PostGIS.
