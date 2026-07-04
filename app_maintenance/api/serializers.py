@@ -122,7 +122,7 @@ class ComponentSerializer(serializers.ModelSerializer):
             "warn_status_days",
             "warn_status_overall",
         ]
-        read_only_fields = ["created_at", "updated_at"]
+        read_only_fields = ["slot", "created_at", "updated_at"]
 
     def _get_wear(self, obj: Component) -> dict:
         """Wear-Dict einmal berechnen und im Serializer-Context cachen."""
@@ -198,7 +198,7 @@ class ComponentSlotSerializer(serializers.ModelSerializer):
             "mounted_component",
             "components",
         ]
-        read_only_fields = ["display_name"]
+        read_only_fields = ["bike", "display_name"]
 
     def get_mounted_component(self, obj: ComponentSlot):
         comp = obj.mounted_component
