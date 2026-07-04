@@ -28,6 +28,17 @@ class StravaAuthCallbackView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         code = serializer.validated_data["code"]
+        scope = serializer.validated_data.get("scope", "")
+        granted_scopes = {s.strip() for s in scope.split(",") if s.strip()}
+
+        if scope and "activity:read_all" not in granted_scopes:
+            return Response(
+                {
+                    "error": "scope_insufficient",
+                    "message": "Zugriff auf private Aktivitäten wurde nicht erlaubt.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         strava_url = "https://www.strava.com/oauth/token"
         payload = {
