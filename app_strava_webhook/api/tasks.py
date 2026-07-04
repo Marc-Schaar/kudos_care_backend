@@ -21,11 +21,15 @@ def process_strava_webhook(self, data):
         return f"Aktivität {activity_id} nicht gefunden, nichts zu löschen."
 
     if event_type == "create":
-        try:
-            if not activity_id or event_type != "create":
-                return "Kein Import nötig"
+        if not activity_id or event_type != "create":
+            return "Kein Import nötig"
 
+        try:
             profile = StravaProfile.objects.get(strava_athlete_id=athlete_id)
+        except StravaProfile.DoesNotExist:
+            return f"Kein StravaProfile für Athlet {athlete_id} gefunden, kein Import möglich."
+
+        try:
             access_token = get_valid_access_token(profile)
 
             response = requests.get(
@@ -43,6 +47,9 @@ def process_strava_webhook(self, data):
                     headers={"Authorization": f"Bearer {access_token}"},
                     timeout=10,
                 )
+
+            if response.status_code == 404:
+                return f"Aktivität {activity_id} bei Strava nicht gefunden, kein Import möglich."
 
             response.raise_for_status()
 
