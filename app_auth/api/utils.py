@@ -16,8 +16,8 @@ def sync_bikes_from_strava(athlete_data, profile):
         )
 
 
-def get_valid_access_token(profile):
-    if profile.expires_at < time.time():
+def get_valid_access_token(profile, force=False):
+    if force or profile.expires_at < time.time():
         response = requests.post(
             "https://www.strava.com/oauth/token",
             data={
@@ -27,6 +27,7 @@ def get_valid_access_token(profile):
                 "refresh_token": profile.refresh_token,
             },
         )
+        response.raise_for_status()
         data = response.json()
         profile.access_token = data["access_token"]
         profile.refresh_token = data["refresh_token"]
