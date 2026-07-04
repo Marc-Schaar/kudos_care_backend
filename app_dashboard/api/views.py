@@ -56,12 +56,17 @@ class ActivityDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, id):
-        ride = get_object_or_404(Ride, id=id)
+        athlete_id = request.session.get("strava_athlete_id")
+        ride = get_object_or_404(Ride, id=id, athlete__strava_athlete_id=athlete_id)
         geo_json = json.loads(serialize("geojson", [ride], geometry_field="track"))
 
         return Response(
             {
                 "name": ride.name,
+                "distance_km": round(ride.distance / 1000, 1) if ride.distance else None,
+                "elapsed_time": ride.elapsed_time,
+                "start_date": ride.start_date,
+                "bike_name": ride.bike.name if ride.bike else None,
                 "geo_json_full": geo_json,
                 "weather_timeline": ride.weather_data or {},
             }
