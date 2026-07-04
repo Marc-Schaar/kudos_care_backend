@@ -3,6 +3,8 @@ from django.conf import settings
 from django.contrib.auth import login, logout
 from django.contrib.auth.models import User
 from django.shortcuts import get_object_or_404
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import ensure_csrf_cookie
 
 from rest_framework import status
 from rest_framework.response import Response
@@ -103,6 +105,7 @@ class LogoutView(APIView):
 
 
 class CurrentUserView(APIView):
+    @method_decorator(ensure_csrf_cookie)
     def get(self, request):
         athlete_id = request.session.get("strava_athlete_id")
 

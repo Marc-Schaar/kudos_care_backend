@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(netstat -ano)",
+      "Bash(python manage.py runserver 8000)",
+      "Bash(disown)",
+      "Read(//tmp/**)",
+      "Bash(rm -f /tmp/cookies2.txt)",
+      "Bash(curl -s -c /tmp/cookies2.txt -o /dev/null -w \"status=%{http_code}\\\\n\" \"http://localhost:8000/api/strava/me/\" -H \"Cookie: sessionid=gsa3u7eslk5uvhaesh7lp1yufbzecdps\")",
+      "Bash(python manage.py shell -c ' *)",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"CommandLine LIKE '%runserver 8000%'\\\\\" | Select-Object ProcessId\")"
+    ]
+  }
+}
