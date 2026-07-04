@@ -1,7 +1,6 @@
 from celery import shared_task
-import requests
 from app_auth.models import StravaProfile
-from app_auth.api.utils import get_valid_access_token
+from app_auth.api.utils import strava_get
 from app_dashboard.models import Ride
 from app_dashboard.api.services import StravaImportService
 
@@ -30,23 +29,11 @@ def process_strava_webhook(self, data):
             return f"Kein StravaProfile für Athlet {athlete_id} gefunden, kein Import möglich."
 
         try:
-            access_token = get_valid_access_token(profile)
-
-            response = requests.get(
+            response = strava_get(
+                profile,
                 f"https://www.strava.com/api/v3/activities/{activity_id}",
-                headers={"Authorization": f"Bearer {access_token}"},
                 timeout=10,
             )
-
-            if response.status_code == 401:
-                # Lokaler expires_at war noch gültig, Strava hat den Token
-                # aber bereits invalidiert - erzwungenen Refresh versuchen.
-                access_token = get_valid_access_token(profile, force=True)
-                response = requests.get(
-                    f"https://www.strava.com/api/v3/activities/{activity_id}",
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    timeout=10,
-                )
 
             if response.status_code == 404:
                 return f"Aktivität {activity_id} bei Strava nicht gefunden, kein Import möglich."

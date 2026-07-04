@@ -14,7 +14,7 @@ from .utils import (
     get_filtered_weather,
 )
 from app_auth.models import StravaProfile
-from app_auth.api.utils import get_valid_access_token
+from app_auth.api.utils import strava_get
 from app_maintenance.models import Bike
 
 logger = logging.getLogger(__name__)
@@ -27,11 +27,8 @@ class StravaSyncService:
     def sync_bikes(profile: StravaProfile):
         """Holt die Bikes vom /athlete Endpunkt und synchronisiert sie."""
         try:
-            access_token = get_valid_access_token(profile)
-            resp = requests.get(
-                "https://www.strava.com/api/v3/athlete",
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=10
+            resp = strava_get(
+                profile, "https://www.strava.com/api/v3/athlete", timeout=REQUEST_TIMEOUT
             )
             resp.raise_for_status()
             data = resp.json()
@@ -50,12 +47,11 @@ class StravaSyncService:
     def sync_activities(profile: StravaProfile):
         """Holt neue Aktivitäten und synchronisiert sie."""
         try:
-            access_token = get_valid_access_token(profile)
-            resp = requests.get(
+            resp = strava_get(
+                profile,
                 "https://www.strava.com/api/v3/athlete/activities",
-                headers={"Authorization": f"Bearer {access_token}"},
                 params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE},
-                timeout=10
+                timeout=REQUEST_TIMEOUT,
             )
             resp.raise_for_status()
             activities = resp.json()
@@ -86,7 +82,6 @@ class StravaImportService:
         if Ride.objects.filter(strava_id=strava_id).exists():
             return None
         
-        access_token = get_valid_access_token(profile)
         polyline_str = activity_data.get("map", {}).get("summary_polyline")
         start_date = activity_data.get("start_date_local", "").split("T")[0]
         start_latlng = activity_data.get("start_latlng")
@@ -118,7 +113,7 @@ class StravaImportService:
 
         try:
             stream_data = StravaStreamService.fetch_activity_streams(
-                ride.strava_id, access_token
+                ride.strava_id, profile
             )
         except requests.exceptions.RequestException as e:
             logger.error(
@@ -156,14 +151,11 @@ class StravaImportService:
 
 class StravaStreamService:
     @staticmethod
-    def fetch_activity_streams(activity_id, access_token):
+    def fetch_activity_streams(activity_id, profile):
         url = f"https://www.strava.com/api/v3/activities/{activity_id}/streams"
         params = {"keys": "latlng,time", "key_by_type": "true"}
-        headers = {"Authorization": f"Bearer {access_token}"}
 
-        response = requests.get(
-            url, headers=headers, params=params, timeout=REQUEST_TIMEOUT
-        )
+        response = strava_get(profile, url, params=params, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         return response.json()
 

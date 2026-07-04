@@ -1,6 +1,7 @@
 import json
 import logging
 
+import requests
 
 from django.core.serializers import serialize
 from django.shortcuts import get_object_or_404
@@ -35,10 +36,32 @@ class StravaSyncView(APIView):
         try:
             count = StravaSyncService.full_sync(profile)
             return Response({"status": "Erfolgreich", "count": count})
-        except Exception as e:
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else None
+            if status_code == 403:
+                logger.error(
+                    "Strava-Sync für Athlet %s: fehlende Berechtigung (403), Reconnect nötig.",
+                    profile.strava_athlete_id,
+                )
+                return Response(
+                    {"error": "Strava-Zugriff unzureichend. Bitte Strava-Konto neu verbinden."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            logger.exception(
+                "Strava-Sync für Athlet %s fehlgeschlagen (Strava-API-Fehler).",
+                profile.strava_athlete_id,
+            )
             return Response(
-                {"error": "Synchronisation fehlgeschlagen"}, 
-                status=status.HTTP_502_BAD_GATEWAY
+                {"error": "Synchronisation mit Strava fehlgeschlagen"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception:
+            logger.exception(
+                "Strava-Sync für Athlet %s fehlgeschlagen.", profile.strava_athlete_id
+            )
+            return Response(
+                {"error": "Synchronisation fehlgeschlagen"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 

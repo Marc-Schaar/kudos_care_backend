@@ -34,3 +34,29 @@ def get_valid_access_token(profile, force=False):
         profile.expires_at = data["expires_at"]
         profile.save()
     return profile.access_token
+
+
+def strava_get(profile, url, params=None, timeout=10):
+    """
+    GET-Request gegen die Strava-API. Antwortet Strava trotz lokal noch
+    gültigem expires_at mit 401 (Token wurde serverseitig invalidiert), wird
+    der Access-Token einmalig zwangsweise neu geholt und der Request wiederholt.
+    """
+    access_token = get_valid_access_token(profile)
+    response = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        params=params,
+        timeout=timeout,
+    )
+
+    if response.status_code == 401:
+        access_token = get_valid_access_token(profile, force=True)
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            params=params,
+            timeout=timeout,
+        )
+
+    return response
