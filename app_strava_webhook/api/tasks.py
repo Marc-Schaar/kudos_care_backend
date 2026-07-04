@@ -1,6 +1,7 @@
 from celery import shared_task
 import requests
 from app_auth.models import StravaProfile
+from app_auth.api.utils import get_valid_access_token
 from app_dashboard.models import Ride
 from app_dashboard.api.services import StravaImportService
 
@@ -25,17 +26,18 @@ def process_strava_webhook(self, data):
                 return "Kein Import nötig"
 
             profile = StravaProfile.objects.get(strava_athlete_id=athlete_id)
+            access_token = get_valid_access_token(profile)
 
             response = requests.get(
                 f"https://www.strava.com/api/v3/activities/{activity_id}",
-                headers={"Authorization": f"Bearer {profile.access_token}"},
+                headers={"Authorization": f"Bearer {access_token}"},
                 timeout=10,
             )
             response.raise_for_status()
 
             StravaImportService.sync_activity_to_db(
                 response.json(),
-                access_token=profile.access_token,
+                profile,
             )
             return f"Aktivität {activity_id} importiert"
 

@@ -14,6 +14,7 @@ from .utils import (
     get_filtered_weather,
 )
 from app_auth.models import StravaProfile
+from app_auth.api.utils import get_valid_access_token
 from app_maintenance.models import Bike
 
 logger = logging.getLogger(__name__)
@@ -26,9 +27,10 @@ class StravaSyncService:
     def sync_bikes(profile: StravaProfile):
         """Holt die Bikes vom /athlete Endpunkt und synchronisiert sie."""
         try:
+            access_token = get_valid_access_token(profile)
             resp = requests.get(
                 "https://www.strava.com/api/v3/athlete",
-                headers={"Authorization": f"Bearer {profile.access_token}"},
+                headers={"Authorization": f"Bearer {access_token}"},
                 timeout=10
             )
             resp.raise_for_status()
@@ -48,9 +50,10 @@ class StravaSyncService:
     def sync_activities(profile: StravaProfile):
         """Holt neue Aktivitäten und synchronisiert sie."""
         try:
+            access_token = get_valid_access_token(profile)
             resp = requests.get(
                 "https://www.strava.com/api/v3/athlete/activities",
-                headers={"Authorization": f"Bearer {profile.access_token}"},
+                headers={"Authorization": f"Bearer {access_token}"},
                 params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE},
                 timeout=10
             )
@@ -83,7 +86,7 @@ class StravaImportService:
         if Ride.objects.filter(strava_id=strava_id).exists():
             return None
         
-        access_token = profile.access_token
+        access_token = get_valid_access_token(profile)
         polyline_str = activity_data.get("map", {}).get("summary_polyline")
         start_date = activity_data.get("start_date_local", "").split("T")[0]
         start_latlng = activity_data.get("start_latlng")
