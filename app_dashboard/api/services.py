@@ -43,23 +43,39 @@ class StravaSyncService:
             logger.error(f"Fehler beim Bike-Sync für {profile.strava_athlete_id}: {e}")
             raise
 
-    @staticmethod
-    def sync_activities(profile: StravaProfile):
-        """Holt neue Aktivitäten und synchronisiert sie."""
+    MAX_SYNC_PAGES = 50
+
+    @classmethod
+    def sync_activities(cls, profile: StravaProfile):
+        """Holt die komplette Aktivitäten-Historie (paginiert) und synchronisiert sie."""
         try:
-            resp = strava_get(
-                profile,
-                "https://www.strava.com/api/v3/athlete/activities",
-                params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE},
-                timeout=REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
-            activities = resp.json()
-            
-            for activity in activities:
-                StravaImportService.sync_activity_to_db(activity, profile)
-            
-            return len(activities)
+            total_count = 0
+            page = 1
+
+            while page <= cls.MAX_SYNC_PAGES:
+                resp = strava_get(
+                    profile,
+                    "https://www.strava.com/api/v3/athlete/activities",
+                    params={"per_page": settings.STRAVA_SYNC_PAGE_SIZE, "page": page},
+                    timeout=REQUEST_TIMEOUT,
+                )
+                resp.raise_for_status()
+                activities = resp.json()
+
+                if not activities:
+                    break
+
+                for activity in activities:
+                    StravaImportService.sync_activity_to_db(activity, profile)
+
+                total_count += len(activities)
+
+                if len(activities) < settings.STRAVA_SYNC_PAGE_SIZE:
+                    break
+
+                page += 1
+
+            return total_count
         except requests.exceptions.RequestException as e:
             logger.error(f"Fehler beim Activity-Sync: {e}")
             raise
