@@ -98,6 +98,13 @@ class StravaImportService:
         if start_latlng and len(start_latlng) == 2:
             point = Point(start_latlng[1], start_latlng[0], srid=4326)
 
+        gear_id = activity_data.get("gear_id")
+        bike = (
+            Bike.objects.filter(strava_bike_id=gear_id, athlete=profile).first()
+            if gear_id
+            else None
+        )
+
         ride, created = Ride.objects.update_or_create(
             strava_id=activity_data["id"],
             defaults={
@@ -108,6 +115,7 @@ class StravaImportService:
                 "start_date": activity_data.get("start_date_local"),
                 "elapsed_time": activity_data.get("elapsed_time"),
                 "athlete": profile,
+                "bike": bike,
             },
         )
 
