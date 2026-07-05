@@ -17,11 +17,29 @@ jobs:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          debug: true
           script: |
-            cd /home/marc/projects/kudo_care/kudos_care_backend
-            git pull origin dev
-            source venv/bin/activate
-            pip install -r requirements.txt
-            python manage.py migrate
-            python manage.py collectstatic --noinput
-            sudo supervisorctl restart gunicorn celery
+            script: |
+             set -e  
+
+             cd /home/marc/projects/kudo_care/kudos_care_backend
+
+             echo "=== Git Pull ==="
+             git fetch origin dev
+             git reset --hard origin/dev  # Erzwingt sauberen Stand (kein Merge-Konflikt)
+
+             echo "=== Env laden ==="
+             set -a && source .env && set +a
+
+             echo "=== Python Setup ==="
+             source venv/bin/activate
+             pip install -r requirements.txt
+
+             echo "=== Django ==="
+             python manage.py migrate
+             python manage.py collectstatic --noinput
+
+             echo "=== Restart ==="
+             sudo supervisorctl restart gunicorn celery
+
+             echo "=== Fertig ==="

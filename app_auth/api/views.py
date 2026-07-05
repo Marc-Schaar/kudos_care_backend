@@ -1,10 +1,10 @@
 import requests
-from django.views.decorators.csrf import csrf_exempt
-from django.utils.decorators import method_decorator
 from django.conf import settings
 from django.contrib.auth import login, logout
 from django.contrib.auth.models import User
 from django.shortcuts import get_object_or_404
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import ensure_csrf_cookie
 
 from rest_framework import status
 from rest_framework.response import Response
@@ -14,12 +14,8 @@ from rest_framework.views import APIView
 from app_auth.models import StravaProfile
 from .serializers import StravaAuthSerializer
 
-from rest_framework.authentication import SessionAuthentication
-
-
-class CsrfExemptSessionAuthentication(SessionAuthentication):
-    def enforce_csrf(self, request):
-        return
+from app_auth.mixins import CsrfExemptSessionAuthentication
+from .utils import sync_bikes_from_strava
 
 
 class StravaAuthCallbackView(APIView):
@@ -32,6 +28,17 @@ class StravaAuthCallbackView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         code = serializer.validated_data["code"]
+        scope = serializer.validated_data.get("scope", "")
+        granted_scopes = {s.strip() for s in scope.split(",") if s.strip()}
+
+        if scope and "activity:read_all" not in granted_scopes:
+            return Response(
+                {
+                    "error": "scope_insufficient",
+                    "message": "Zugriff auf private Aktivitäten wurde nicht erlaubt.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         strava_url = "https://www.strava.com/oauth/token"
         payload = {
@@ -73,8 +80,7 @@ class StravaAuthCallbackView(APIView):
                 )
                 profile.user = user
                 profile.save()
-
-            athlete_id = profile.strava_athlete_id
+                sync_bikes_from_strava(athlete_data, profile)
 
             login(request, profile.user)
 
@@ -110,6 +116,7 @@ class LogoutView(APIView):
 
 
 class CurrentUserView(APIView):
+    @method_decorator(ensure_csrf_cookie)
     def get(self, request):
         athlete_id = request.session.get("strava_athlete_id")
 
