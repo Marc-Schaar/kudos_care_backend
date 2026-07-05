@@ -1,3 +1,4 @@
+import bisect
 import math
 import dateutil.parser
 from datetime import datetime, timedelta, timezone
@@ -57,7 +58,32 @@ def calculate_heading(lat1, lon1, lat2, lon2):
     return (math.degrees(math.atan2(y, x)) + 360) % 360
 
 
-def get_filtered_weather(ride, weather_data=None):
+def _local_heading(latlngs, times, target_seconds, window_seconds=300):
+    """
+    Kurswinkel zu einem bestimmten Zeitpunkt der Fahrt, berechnet aus den
+    GPS-Punkten in einem Zeitfenster um target_seconds (statt der groben
+    Start-Ziel-Gerade der gesamten Fahrt).
+    """
+    if len(latlngs) < 2 or len(times) != len(latlngs):
+        return None
+
+    start_idx = bisect.bisect_left(times, target_seconds - window_seconds)
+    end_idx = bisect.bisect_right(times, target_seconds + window_seconds) - 1
+    start_idx = max(0, start_idx)
+    end_idx = min(len(latlngs) - 1, end_idx)
+
+    if end_idx <= start_idx:
+        return None
+
+    lat1, lon1 = latlngs[start_idx]
+    lat2, lon2 = latlngs[end_idx]
+    if (lat1, lon1) == (lat2, lon2):
+        return None
+
+    return calculate_heading(lat1, lon1, lat2, lon2)
+
+
+def get_filtered_weather(ride, weather_data=None, stream_data=None):
     """Filtert die Wetterdaten und berechnet den Gegenwind."""
     if not weather_data or "hourly" not in weather_data:
         return {}
@@ -79,10 +105,17 @@ def get_filtered_weather(ride, weather_data=None):
     start_hour = start_time.replace(minute=0, second=0, microsecond=0)
     end_hour = end_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
-    # 2. Heading nur einmal berechnen
-    lat1, lon1 = ride.start_latlng.coords[1], ride.start_latlng.coords[0]
-    lat2, lon2 = ride.track.coords[-1][1], ride.track.coords[-1][0]
-    h = calculate_heading(lat1, lon1, lat2, lon2)
+    # 2. Fallback-Heading aus Start-/Endpunkt der ganzen Fahrt (falls keine
+    # GPS-Stream-Daten mit Zeitstempeln vorliegen).
+    fallback_heading = None
+    if ride.start_latlng and ride.track:
+        lat1, lon1 = ride.start_latlng.coords[1], ride.start_latlng.coords[0]
+        lat2, lon2 = ride.track.coords[-1][1], ride.track.coords[-1][0]
+        fallback_heading = calculate_heading(lat1, lon1, lat2, lon2)
+
+    stream_latlngs = (stream_data or {}).get("latlng", {}).get("data") or []
+    stream_times = (stream_data or {}).get("time", {}).get("data") or []
+    has_stream = len(stream_latlngs) >= 2 and len(stream_times) == len(stream_latlngs)
 
     # 3. Alles in EINER Schleife verarbeiten
     filtered_indices = []
@@ -98,7 +131,17 @@ def get_filtered_weather(ride, weather_data=None):
 
             w_dir = hourly["wind_direction_10m"][i]
             w_speed = hourly["wind_speed_10m"][i]
-            headwind_results.append(calculate_headwind(h, w_dir, w_speed))
+
+            heading = fallback_heading
+            if has_stream:
+                elapsed_seconds = (weather_time - start_time).total_seconds()
+                local_heading = _local_heading(stream_latlngs, stream_times, elapsed_seconds)
+                if local_heading is not None:
+                    heading = local_heading
+
+            headwind_results.append(
+                calculate_headwind(heading, w_dir, w_speed) if heading is not None else 0.0
+            )
 
     return {
         "time": [hourly["time"][i] for i in filtered_indices],

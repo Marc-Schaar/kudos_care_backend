@@ -163,7 +163,7 @@ class StravaImportService:
                 else 0.0
             )
             ride.weather_data = {
-                **get_filtered_weather(ride, weather_info),
+                **get_filtered_weather(ride, weather_info, stream_data),
                 "avg_headwind": avg_headwind,
             }
             ride.save()
