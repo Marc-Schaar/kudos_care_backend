@@ -66,7 +66,14 @@ class StravaSyncService:
                     break
 
                 for activity in activities:
-                    StravaImportService.sync_activity_to_db(activity, profile)
+                    try:
+                        StravaImportService.sync_activity_to_db(activity, profile)
+                    except Exception as e:
+                        logger.error(
+                            "Import fehlgeschlagen für Aktivität %s: %s",
+                            activity.get("id"),
+                            e,
+                        )
 
                 total_count += len(activities)
 
@@ -99,7 +106,8 @@ class StravaImportService:
             return None
         
         polyline_str = activity_data.get("map", {}).get("summary_polyline")
-        start_date = activity_data.get("start_date_local", "").split("T")[0]
+        start_date_local = activity_data.get("start_date_local") or ""
+        start_date = start_date_local.split("T")[0] if start_date_local else None
         start_latlng = activity_data.get("start_latlng")
 
         track = None
