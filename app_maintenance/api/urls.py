@@ -10,6 +10,7 @@ from .views import (
     SlotUnmountView,
     ComponentListView,
     ComponentDetailView,
+    ComponentCheckView,
 )
 
 urlpatterns = [
@@ -42,6 +43,11 @@ urlpatterns = [
         "maintenance/components/<int:pk>/",
         ComponentDetailView.as_view(),
         name="component-detail",
+    ),
+    path(
+        "maintenance/components/<int:pk>/check/",
+        ComponentCheckView.as_view(),
+        name="component-check",
     ),
     path(
         "maintenance/templates/",

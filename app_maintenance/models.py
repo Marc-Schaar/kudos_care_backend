@@ -1,5 +1,8 @@
+from datetime import date
+
 from django.db import models
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 
 from app_auth.models import StravaProfile
 
@@ -84,6 +87,13 @@ class ComponentTemplate(models.Model):
     is_system = models.BooleanField(
         default=True,
         help_text="True = aus Fixture, False = vom User angelegt",
+    )
+    supports_condition_estimate = models.BooleanField(
+        default=True,
+        help_text=(
+            "Ob eine prozentuale Zustandsschätzung sinnvoll ist "
+            "(z.B. nein bei Lagern/Services)."
+        ),
     )
     notes = models.TextField(blank=True)
 
@@ -178,6 +188,15 @@ class Component(models.Model):
     )
     is_mounted = models.BooleanField(default=True)
     notes = models.TextField(blank=True)
+
+    # Individuelle Lebensdauer-Vorgaben — überschreiben die Template-Empfehlung
+    custom_warn_km = models.FloatField(
+        null=True, blank=True, help_text="Individuelle Lebensdauer in km"
+    )
+    custom_warn_days = models.IntegerField(
+        null=True, blank=True, help_text="Individuelle Lebensdauer in Tagen"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -188,6 +207,14 @@ class Component(models.Model):
         status = "montiert" if self.is_mounted else "ausgebaut"
         label = f"{self.brand} {self.model_name}".strip() or "Unbekannt"
         return f"{label} [{status}] @ {self.slot}"
+
+    @property
+    def effective_warn_km(self) -> float | None:
+        return self.custom_warn_km if self.custom_warn_km is not None else self.slot.template.warn_km
+
+    @property
+    def effective_warn_days(self) -> int | None:
+        return self.custom_warn_days if self.custom_warn_days is not None else self.slot.template.warn_days
 
     def clean(self):
         """Stellt sicher dass pro Slot maximal eine Komponente montiert ist."""
@@ -204,3 +231,48 @@ class Component(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+
+
+class ComponentCheck(models.Model):
+    """
+    Protokolliert eine Prüfung/Freigabe einer Komponente durch den User.
+    Erlaubt es, eine als überfällig markierte Komponente wieder freizugeben,
+    optional mit Zustandsschätzung und einem kürzeren Snooze-Intervall bis
+    zur nächsten Erinnerung.
+    """
+
+    component = models.ForeignKey(
+        Component,
+        on_delete=models.CASCADE,
+        related_name="checks",
+    )
+    checked_at = models.DateField(default=date.today)
+    checked_at_distance_km = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Km-Stand des Fahrrads zum Zeitpunkt der Prüfung",
+    )
+    condition_pct = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Geschätzter Restzustand in %, nur falls vom Komponententyp unterstützt",
+    )
+    snooze_km = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Erneut warnen nach X weiteren km ab checked_at_distance_km",
+    )
+    snooze_days = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Erneut warnen nach X weiteren Tagen ab checked_at",
+    )
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-checked_at", "-id"]
+
+    def __str__(self):
+        return f"Check {self.checked_at} @ {self.component}"

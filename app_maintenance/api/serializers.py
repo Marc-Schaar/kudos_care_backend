@@ -1,6 +1,12 @@
 from datetime import date
 from rest_framework import serializers
-from app_maintenance.models import Bike, ComponentTemplate, ComponentSlot, Component
+from app_maintenance.models import (
+    Bike,
+    ComponentTemplate,
+    ComponentSlot,
+    Component,
+    ComponentCheck,
+)
 
 
 class WarnStatus:
@@ -30,8 +36,16 @@ def compute_wear(component: Component, bike_total_km: float | None) -> dict:
     """
     Berechnet Verschleiß und Warn-Status für eine montierte Komponente.
     Gibt ein Dict zurück das direkt im Serializer verwendet wird.
+
+    `wear_km`/`wear_days` sind informative Totalwerte seit Einbau. Der
+    Warn-Status wird dagegen — falls eine Prüfung (ComponentCheck) vorliegt —
+    ab dem Zeitpunkt der letzten Prüfung neu berechnet ("Freigeben"), mit dem
+    dabei angegebenen Snooze-Intervall (falls keins angegeben wurde, gilt ab
+    der Prüfung wieder die normale empfohlene/individuelle Lebensdauer).
     """
-    template = component.slot.template
+    warn_km = component.effective_warn_km
+    warn_days = component.effective_warn_days
+
     result = {
         "wear_km": None,
         "wear_days": None,
@@ -40,27 +54,44 @@ def compute_wear(component: Component, bike_total_km: float | None) -> dict:
         "warn_status_overall": WarnStatus.UNKNOWN,
     }
 
-    # ── km-Verschleiß ────────────────────────────────────────────────────────
+    # ── km-Verschleiß (informativ, seit Einbau) ───────────────────────────────
     if bike_total_km is not None and component.distance_at_install is not None:
-        wear_km = bike_total_km - component.distance_at_install
-        result["wear_km"] = round(wear_km, 1)
+        result["wear_km"] = round(bike_total_km - component.distance_at_install, 1)
 
-        if template.warn_km:
-            result["warn_status_km"] = WarnStatus.from_ratio(wear_km / template.warn_km)
-        else:
-            result["warn_status_km"] = WarnStatus.OK
-
-    # ── Tage-Verschleiß ──────────────────────────────────────────────────────
+    # ── Tage-Verschleiß (informativ, seit Einbau) ─────────────────────────────
     if component.installed_at:
-        wear_days = (date.today() - component.installed_at).days
-        result["wear_days"] = wear_days
+        result["wear_days"] = (date.today() - component.installed_at).days
 
-        if template.warn_days:
-            result["warn_status_days"] = WarnStatus.from_ratio(
-                wear_days / template.warn_days
-            )
+    # ── Status-Baseline: letzte Prüfung falls vorhanden, sonst Einbau ────────
+    latest_check = component.checks.first()
+
+    if latest_check is not None:
+        if bike_total_km is not None and latest_check.checked_at_distance_km is not None:
+            km_since_check = bike_total_km - latest_check.checked_at_distance_km
+            threshold_km = latest_check.snooze_km or warn_km
+            if threshold_km:
+                result["warn_status_km"] = WarnStatus.from_ratio(km_since_check / threshold_km)
+            else:
+                result["warn_status_km"] = WarnStatus.OK
+
+        days_since_check = (date.today() - latest_check.checked_at).days
+        threshold_days = latest_check.snooze_days or warn_days
+        if threshold_days:
+            result["warn_status_days"] = WarnStatus.from_ratio(days_since_check / threshold_days)
         else:
             result["warn_status_days"] = WarnStatus.OK
+    else:
+        if result["wear_km"] is not None:
+            if warn_km:
+                result["warn_status_km"] = WarnStatus.from_ratio(result["wear_km"] / warn_km)
+            else:
+                result["warn_status_km"] = WarnStatus.OK
+
+        if result["wear_days"] is not None:
+            if warn_days:
+                result["warn_status_days"] = WarnStatus.from_ratio(result["wear_days"] / warn_days)
+            else:
+                result["warn_status_days"] = WarnStatus.OK
 
     # ── Gesamt-Status = schlechtester Einzelwert ──────────────────────────────
     statuses = [result["warn_status_km"], result["warn_status_days"]]
@@ -90,9 +121,26 @@ class ComponentTemplateSerializer(serializers.ModelSerializer):
             "warn_hours",
             "warn_days",
             "is_system",
+            "supports_condition_estimate",
             "notes",
         ]
         read_only_fields = ["is_system"]
+
+
+class ComponentCheckSerializer(serializers.ModelSerializer):
+    """Kompakte, read-only Zusammenfassung der letzten Prüfung."""
+
+    class Meta:
+        model = ComponentCheck
+        fields = [
+            "id",
+            "checked_at",
+            "checked_at_distance_km",
+            "condition_pct",
+            "snooze_km",
+            "snooze_days",
+            "note",
+        ]
 
 
 class ComponentSerializer(serializers.ModelSerializer):
@@ -101,6 +149,7 @@ class ComponentSerializer(serializers.ModelSerializer):
     warn_status_km = serializers.SerializerMethodField()
     warn_status_days = serializers.SerializerMethodField()
     warn_status_overall = serializers.SerializerMethodField()
+    last_check = serializers.SerializerMethodField()
 
     class Meta:
         model = Component
@@ -114,6 +163,8 @@ class ComponentSerializer(serializers.ModelSerializer):
             "retired_at",
             "is_mounted",
             "notes",
+            "custom_warn_km",
+            "custom_warn_days",
             "created_at",
             "updated_at",
             "wear_km",
@@ -121,8 +172,15 @@ class ComponentSerializer(serializers.ModelSerializer):
             "warn_status_km",
             "warn_status_days",
             "warn_status_overall",
+            "last_check",
         ]
         read_only_fields = ["slot", "created_at", "updated_at"]
+
+    def get_last_check(self, obj):
+        latest_check = obj.checks.first()
+        if latest_check is None:
+            return None
+        return ComponentCheckSerializer(latest_check).data
 
     def _get_wear(self, obj: Component) -> dict:
         """Wear-Dict einmal berechnen und im Serializer-Context cachen."""
@@ -164,6 +222,31 @@ class ComponentSerializer(serializers.ModelSerializer):
                         "is_mounted": "In diesem Slot ist bereits eine Komponente montiert."
                     }
                 )
+        return attrs
+
+
+class ComponentCheckCreateSerializer(serializers.Serializer):
+    """
+    Validiert den Body für POST /components/{id}/check/ ("Prüfen/Freigeben").
+    Alle Felder sind optional — ohne Angaben wird die Komponente einfach ab
+    heute wieder für den normalen Lebenszyklus freigegeben.
+    """
+
+    condition_pct = serializers.IntegerField(
+        required=False, allow_null=True, min_value=0, max_value=100
+    )
+    snooze_km = serializers.FloatField(required=False, allow_null=True, min_value=0)
+    snooze_days = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    note = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        component = self.context["component"]
+        if attrs.get("condition_pct") is not None and not component.slot.template.supports_condition_estimate:
+            raise serializers.ValidationError(
+                {
+                    "condition_pct": "Für diesen Komponententyp ist keine Zustandsschätzung möglich."
+                }
+            )
         return attrs
 
 
@@ -224,6 +307,7 @@ class ComponentSlotListSerializer(serializers.ModelSerializer):
     category_display = serializers.CharField(
         source="template.get_category_display", read_only=True
     )
+    template_detail = ComponentTemplateSerializer(source="template", read_only=True)
     warn_status = serializers.SerializerMethodField()
     mounted_component = serializers.SerializerMethodField()
 
@@ -233,6 +317,7 @@ class ComponentSlotListSerializer(serializers.ModelSerializer):
             "id",
             "bike",
             "template",
+            "template_detail",
             "display_name",
             "category",
             "category_display",
@@ -251,11 +336,13 @@ class ComponentSlotListSerializer(serializers.ModelSerializer):
         comp = obj.mounted_component
         if comp is None:
             return None
+        latest_check = comp.checks.first()
         return {
             "id": comp.id,
             "brand": comp.brand,
             "model_name": comp.model_name,
             "installed_at": comp.installed_at,
+            "condition_pct": latest_check.condition_pct if latest_check else None,
         }
 
 

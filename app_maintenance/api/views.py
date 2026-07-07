@@ -9,7 +9,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from app_auth.models import StravaProfile
-from app_maintenance.models import Bike, ComponentTemplate, ComponentSlot, Component
+from app_maintenance.models import (
+    Bike,
+    ComponentTemplate,
+    ComponentSlot,
+    Component,
+    ComponentCheck,
+)
 from .serializers import (
     BikeSerializer,
     BikeListSerializer,
@@ -17,6 +23,7 @@ from .serializers import (
     ComponentSlotSerializer,
     ComponentSlotListSerializer,
     ComponentSerializer,
+    ComponentCheckCreateSerializer,
 )
 import logging 
 logger = logging.getLogger('my_app_debug')
@@ -282,3 +289,33 @@ class ComponentDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
         return Component.objects.filter(
             slot__bike__athlete=self.get_athlete()
         ).select_related("slot__bike", "slot__template")
+
+
+class ComponentCheckView(AthleteMixin, APIView):
+    """
+    POST /api/maintenance/components/{pk}/check/
+    Body: { "condition_pct"?: 0-100, "snooze_km"?: float, "snooze_days"?: int, "note"?: str }
+
+    Protokolliert eine Prüfung/Freigabe der Komponente ("Freigeben"). Der
+    Warn-Status wird danach ab diesem Zeitpunkt neu berechnet — mit dem
+    angegebenen Snooze-Intervall, falls keins angegeben wurde mit der
+    normalen empfohlenen/individuellen Lebensdauer.
+    """
+
+    def post(self, request, pk):
+        component = get_object_or_404(
+            Component, pk=pk, slot__bike__athlete=self.get_athlete()
+        )
+        serializer = ComponentCheckCreateSerializer(
+            data=request.data, context={"component": component}
+        )
+        serializer.is_valid(raise_exception=True)
+
+        ComponentCheck.objects.create(
+            component=component,
+            checked_at=datetime.date.today(),
+            checked_at_distance_km=component.slot.bike.total_distance_km,
+            **serializer.validated_data,
+        )
+
+        return Response(ComponentSerializer(component).data)

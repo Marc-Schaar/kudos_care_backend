@@ -11,7 +11,16 @@
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"CommandLine LIKE '%runserver 8000%'\\\\\" | Select-Object ProcessId\")",
       "Read(//c/Users/Marc/.claude/skills/angular-developer/references/**)",
       "Read(//c/Users/Marc/.agents/skills/angular-developer/references/**)",
-      "Bash(python manage.py test app_dashboard)"
+      "Bash(python manage.py test app_dashboard)",
+      "Bash(python -c \"import json; json.load\\(open\\('app_maintenance/fixtures/component_templates.json', encoding='utf-8'\\)\\); print\\('JSON valid'\\)\")",
+      "Bash(python manage.py makemigrations app_maintenance)",
+      "Bash(python manage.py migrate app_maintenance)",
+      "Bash(python manage.py test app_maintenance -v 2)",
+      "Bash(python manage.py makemigrations app_maintenance --check --dry-run)",
+      "Bash(python manage.py showmigrations app_maintenance)",
+      "Bash(python manage.py test app_maintenance -v 2 --noinput)",
+      "Bash(python manage.py test -v 1 --noinput)",
+      "Bash(find . -maxdepth 2 -not -path '*/\\\\.git*' -not -path '*/venv*' -not -path '*/.venv*')"
     ]
   }
 }
