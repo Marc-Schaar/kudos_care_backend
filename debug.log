@@ -1512,3 +1512,29 @@ DEBUG: Bike gefunden: FElt Ia, verknüpft mit Profile ID: 2
 DEBUG: Suche Fahrräder für Profile ID: 2 (Strava-ID: 1033727871)
 DEBUG: Bike gefunden: Cervelo P3, verknüpft mit Profile ID: 2
 DEBUG: Bike gefunden: FElt Ia, verknüpft mit Profile ID: 2
+Strava-Sync für Athlet 12345 fehlgeschlagen (Strava-API-Fehler).
+Traceback (most recent call last):
+  File "C:\Users\Marc\dev\kudos_care_backend\app_dashboard\api\tasks.py", line 18, in run_strava_sync
+    count = StravaSyncService.full_sync(profile)
+  File "C:\Python314\Lib\unittest\mock.py", line 1175, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\unittest\mock.py", line 1179, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\unittest\mock.py", line 1234, in _execute_mock_call
+    raise effect
+requests.exceptions.HTTPError
+Strava-Sync für Athlet 12345 fehlgeschlagen.
+Traceback (most recent call last):
+  File "C:\Users\Marc\dev\kudos_care_backend\app_dashboard\api\tasks.py", line 18, in run_strava_sync
+    count = StravaSyncService.full_sync(profile)
+  File "C:\Python314\Lib\unittest\mock.py", line 1175, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\unittest\mock.py", line 1179, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\unittest\mock.py", line 1234, in _execute_mock_call
+    raise effect
+Exception: boom

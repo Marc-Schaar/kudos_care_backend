@@ -1,28 +1,27 @@
 import json
 import logging
 
-import requests
-
 from django.core.serializers import serialize
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import status
 
-from .services import StravaSyncService
+from .serializers import RideSerializer, StravaSyncStatusSerializer
+from .tasks import run_strava_sync
 from ..models import Ride
-from .serializers import RideSerializer
 from app_auth.models import StravaProfile
 from app_auth.mixins import CsrfExemptSessionAuthentication
-import logging
+
 logger = logging.getLogger('my_app_debug')
 
 
 
 class StravaSyncView(APIView):
-    """POST /api/strava/sync/ — Lädt neue Aktivitäten von Strava und importiert sie."""
+    """POST /api/strava/sync/ — Stößt einen asynchronen Strava-Sync an (Celery)."""
 
     authentication_classes = [CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
@@ -33,36 +32,27 @@ class StravaSyncView(APIView):
             strava_athlete_id=request.session.get("strava_athlete_id"),
         )
 
-        try:
-            count = StravaSyncService.full_sync(profile)
-            return Response({"status": "Erfolgreich", "count": count})
-        except requests.exceptions.HTTPError as e:
-            status_code = e.response.status_code if e.response is not None else None
-            if status_code == 403:
-                logger.error(
-                    "Strava-Sync für Athlet %s: fehlende Berechtigung (403), Reconnect nötig.",
-                    profile.strava_athlete_id,
-                )
-                return Response(
-                    {"error": "Strava-Zugriff unzureichend. Bitte Strava-Konto neu verbinden."},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
-            logger.exception(
-                "Strava-Sync für Athlet %s fehlgeschlagen (Strava-API-Fehler).",
-                profile.strava_athlete_id,
-            )
-            return Response(
-                {"error": "Synchronisation mit Strava fehlgeschlagen"},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-        except Exception:
-            logger.exception(
-                "Strava-Sync für Athlet %s fehlgeschlagen.", profile.strava_athlete_id
-            )
-            return Response(
-                {"error": "Synchronisation fehlgeschlagen"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        updated = StravaProfile.objects.filter(
+            pk=profile.pk, sync_status__in=["idle", "success", "error"]
+        ).update(sync_status="running", sync_started_at=timezone.now(), sync_error="")
+
+        if updated:
+            run_strava_sync.delay(profile.pk)
+
+        return Response({"status": "running"}, status=status.HTTP_202_ACCEPTED)
+
+
+class StravaSyncStatusView(APIView):
+    """GET /api/strava/sync-status/ — Aktueller Sync-Status des eingeloggten Athleten."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        profile = get_object_or_404(
+            StravaProfile,
+            strava_athlete_id=request.session.get("strava_athlete_id"),
+        )
+        return Response(StravaSyncStatusSerializer(profile).data)
 
 
 class ActivityListView(APIView):

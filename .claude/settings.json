@@ -10,7 +10,8 @@
       "Bash(python manage.py shell -c ' *)",
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"CommandLine LIKE '%runserver 8000%'\\\\\" | Select-Object ProcessId\")",
       "Read(//c/Users/Marc/.claude/skills/angular-developer/references/**)",
-      "Read(//c/Users/Marc/.agents/skills/angular-developer/references/**)"
+      "Read(//c/Users/Marc/.agents/skills/angular-developer/references/**)",
+      "Bash(python manage.py test app_dashboard)"
     ]
   }
 }
