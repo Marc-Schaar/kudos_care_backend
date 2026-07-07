@@ -36,11 +36,22 @@ CSRF_TRUSTED_ORIGINS = os.environ.get(
     "CSRF_TRUSTED_ORIGINS", "http://localhost:3000"
 ).split(",")
 
-SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_HTTPONLY = False
 CSRF_COOKIE_SAMESITE = "Lax"
 SESSION_COOKIE_SAMESITE = "Lax"
-SESSION_COOKIE_SECURE = False
+
+# Nur über HTTPS senden, wenn nicht im lokalen Dev-Modus – iOS/Safari (insb.
+# Standalone-PWAs via "Zum Home-Bildschirm hinzufügen") verwirft nicht-Secure
+# Cookies bei HTTPS-Origins teils sofort beim Neustart der App.
+CSRF_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_SECURE = not DEBUG
+
+# "Eingeloggt bleiben": Session überlebt Browser-/App-Neustart (Default eh
+# False, hier explizit) und lebt lange; SAVE_EVERY_REQUEST lässt die
+# Ablaufzeit bei Aktivität mitwandern statt starr 90 Tage ab Login abzulaufen.
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False
+SESSION_COOKIE_AGE = 60 * 60 * 24 * 90  # 90 Tage
+SESSION_SAVE_EVERY_REQUEST = True
 
 CORS_ALLOW_HEADERS = [
     "accept",
