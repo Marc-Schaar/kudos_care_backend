@@ -63,6 +63,20 @@ class Bike(models.Model):
             return None
         return result / 1000  # Strava liefert Meter
 
+    def distance_km_up_to(self, as_of: date) -> float:
+        """
+        Gefahrene km dieses Bikes bis einschließlich `as_of`. Fahrten mit
+        einem anderen Bike sind über die FK-Filterung auf `self.rides`
+        automatisch ausgeschlossen. Ohne passende Fahrten wird 0 geliefert
+        (nicht None), damit das Feld sinnvoll vorbefüllt werden kann.
+        """
+        from django.db.models import Sum
+
+        result = self.rides.filter(start_date__date__lte=as_of).aggregate(
+            total=Sum("distance")
+        )["total"]
+        return (result or 0) / 1000  # Strava liefert Meter
+
 
 class ComponentTemplate(models.Model):
     """

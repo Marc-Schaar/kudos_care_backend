@@ -2,6 +2,7 @@ from django.urls import path
 from .views import (
     BikeListView,
     BikeDetailView,
+    BikeDistanceAtDateView,
     ComponentTemplateListView,
     ComponentTemplateDetailView,
     ComponentSlotListView,
@@ -16,6 +17,11 @@ from .views import (
 urlpatterns = [
     path("maintenance/bikes/", BikeListView.as_view(), name="bike-list"),
     path("maintenance/bikes/<int:pk>/", BikeDetailView.as_view(), name="bike-detail"),
+    path(
+        "maintenance/bikes/<int:bike_id>/distance-at/",
+        BikeDistanceAtDateView.as_view(),
+        name="bike-distance-at",
+    ),
     path(
         "maintenance/bikes/<int:bike_id>/slots/",
         ComponentSlotListView.as_view(),

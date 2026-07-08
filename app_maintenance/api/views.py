@@ -92,6 +92,35 @@ class BikeDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
         )
 
 
+class BikeDistanceAtDateView(AthleteMixin, APIView):
+    """
+    GET /api/maintenance/bikes/{bike_id}/distance-at/?date=YYYY-MM-DD
+
+    Liefert den km-Stand des Bikes zum angegebenen Datum (Summe der
+    Ride-Distanzen bis inkl. diesem Tag; Fahrten mit einem anderen Bike
+    zählen nicht mit). Basis für die automatische Vorbefüllung von
+    Component.distance_at_install anhand des Einbaudatums.
+    """
+
+    def get(self, request, bike_id):
+        bike = get_object_or_404(Bike, pk=bike_id, athlete=self.get_athlete())
+        date_param = request.query_params.get("date")
+        if not date_param:
+            return Response(
+                {"error": "date fehlt (Format: YYYY-MM-DD)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            as_of = datetime.date.fromisoformat(date_param)
+        except ValueError:
+            return Response(
+                {"error": "date muss im Format YYYY-MM-DD sein."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({"distance_km": bike.distance_km_up_to(as_of)})
+
+
 class ComponentTemplateListView(AthleteMixin, generics.ListCreateAPIView):
     """
     GET  /api/maintenance/templates/?bike_type=mtb&category=brakes
