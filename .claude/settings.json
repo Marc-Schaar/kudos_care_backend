@@ -20,7 +20,9 @@
       "Bash(python manage.py showmigrations app_maintenance)",
       "Bash(python manage.py test app_maintenance -v 2 --noinput)",
       "Bash(python manage.py test -v 1 --noinput)",
-      "Bash(find . -maxdepth 2 -not -path '*/\\\\.git*' -not -path '*/venv*' -not -path '*/.venv*')"
+      "Bash(find . -maxdepth 2 -not -path '*/\\\\.git*' -not -path '*/venv*' -not -path '*/.venv*')",
+      "Bash(chromium-cli --help)",
+      "Bash(npx --yes playwright --version)"
     ]
   }
 }
