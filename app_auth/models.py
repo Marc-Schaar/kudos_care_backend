@@ -27,6 +27,8 @@ class StravaProfile(models.Model):
     sync_error = models.CharField(max_length=255, blank=True, default="")
     last_sync_count = models.IntegerField(null=True, blank=True)
     sync_task_id = models.CharField(max_length=255, blank=True, default="")
+    sync_progress_current = models.IntegerField(null=True, blank=True)
+    sync_progress_total = models.IntegerField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.firstname} {self.lastname} (Strava ID: {self.strava_athlete_id})"

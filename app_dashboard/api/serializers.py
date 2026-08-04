@@ -16,6 +16,8 @@ class StravaSyncStatusSerializer(serializers.ModelSerializer):
             "sync_finished_at",
             "sync_error",
             "last_sync_count",
+            "sync_progress_current",
+            "sync_progress_total",
         ]
 
 

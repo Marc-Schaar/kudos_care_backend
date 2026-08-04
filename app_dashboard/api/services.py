@@ -5,6 +5,7 @@ from shapely.geometry import LineString as ShapelyLineString
 
 from django.conf import settings
 from django.contrib.gis.geos import LineString as DjangoLineString, Point
+from django.db.models import F
 
 from ..models import Ride, RideStream
 from .utils import (
@@ -45,6 +46,38 @@ class StravaSyncService:
 
     MAX_SYNC_PAGES = 50
 
+    @staticmethod
+    def estimate_new_activity_count(profile: StravaProfile):
+        """
+        Schätzt die Anzahl noch zu importierender Aktivitäten: Strava-Gesamtzahl
+        (aus /athletes/{id}/stats, Summe aller Sportarten-Totals) abzüglich der
+        bereits in der DB vorhandenen Rides dieses Athleten. Liefert None, wenn
+        die Gesamtzahl nicht ermittelt werden konnte (z.B. Strava-Fehler) –
+        der Fortschritt wird dann ohne Gesamtzahl (nur laufender Zähler) angezeigt.
+        """
+        try:
+            resp = strava_get(
+                profile,
+                f"https://www.strava.com/api/v3/athletes/{profile.strava_athlete_id}/stats",
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            stats = resp.json()
+        except requests.exceptions.RequestException as e:
+            logger.warning(
+                "Konnte Strava-Gesamtzahl für Athlet %s nicht ermitteln: %s",
+                profile.strava_athlete_id,
+                e,
+            )
+            return None
+
+        total_on_strava = sum(
+            stats.get(key, {}).get("count", 0)
+            for key in ("all_ride_totals", "all_run_totals", "all_swim_totals")
+        )
+        already_synced = Ride.objects.filter(athlete=profile).count()
+        return max(total_on_strava - already_synced, 0)
+
     @classmethod
     def sync_activities(cls, profile: StravaProfile):
         """Holt die komplette Aktivitäten-Historie (paginiert) und synchronisiert sie."""
@@ -67,7 +100,14 @@ class StravaSyncService:
 
                 for activity in activities:
                     try:
-                        StravaImportService.sync_activity_to_db(activity, profile)
+                        ride = StravaImportService.sync_activity_to_db(activity, profile)
+                        if ride is not None:
+                            # Nur tatsächlich neu importierte Aktivitäten zählen für
+                            # den Fortschritt – bereits synchronisierte werden von
+                            # sync_activity_to_db mit None übersprungen.
+                            StravaProfile.objects.filter(pk=profile.pk).update(
+                                sync_progress_current=F("sync_progress_current") + 1
+                            )
                     except Exception as e:
                         logger.error(
                             "Import fehlgeschlagen für Aktivität %s: %s",
@@ -91,6 +131,12 @@ class StravaSyncService:
     def full_sync(cls, profile: StravaProfile):
         """Kombinierter Sync-Prozess."""
         cls.sync_bikes(profile)
+
+        total_new = cls.estimate_new_activity_count(profile)
+        StravaProfile.objects.filter(pk=profile.pk).update(
+            sync_progress_current=0, sync_progress_total=total_new
+        )
+
         count = cls.sync_activities(profile)
         return count
 

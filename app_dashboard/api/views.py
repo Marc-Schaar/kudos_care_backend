@@ -35,7 +35,13 @@ class StravaSyncView(APIView):
 
         updated = StravaProfile.objects.filter(
             pk=profile.pk, sync_status__in=["idle", "success", "error", "cancelled"]
-        ).update(sync_status="running", sync_started_at=timezone.now(), sync_error="")
+        ).update(
+            sync_status="running",
+            sync_started_at=timezone.now(),
+            sync_error="",
+            sync_progress_current=None,
+            sync_progress_total=None,
+        )
 
         if updated:
             async_result = run_strava_sync.delay(profile.pk)
