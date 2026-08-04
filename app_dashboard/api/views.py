@@ -1,6 +1,7 @@
 import json
 import logging
 
+from celery.result import AsyncResult
 from django.core.serializers import serialize
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -33,13 +34,40 @@ class StravaSyncView(APIView):
         )
 
         updated = StravaProfile.objects.filter(
-            pk=profile.pk, sync_status__in=["idle", "success", "error"]
+            pk=profile.pk, sync_status__in=["idle", "success", "error", "cancelled"]
         ).update(sync_status="running", sync_started_at=timezone.now(), sync_error="")
 
         if updated:
-            run_strava_sync.delay(profile.pk)
+            async_result = run_strava_sync.delay(profile.pk)
+            StravaProfile.objects.filter(pk=profile.pk).update(sync_task_id=async_result.id)
 
         return Response({"status": "running"}, status=status.HTTP_202_ACCEPTED)
+
+
+class StravaSyncCancelView(APIView):
+    """POST /api/strava/sync/cancel/ — Bricht einen laufenden Sync manuell ab."""
+
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        profile = get_object_or_404(
+            StravaProfile,
+            strava_athlete_id=request.session.get("strava_athlete_id"),
+        )
+
+        if profile.sync_status != "running":
+            return Response({"status": profile.sync_status}, status=status.HTTP_200_OK)
+
+        if profile.sync_task_id:
+            AsyncResult(profile.sync_task_id).revoke(terminate=True)
+
+        StravaProfile.objects.filter(pk=profile.pk, sync_status="running").update(
+            sync_status="cancelled",
+            sync_finished_at=timezone.now(),
+            sync_error="Manuell abgebrochen",
+        )
+        return Response({"status": "cancelled"}, status=status.HTTP_200_OK)
 
 
 class StravaSyncStatusView(APIView):

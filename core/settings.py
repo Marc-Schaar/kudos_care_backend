@@ -171,6 +171,11 @@ REST_FRAMEWORK = {
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+# Sicherheitsnetz gegen hängende Tasks (z.B. durch Requests ohne Timeout):
+# Soft-Limit wirft SoftTimeLimitExceeded (Task kann sauber aufräumen),
+# Hard-Limit killt den Worker-Kindprozess danach unbedingt.
+CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", 480))
+CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", 600))
 
 STRAVA_SYNC_PAGE_SIZE = int(os.getenv("STRAVA_SYNC_PAGE_SIZE", 50))
 

@@ -2,6 +2,7 @@ import logging
 
 import requests
 from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
 
 from app_auth.models import StravaProfile
@@ -19,6 +20,13 @@ def run_strava_sync(profile_id):
         profile.sync_status = "success"
         profile.last_sync_count = count
         profile.sync_error = ""
+    except SoftTimeLimitExceeded:
+        profile.sync_status = "error"
+        profile.sync_error = "Synchronisation abgebrochen (Zeitlimit überschritten)"
+        logger.error(
+            "Strava-Sync für Athlet %s abgebrochen (Soft Time Limit).",
+            profile.strava_athlete_id,
+        )
     except requests.exceptions.HTTPError as e:
         profile.sync_status = "error"
         status_code = e.response.status_code if e.response is not None else None
@@ -37,7 +45,11 @@ def run_strava_sync(profile_id):
             "Strava-Sync für Athlet %s fehlgeschlagen.", profile.strava_athlete_id
         )
     finally:
-        profile.sync_finished_at = timezone.now()
-        profile.save(
-            update_fields=["sync_status", "sync_finished_at", "sync_error", "last_sync_count"]
+        # Nur übernehmen, wenn der Sync in der Zwischenzeit nicht manuell
+        # abgebrochen wurde (sonst würde ein Race das "cancelled" überschreiben).
+        StravaProfile.objects.filter(pk=profile.pk, sync_status="running").update(
+            sync_status=profile.sync_status,
+            sync_finished_at=timezone.now(),
+            sync_error=profile.sync_error,
+            last_sync_count=profile.last_sync_count,
         )

@@ -26,6 +26,7 @@ def get_valid_access_token(profile, force=False):
                 "grant_type": "refresh_token",
                 "refresh_token": profile.refresh_token,
             },
+            timeout=10,
         )
         response.raise_for_status()
         data = response.json()

@@ -8,6 +8,7 @@ class StravaProfile(models.Model):
         ("running", "running"),
         ("success", "success"),
         ("error", "error"),
+        ("cancelled", "cancelled"),
     ]
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, null=True, blank=True)
@@ -25,6 +26,7 @@ class StravaProfile(models.Model):
     sync_finished_at = models.DateTimeField(null=True, blank=True)
     sync_error = models.CharField(max_length=255, blank=True, default="")
     last_sync_count = models.IntegerField(null=True, blank=True)
+    sync_task_id = models.CharField(max_length=255, blank=True, default="")
 
     def __str__(self):
         return f"{self.firstname} {self.lastname} (Strava ID: {self.strava_athlete_id})"
