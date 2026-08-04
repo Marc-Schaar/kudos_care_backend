@@ -72,7 +72,7 @@ class StravaSyncService:
             return None
 
         total_on_strava = sum(
-            stats.get(key, {}).get("count", 0)
+            (stats.get(key) or {}).get("count", 0)
             for key in ("all_ride_totals", "all_run_totals", "all_swim_totals")
         )
         already_synced = Ride.objects.filter(athlete=profile).count()
