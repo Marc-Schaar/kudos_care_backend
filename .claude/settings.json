@@ -22,7 +22,21 @@
       "Bash(python manage.py test -v 1 --noinput)",
       "Bash(find . -maxdepth 2 -not -path '*/\\\\.git*' -not -path '*/venv*' -not -path '*/.venv*')",
       "Bash(chromium-cli --help)",
-      "Bash(npx --yes playwright --version)"
+      "Bash(npx --yes playwright --version)",
+      "Bash(timeout 90 npx --yes playwright install chromium)",
+      "Bash(npx playwright *)",
+      "Bash(ls \"C:/Users/Marc/AppData/Local/ms-playwright\" 2>&1 || echo \"NOT_INSTALLED\")",
+      "Read(//c/Users/Marc/AppData/Local/ms-playwright/**)",
+      "Bash(node \"C:/Users/Marc/AppData/Local/Temp/claude/c--Users-Marc-dev-kudos-care-backend/e5eceb38-410f-42c6-868c-5a766d3d75fb/scratchpad/gen-bikes.js\")",
+      "Bash(node \"C:/Users/Marc/AppData/Local/Temp/claude/c--Users-Marc-dev-kudos-care-backend/e5eceb38-410f-42c6-868c-5a766d3d75fb/scratchpad/render.js\" \"public/bike-illustrations/road.svg\" \"C:/Users/Marc/AppData/Local/Temp/claude/c--Users-Marc-dev-kudos-care-backend/e5eceb38-410f-42c6-868c-5a766d3d75fb/scratchpad/road-dark.png\" \"#16181c\")",
+      "Bash(npx -p playwright node \"C:/Users/Marc/AppData/Local/Temp/claude/c--Users-Marc-dev-kudos-care-backend/e5eceb38-410f-42c6-868c-5a766d3d75fb/scratchpad/render.js\" \"public/bike-illustrations/road.svg\" \"C:/Users/Marc/AppData/Local/Temp/claude/c--Users-Marc-dev-kudos-care-backend/e5eceb38-410f-42c6-868c-5a766d3d75fb/scratchpad/road-dark.png\" \"#16181c\")",
+      "Bash(npm init *)",
+      "Bash(npm install *)",
+      "Bash(node render.js \"c:/Users/Marc/dev/kudos_care_frontend/public/bike-illustrations/road.svg\" \"./road-dark.png\" \"#16181c\")",
+      "Bash(node render.js \"c:/Users/Marc/dev/kudos_care_frontend/public/bike-illustrations/road.svg\" \"./road-light.png\" \"#f4f5f7\")",
+      "Bash(node render.js \"c:/Users/Marc/dev/kudos_care_frontend/public/bike-illustrations/road.svg\" \"./road-light.png\" \"#f4f5f7\" light)",
+      "Bash(node verify-dots.js)",
+      "Bash(git check-ignore *)"
     ]
   }
 }
