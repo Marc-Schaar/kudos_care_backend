@@ -8,6 +8,8 @@ from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
 from app_dashboard.api.tasks import run_strava_sync
+from app_dashboard.api.services import StravaImportService
+from app_maintenance.models import Bike, BikeType
 
 
 def _make_profile(user):
@@ -194,3 +196,64 @@ class StravaSyncCancelViewTests(APITestCase):
         self.assertIn(
             response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
         )
+
+
+class SyncActivityToDbWeatherWearHookTests(APITestCase):
+    """
+    Prüft den Hook in StravaImportService.sync_activity_to_db, der nach jedem
+    importierten Ride mit zugeordnetem Bike eine Wetter-Verschleiß-Neuberechnung
+    für dieses Bike anstößt (siehe app_maintenance/api/tasks.py).
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="athlete5", password="pw")
+        self.profile = _make_profile(self.user)
+
+    def _activity_data(self, strava_id, gear_id=None):
+        return {
+            "id": strava_id,
+            "name": "Testfahrt",
+            "map": {},
+            "start_date_local": "2026-06-01T08:00:00Z",
+            "start_date": "2026-06-01T08:00:00Z",
+            "start_latlng": [48.1, 11.5],
+            "distance": 30000,
+            "elapsed_time": 3600,
+            "gear_id": gear_id,
+        }
+
+    def _empty_weather(self):
+        return {
+            "hourly": {
+                "time": [],
+                "temperature_2m": [],
+                "wind_speed_10m": [],
+                "precipitation": [],
+                "wind_direction_10m": [],
+            }
+        }
+
+    @patch("app_dashboard.api.services.recompute_weather_wear_for_bike.delay")
+    @patch("app_dashboard.api.services.StravaStreamService.fetch_activity_streams")
+    @patch("app_dashboard.api.services.WeatherService.get_historical_weather")
+    def test_enqueues_recompute_when_bike_matched(self, mock_weather, mock_streams, mock_delay):
+        bike = Bike.objects.create(
+            athlete=self.profile, strava_bike_id="b42", name="Rad", bike_type=BikeType.ROAD
+        )
+        mock_weather.return_value = self._empty_weather()
+        mock_streams.return_value = None
+
+        StravaImportService.sync_activity_to_db(self._activity_data(2001, gear_id="b42"), self.profile)
+
+        mock_delay.assert_called_once_with(bike.pk)
+
+    @patch("app_dashboard.api.services.recompute_weather_wear_for_bike.delay")
+    @patch("app_dashboard.api.services.StravaStreamService.fetch_activity_streams")
+    @patch("app_dashboard.api.services.WeatherService.get_historical_weather")
+    def test_does_not_enqueue_when_no_bike_matched(self, mock_weather, mock_streams, mock_delay):
+        mock_weather.return_value = self._empty_weather()
+        mock_streams.return_value = None
+
+        StravaImportService.sync_activity_to_db(self._activity_data(2002, gear_id=None), self.profile)
+
+        mock_delay.assert_not_called()

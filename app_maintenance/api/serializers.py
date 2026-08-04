@@ -51,6 +51,7 @@ def compute_wear(component: Component, bike_total_km: float | None) -> dict:
         "wear_days": None,
         "warn_status_km": WarnStatus.UNKNOWN,
         "warn_status_days": WarnStatus.UNKNOWN,
+        "warn_status_weather_km": WarnStatus.UNKNOWN,
         "warn_status_overall": WarnStatus.UNKNOWN,
     }
 
@@ -93,8 +94,21 @@ def compute_wear(component: Component, bike_total_km: float | None) -> dict:
             else:
                 result["warn_status_days"] = WarnStatus.OK
 
+    # ── Wetter-gewichteter km-Verschleiß (voller Verlauf seit Einbau) ────────
+    # component.weather_wear_km wird asynchron von WeatherWearService befüllt
+    # (siehe app_maintenance/api/services.py), nicht hier live berechnet.
+    if component.weather_wear_km is not None:
+        if warn_km:
+            result["warn_status_weather_km"] = WarnStatus.from_ratio(component.weather_wear_km / warn_km)
+        else:
+            result["warn_status_weather_km"] = WarnStatus.OK
+
     # ── Gesamt-Status = schlechtester Einzelwert ──────────────────────────────
-    statuses = [result["warn_status_km"], result["warn_status_days"]]
+    statuses = [
+        result["warn_status_km"],
+        result["warn_status_days"],
+        result["warn_status_weather_km"],
+    ]
     priority = [WarnStatus.CRITICAL, WarnStatus.WARN, WarnStatus.OK, WarnStatus.UNKNOWN]
     for status in priority:
         if status in statuses:
@@ -148,6 +162,7 @@ class ComponentSerializer(serializers.ModelSerializer):
     wear_days = serializers.SerializerMethodField()
     warn_status_km = serializers.SerializerMethodField()
     warn_status_days = serializers.SerializerMethodField()
+    warn_status_weather_km = serializers.SerializerMethodField()
     warn_status_overall = serializers.SerializerMethodField()
     last_check = serializers.SerializerMethodField()
 
@@ -171,10 +186,21 @@ class ComponentSerializer(serializers.ModelSerializer):
             "wear_days",
             "warn_status_km",
             "warn_status_days",
+            "weather_wear_km",
+            "weather_wear_computed_at",
+            "weather_wear_ride_count",
+            "warn_status_weather_km",
             "warn_status_overall",
             "last_check",
         ]
-        read_only_fields = ["slot", "created_at", "updated_at"]
+        read_only_fields = [
+            "slot",
+            "created_at",
+            "updated_at",
+            "weather_wear_km",
+            "weather_wear_computed_at",
+            "weather_wear_ride_count",
+        ]
 
     def get_last_check(self, obj):
         latest_check = obj.checks.first()
@@ -201,6 +227,9 @@ class ComponentSerializer(serializers.ModelSerializer):
 
     def get_warn_status_days(self, obj):
         return self._get_wear(obj)["warn_status_days"]
+
+    def get_warn_status_weather_km(self, obj):
+        return self._get_wear(obj)["warn_status_weather_km"]
 
     def get_warn_status_overall(self, obj):
         return self._get_wear(obj)["warn_status_overall"]
@@ -325,24 +354,35 @@ class ComponentSlotListSerializer(serializers.ModelSerializer):
             "mounted_component",
         ]
 
+    def _get_wear(self, comp: Component, obj: ComponentSlot) -> dict:
+        """Wear-Dict einmal berechnen und im Serializer-Context cachen (wird von
+        get_warn_status und get_mounted_component gemeinsam genutzt)."""
+        cache_key = f"_wear_{comp.pk}"
+        if cache_key not in self.context:
+            self.context[cache_key] = compute_wear(comp, obj.bike.total_distance_km)
+        return self.context[cache_key]
+
     def get_warn_status(self, obj: ComponentSlot) -> str:
         comp = obj.mounted_component
         if comp is None:
             return WarnStatus.UNKNOWN
-        wear = compute_wear(comp, obj.bike.total_distance_km)
-        return wear["warn_status_overall"]
+        return self._get_wear(comp, obj)["warn_status_overall"]
 
     def get_mounted_component(self, obj: ComponentSlot):
         comp = obj.mounted_component
         if comp is None:
             return None
         latest_check = comp.checks.first()
+        wear = self._get_wear(comp, obj)
         return {
             "id": comp.id,
             "brand": comp.brand,
             "model_name": comp.model_name,
             "installed_at": comp.installed_at,
             "condition_pct": latest_check.condition_pct if latest_check else None,
+            "weather_wear_km": comp.weather_wear_km,
+            "weather_wear_ride_count": comp.weather_wear_ride_count,
+            "warn_status_weather_km": wear["warn_status_weather_km"],
         }
 
 

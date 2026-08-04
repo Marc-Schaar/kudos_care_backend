@@ -6,8 +6,11 @@ Eine Wartungs-Tracking-App für Fahrräder/Motorräder mit Strava-Integration. N
 sich via Strava-OAuth ein, ihre Aktivitäten ("Rides") und Bikes werden synchronisiert,
 historische Wetter-/Winddaten werden pro Ride ergänzt (Open-Meteo), und der Verschleiß von
 Bike-Komponenten (Kette, Reifen, Bremsbeläge, ...) wird anhand von km/Stunden/Tagen seit
-Montage getrackt, mit Status `ok` / `warn` / `critical`. UI-Sprache und viele Code-Kommentare
-sind Deutsch. Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`.
+Montage getrackt, zusätzlich wetter-gewichtet (Regen/Hitze/Kälte/Wind pro Ride, siehe
+`app_maintenance/api/services.py::WeatherWearService`), mit Status `ok` / `warn` / `critical`.
+Eine optionale KI-Erklärung (Gemini/Groq) narriert auf Anfrage die berechneten Zahlen in
+Worten, berechnet aber nie selbst. UI-Sprache und viele Code-Kommentare sind Deutsch.
+Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`.
 
 ## Tech Stack
 
@@ -44,13 +47,26 @@ sind Deutsch. Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dess
 - **`app_maintenance`** — Kern-Domäne Verschleiß-Tracking. Models: `Bike`,
   `ComponentTemplate` (Katalog, Fixture `fixtures/component_templates.json`), `ComponentSlot`
   (Position am Bike, unique je `(bike, template)`), `Component` (physisches Teil,
-  `is_mounted` via `clean()`/`save()`-Override erzwungen: nur 1 montiertes Teil je Slot),
+  `is_mounted` via `clean()`/`save()`-Override erzwungen: nur 1 montiertes Teil je Slot;
+  zusätzlich `weather_wear_km`/`weather_wear_ride_count`/`weather_wear_computed_at` — async
+  von `WeatherWearService` befüllt, nie live berechnet), `WeatherSensitivityCoefficient`
+  (Regen/Hitze/Kälte/Wind-Gewichtung je `ComponentCategory`, geseedet in Migration `0006`,
+  Basis für eine spätere Kalibrierung aus `ComponentCheck.condition_pct`-Verlauf),
   `ComponentCheck` (Log eines Checks/Release, optional `condition_pct` + Snooze).
   `AthleteMixin` (`api/views.py`) scoped alle Querysets auf
   `request.session["strava_athlete_id"]`. `WarnStatus` (`api/serializers.py`) berechnet
-  `ok`/`warn`/`critical`/`unknown` aus einem Ratio (≥1.0 critical, ≥0.8 warn).
+  `ok`/`warn`/`critical`/`unknown` aus einem Ratio (≥1.0 critical, ≥0.8 warn);
+  `compute_wear()` kombiniert km-/Tage-/Wetter-Achse zum schlechtesten Einzelwert.
+  `api/services.py`: `WeatherWearCalculator` (reine Formel: Wetter → Verschleiß-Multiplikator
+  pro Ride) + `WeatherWearService` (voller Recompute über die Ride-Historie seit Einbau, nur
+  aktuell montierte Komponenten). Celery-Task `recompute_weather_wear_for_bike` in
+  `api/tasks.py`, getriggert nach jedem Ride-Import (Hook in
+  `app_dashboard/api/services.py::sync_activity_to_db`). `api/ai_providers.py`: austauschbarer
+  Gemini/Groq-Adapter (`AI_PROVIDER`-Setting) für die On-Demand-KI-Erklärung. Management-Command
+  `recompute_weather_wear.py` (Backfill, `--dry-run`).
   Endpoints unter `/api/maintenance/`: `bikes/`, `bikes/<id>/slots/`, `slots/<id>/mount|unmount`,
-  `slots/<id>/components/`, `components/<id>/check/`, `templates/`.
+  `slots/<id>/components/`, `components/<id>/check/`, `components/<id>/weather-explanation/`,
+  `templates/`.
 - **`app_strava_webhook`** — Strava-Push-Webhook, Endpoint **außerhalb** von `/api/`:
   `/strava/webhook/`. `GET` = Subscription-Challenge, `POST` → Celery-Task
   `process_strava_webhook` (max_retries=3): `delete` löscht `Ride`, `create` importiert via
@@ -86,13 +102,23 @@ erstellt/aktualisiert `User`+`StravaProfile`, ruft `login()`, speichert zusätzl
 - `BikeListView.get_queryset` hat auskommentierten Debug-Code.
 - `debug.log` ist aktuell in Git getrackt (siehe `git status`) — sollte vermutlich in
   `.gitignore`, prüfen bevor weitere Commits den Log-Diff aufblähen.
+- `core/celery.py` ruft `app.autodiscover_tasks()` ohne Argumente auf — das sucht bei
+  Celery+Django nur `<app_label>.tasks` (eine Ebene), nicht `<app_label>.api.tasks`. Weder
+  `app_dashboard/tasks.py` noch `app_maintenance/tasks.py` existieren; alle echten Task-Module
+  liegen unter `api/tasks.py`. Die bestehenden Tasks funktionieren offenbar nur, weil sie
+  transitiv über `views.py`-Importe (`from .tasks import ...`) geladen werden. Neue Tasks
+  müssen auf derselben Import-Kette reiten (siehe `recompute_weather_wear_for_bike` als
+  Beispiel) — nach jedem Deploy mit `celery -A core inspect registered` verifizieren.
 
 ## Env Vars (`.env`, nicht committed)
 
 `DJANGO_SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`,
 `CSRF_TRUSTED_ORIGINS`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`,
-`CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`.
-Werte niemals in Doku oder Code-Kommentare übernehmen.
+`CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`,
+`AI_PROVIDER` (`gemini`|`groq`, Default `gemini`), `GEMINI_API_KEY`, `GEMINI_MODEL`,
+`GROQ_API_KEY`, `GROQ_MODEL`. Die AI-Keys werden nur für die optionale
+KI-Erklärung gebraucht — ohne sie liefert der Endpoint kontrolliert 503, der Rest der App
+funktioniert unabhängig davon. Werte niemals in Doku oder Code-Kommentare übernehmen.
 
 ## Testing
 
@@ -100,7 +126,12 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
 - `app_dashboard/tests.py`: `StravaSyncView` (Dispatch, No-Double-Dispatch, Auth-Required),
   `run_strava_sync`-Task (Success, 403-Reconnect, Generic-Failure) via `unittest.mock`.
 - `app_maintenance/tests.py`: `ComponentCheckTests` (Custom-Warn-Days, Overdue/Critical,
-  `condition_pct`-Rejection, Release via Check mit Snooze, Auth-Required).
+  `condition_pct`-Rejection, Release via Check mit Snooze, Auth-Required, Wetter-Achse
+  treibt `warn_status_overall`).
+- `app_maintenance/test_weather_wear.py`: `WeatherWearCalculatorTests` (reine Formel, keine
+  DB), `WeatherWearServiceTests` (Recompute gegen echte `Ride`-Objekte),
+  `ComponentWeatherExplanationViewTests` (KI-Endpoint, `requests.post` gemockt in
+  `ai_providers.py`).
 - Keine Tests für `app_auth`/`app_strava_webhook`.
 
 ---

@@ -1,5 +1,11 @@
 from django.contrib import admin
-from .models import Bike, ComponentTemplate, ComponentSlot, Component
+from .models import (
+    Bike,
+    ComponentTemplate,
+    ComponentSlot,
+    Component,
+    WeatherSensitivityCoefficient,
+)
 
 
 @admin.register(Bike)
@@ -40,5 +46,25 @@ class ComponentSlotAdmin(admin.ModelAdmin):
 
 @admin.register(Component)
 class ComponentAdmin(admin.ModelAdmin):
-    list_display = ["__str__", "installed_at", "is_mounted", "distance_at_install"]
+    list_display = [
+        "__str__",
+        "installed_at",
+        "is_mounted",
+        "distance_at_install",
+        "weather_wear_km",
+    ]
     list_filter = ["is_mounted", "slot__bike__bike_type"]
+
+
+@admin.register(WeatherSensitivityCoefficient)
+class WeatherSensitivityCoefficientAdmin(admin.ModelAdmin):
+    list_display = [
+        "category",
+        "rain_sensitivity",
+        "heat_sensitivity",
+        "cold_sensitivity",
+        "wind_sensitivity",
+        "last_calibrated_at",
+        "calibration_sample_count",
+    ]
+    list_filter = ["category"]

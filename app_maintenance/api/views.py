@@ -2,6 +2,7 @@ import datetime
 
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.utils import timezone
 
 from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
@@ -24,8 +25,11 @@ from .serializers import (
     ComponentSlotListSerializer,
     ComponentSerializer,
     ComponentCheckCreateSerializer,
+    compute_wear,
 )
-import logging 
+from .services import build_weather_explanation_prompt
+from .ai_providers import get_ai_provider
+import logging
 logger = logging.getLogger('my_app_debug')
 
 
@@ -348,3 +352,72 @@ class ComponentCheckView(AthleteMixin, APIView):
         )
 
         return Response(ComponentSerializer(component).data)
+
+
+class ComponentWeatherExplanationView(AthleteMixin, APIView):
+    """
+    GET /api/maintenance/components/{pk}/weather-explanation/?refresh=true
+
+    Liefert eine gecachte, KI-generierte Erklärung der wetterbedingten
+    Verschleiß-Zahlen. Regeneriert nur wenn noch keine existiert, die Zahlen
+    sich seit der letzten Generierung geändert haben, oder ?refresh=true
+    übergeben wurde. Die KI berechnet dabei nichts selbst — sie erklärt nur
+    bereits von WeatherWearService berechnete Zahlen in Worten.
+    """
+
+    def get(self, request, pk):
+        component = get_object_or_404(
+            Component, pk=pk, slot__bike__athlete=self.get_athlete()
+        )
+
+        if not component.weather_wear_ride_count:
+            return Response(
+                {
+                    "error": "Noch keine wetterbereinigten Verschleißdaten vorhanden.",
+                    "code": "no_data",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        force_refresh = request.query_params.get("refresh") == "true"
+        is_stale = (
+            component.weather_wear_explanation_generated_at is None
+            or component.weather_wear_computed_at is None
+            or component.weather_wear_explanation_generated_at < component.weather_wear_computed_at
+        )
+
+        if component.weather_wear_explanation and not is_stale and not force_refresh:
+            return Response(
+                {
+                    "explanation": component.weather_wear_explanation,
+                    "generated_at": component.weather_wear_explanation_generated_at,
+                    "cached": True,
+                }
+            )
+
+        wear = compute_wear(component, component.slot.bike.total_distance_km)
+        system_prompt, user_prompt = build_weather_explanation_prompt(component, wear)
+        explanation = get_ai_provider().generate_text(system_prompt, user_prompt)
+
+        if explanation is None:
+            return Response(
+                {
+                    "error": "KI-Erklärung aktuell nicht verfügbar. Bitte später erneut versuchen.",
+                    "code": "ai_unavailable",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        component.weather_wear_explanation = explanation
+        component.weather_wear_explanation_generated_at = timezone.now()
+        component.save(
+            update_fields=["weather_wear_explanation", "weather_wear_explanation_generated_at"]
+        )
+
+        return Response(
+            {
+                "explanation": explanation,
+                "generated_at": component.weather_wear_explanation_generated_at,
+                "cached": False,
+            }
+        )

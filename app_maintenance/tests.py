@@ -117,3 +117,18 @@ class ComponentCheckTests(APITestCase):
         self.assertIn(
             response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
         )
+
+    def test_weather_wear_axis_drives_overall_status_when_worse_than_km_and_days(self):
+        """Beweist die Worst-of-Logik End-to-End: km/Tage sind OK, aber die
+        Wetter-Achse liegt über dem Schwellwert -> Gesamtstatus muss critical sein."""
+        template, _, component = self._make_slot_with_component(warn_days=3650)
+        component.installed_at = date.today() - timedelta(days=5)
+        component.custom_warn_km = 100
+        component.weather_wear_km = 150  # über dem Schwellwert, obwohl kaum Zeit vergangen ist
+        component.save()
+
+        response = self.client.get(f"/api/maintenance/components/{component.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["warn_status_weather_km"], "critical")
+        self.assertEqual(response.data["warn_status_overall"], "critical")

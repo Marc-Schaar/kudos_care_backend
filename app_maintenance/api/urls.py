@@ -12,6 +12,7 @@ from .views import (
     ComponentListView,
     ComponentDetailView,
     ComponentCheckView,
+    ComponentWeatherExplanationView,
 )
 
 urlpatterns = [
@@ -54,6 +55,11 @@ urlpatterns = [
         "maintenance/components/<int:pk>/check/",
         ComponentCheckView.as_view(),
         name="component-check",
+    ),
+    path(
+        "maintenance/components/<int:pk>/weather-explanation/",
+        ComponentWeatherExplanationView.as_view(),
+        name="component-weather-explanation",
     ),
     path(
         "maintenance/templates/",

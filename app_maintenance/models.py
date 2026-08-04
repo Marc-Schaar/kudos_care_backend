@@ -211,6 +211,42 @@ class Component(models.Model):
         null=True, blank=True, help_text="Individuelle Lebensdauer in Tagen"
     )
 
+    # Wetter-gewichteter Verschleiß (siehe app_maintenance/api/services.py::WeatherWearService)
+    weather_wear_km = models.FloatField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Wetter-gewichteter Verschleiß in km seit Einbau, inkl. Zuschlägen für "
+            "Regen/Hitze/Kälte/Wind. Wird asynchron per Celery-Task neu berechnet, "
+            "nicht live pro Request."
+        ),
+    )
+    weather_wear_computed_at = models.DateTimeField(
+        null=True, blank=True, help_text="Zeitpunkt der letzten Neuberechnung von weather_wear_km."
+    )
+    weather_wear_ride_count = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Anzahl der in die letzte Berechnung einbezogenen Fahrten seit Einbau — "
+            "dient als Konfidenz-Indikator (wenige Fahrten = wenig aussagekräftiger Wert)."
+        ),
+    )
+    weather_wear_explanation = models.TextField(
+        blank=True,
+        default="",
+        help_text="Zwischengespeicherte KI-generierte Erklärung (Deutsch) der Wetter-Verschleiß-Zahlen.",
+    )
+    weather_wear_explanation_generated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Zeitpunkt der letzten KI-Erklärung-Generierung. Wird gegen "
+            "weather_wear_computed_at verglichen, um die Erklärung bei neuen Zahlen "
+            "ungültig zu machen."
+        ),
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -290,3 +326,43 @@ class ComponentCheck(models.Model):
 
     def __str__(self):
         return f"Check {self.checked_at} @ {self.component}"
+
+
+class WeatherSensitivityCoefficient(models.Model):
+    """
+    Pro-Kategorie-Gewichtung für den wetterbedingten Verschleiß-Multiplikator
+    (siehe app_maintenance/api/services.py::WeatherWearCalculator). Als DB-Tabelle
+    statt Python-Konstanten modelliert, damit eine zukünftige Kalibrierung aus
+    echten Nutzerdaten (ComponentCheck.condition_pct-Verlauf) die Werte ohne
+    Schema-Änderung aktualisieren kann. Ein Datensatz je ComponentCategory.
+    """
+
+    category = models.CharField(max_length=20, choices=ComponentCategory.choices, unique=True)
+    rain_sensitivity = models.FloatField(default=0.0, help_text="Gewichtung des Regen-Faktors (0 = kein Effekt).")
+    heat_sensitivity = models.FloatField(default=0.0, help_text="Gewichtung des Hitze-Faktors (0 = kein Effekt).")
+    cold_sensitivity = models.FloatField(default=0.0, help_text="Gewichtung des Kälte-Faktors (0 = kein Effekt).")
+    wind_sensitivity = models.FloatField(
+        default=0.0,
+        help_text=(
+            "Gewichtung des Wind-Faktors (0 = kein Effekt). Bewusst konservativ, da der "
+            "Wind-Mechanismus für mechanischen Verschleiß physikalisch schwach ist."
+        ),
+    )
+    last_calibrated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Zeitpunkt der letzten Kalibrierung aus echten Nutzerdaten. Null = es gilt noch der Heuristik-Default.",
+    )
+    calibration_sample_count = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Anzahl Datenpunkte der letzten Kalibrierung. Null = noch nie kalibriert."
+    )
+    notes = models.TextField(blank=True, default="", help_text="Begründung/Quelle der aktuellen Werte.")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["category"]
+        verbose_name = "Wetter-Sensitivitäts-Koeffizient"
+        verbose_name_plural = "Wetter-Sensitivitäts-Koeffizienten"
+
+    def __str__(self):
+        return self.get_category_display()

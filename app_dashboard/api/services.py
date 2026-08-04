@@ -17,6 +17,7 @@ from .utils import (
 from app_auth.models import StravaProfile
 from app_auth.api.utils import strava_get
 from app_maintenance.models import Bike
+from app_maintenance.api.tasks import recompute_weather_wear_for_bike
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,9 @@ class StravaImportService:
                 "avg_headwind": avg_headwind,
             }
             ride.save()
+
+            if ride.bike_id:
+                recompute_weather_wear_for_bike.delay(ride.bike_id)
 
         if stream_data:
             RideStream.objects.update_or_create(
