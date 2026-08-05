@@ -85,10 +85,27 @@ class NullAIProvider(BaseAIProvider):
         return None
 
 
+class FallbackAIProvider(BaseAIProvider):
+    """Probiert mehrere Provider der Reihe nach durch, bis einer eine Antwort liefert
+    (fehlender Key, Timeout, Rate-Limit, ... -> naechster Provider)."""
+
+    def __init__(self, providers: list[BaseAIProvider]):
+        self._providers = providers
+
+    def generate_text(self, system_prompt: str, user_prompt: str) -> str | None:
+        for provider in self._providers:
+            result = provider.generate_text(system_prompt, user_prompt)
+            if result is not None:
+                return result
+        return None
+
+
 def get_ai_provider() -> BaseAIProvider:
     provider = (settings.AI_PROVIDER or "").lower()
     if provider == "gemini":
-        return GeminiProvider()
+        # Guenstiges/schnelles Flash-Lite-Modell (settings.GEMINI_MODEL) als primaerer
+        # Provider, bei Fehlschlag (Key/Timeout/Rate-Limit/...) Fallback auf Groq.
+        return FallbackAIProvider([GeminiProvider(), GroqProvider()])
     if provider == "groq":
         return GroqProvider()
     logger.warning("Unbekannter/fehlender AI_PROVIDER=%r, KI-Erklaerungen deaktiviert.", provider)

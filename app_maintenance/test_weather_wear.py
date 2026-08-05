@@ -193,6 +193,13 @@ def _gemini_response(text="Regen hat deine Kette stärker beansprucht als die re
     return resp
 
 
+def _groq_response(text="Regen hat deine Kette stärker beansprucht als die reinen km zeigen."):
+    resp = Mock()
+    resp.raise_for_status = Mock()
+    resp.json.return_value = {"choices": [{"message": {"content": text}}]}
+    return resp
+
+
 @override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key")
 class ComponentWeatherExplanationViewTests(APITestCase):
     def setUp(self):
@@ -246,8 +253,9 @@ class ComponentWeatherExplanationViewTests(APITestCase):
         self.assertTrue(response2.data["cached"])
         mock_post.assert_called_once()  # weiterhin nur 1x aufgerufen
 
+    @override_settings(GROQ_API_KEY="test-groq-key")
     @patch("app_maintenance.api.ai_providers.requests.post")
-    def test_provider_error_returns_503(self, mock_post):
+    def test_provider_error_returns_503_after_gemini_and_groq_fallback_fail(self, mock_post):
         self.component.weather_wear_km = 60.0
         self.component.weather_wear_ride_count = 3
         self.component.weather_wear_computed_at = timezone.now()
@@ -257,10 +265,12 @@ class ComponentWeatherExplanationViewTests(APITestCase):
         response = self.client.get(self._url())
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertEqual(response.data["code"], "ai_unavailable")
+        # Gemini (Flash-Lite) und danach Groq wurden beide versucht.
+        self.assertEqual(mock_post.call_count, 2)
 
-    @override_settings(GEMINI_API_KEY="")
+    @override_settings(GEMINI_API_KEY="", GROQ_API_KEY="")
     @patch("app_maintenance.api.ai_providers.requests.post")
-    def test_missing_api_key_returns_503_without_http_call(self, mock_post):
+    def test_missing_api_keys_returns_503_without_http_call(self, mock_post):
         self.component.weather_wear_km = 60.0
         self.component.weather_wear_ride_count = 3
         self.component.weather_wear_computed_at = timezone.now()
@@ -269,3 +279,18 @@ class ComponentWeatherExplanationViewTests(APITestCase):
         response = self.client.get(self._url())
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         mock_post.assert_not_called()
+
+    @override_settings(GEMINI_API_KEY="", GROQ_API_KEY="test-groq-key")
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_gemini_failure_falls_back_to_groq(self, mock_post):
+        self.component.weather_wear_km = 60.0
+        self.component.weather_wear_ride_count = 3
+        self.component.weather_wear_computed_at = timezone.now()
+        self.component.save()
+        mock_post.return_value = _groq_response()
+
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("Regen", response.data["explanation"])
+        # Gemini hatte keinen Key (kein HTTP-Call), Groq wurde genau 1x aufgerufen.
+        mock_post.assert_called_once()

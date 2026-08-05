@@ -62,7 +62,11 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   aktuell montierte Komponenten). Celery-Task `recompute_weather_wear_for_bike` in
   `api/tasks.py`, getriggert nach jedem Ride-Import (Hook in
   `app_dashboard/api/services.py::sync_activity_to_db`). `api/ai_providers.py`: austauschbarer
-  Gemini/Groq-Adapter (`AI_PROVIDER`-Setting) für die On-Demand-KI-Erklärung. Management-Command
+  Gemini/Groq-Adapter (`AI_PROVIDER`-Setting) für die On-Demand-KI-Erklärung. Bei
+  `AI_PROVIDER=gemini` (Default) läuft intern ein `FallbackAIProvider`: primär das günstige
+  Gemini-Flash-Lite-Modell (`GEMINI_MODEL`, Default `gemini-2.0-flash-lite`), bei Fehlschlag
+  (fehlender Key/Timeout/Rate-Limit/...) automatisch Fallback auf Groq. `AI_PROVIDER=groq`
+  nutzt direkt nur Groq, ohne Fallback-Kette. Management-Command
   `recompute_weather_wear.py` (Backfill, `--dry-run`).
   Endpoints unter `/api/maintenance/`: `bikes/`, `bikes/<id>/slots/`, `slots/<id>/mount|unmount`,
   `slots/<id>/components/`, `components/<id>/check/`, `components/<id>/weather-explanation/`,

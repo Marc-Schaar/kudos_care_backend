@@ -16,6 +16,7 @@ class BikeType(models.TextChoices):
     EBIKE_CITY = "ebike_city", "E-Stadtrad"
     CITY = "city", "Stadtrad"
     CX = "cx", "Cyclocross"
+    TRIATHLON = "triathlon", "Triathlon/Zeitfahrrad"
     OTHER = "other", "Sonstiges"
 
 
