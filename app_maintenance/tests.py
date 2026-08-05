@@ -132,3 +132,23 @@ class ComponentCheckTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["warn_status_weather_km"], "critical")
         self.assertEqual(response.data["warn_status_overall"], "critical")
+
+    def test_check_releases_component_overdue_on_weather_axis(self):
+        """Regression: 'Freigeben' muss auch die Wetter-Achse zuruecksetzen, sonst
+        bleibt die Komponente trotz Freigabe als ueberfaellig markiert, weil
+        warn_status_weather_km sonst immer den vollen Verlauf seit Einbau nutzt."""
+        _, _, component = self._make_slot_with_component(warn_days=3650)
+        component.installed_at = date.today() - timedelta(days=5)
+        component.custom_warn_km = 100
+        component.weather_wear_km = 150
+        component.save()
+
+        pre_check = self.client.get(f"/api/maintenance/components/{component.id}/")
+        self.assertEqual(pre_check.data["warn_status_overall"], "critical")
+
+        response = self.client.post(f"/api/maintenance/components/{component.id}/check/", {})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["warn_status_weather_km"], "ok")
+        self.assertEqual(response.data["warn_status_overall"], "ok")
+        self.assertEqual(response.data["last_check"]["checked_at_weather_wear_km"], 150)

@@ -348,6 +348,7 @@ class ComponentCheckView(AthleteMixin, APIView):
             component=component,
             checked_at=datetime.date.today(),
             checked_at_distance_km=component.slot.bike.total_distance_km,
+            checked_at_weather_wear_km=component.weather_wear_km,
             **serializer.validated_data,
         )
 

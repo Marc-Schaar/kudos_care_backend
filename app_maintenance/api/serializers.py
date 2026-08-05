@@ -94,12 +94,22 @@ def compute_wear(component: Component, bike_total_km: float | None) -> dict:
             else:
                 result["warn_status_days"] = WarnStatus.OK
 
-    # ── Wetter-gewichteter km-Verschleiß (voller Verlauf seit Einbau) ────────
+    # ── Wetter-gewichteter km-Verschleiß ──────────────────────────────────────
     # component.weather_wear_km wird asynchron von WeatherWearService befüllt
-    # (siehe app_maintenance/api/services.py), nicht hier live berechnet.
+    # (siehe app_maintenance/api/services.py), nicht hier live berechnet — ist
+    # aber immer der volle Verlauf seit Einbau. Liegt eine Prüfung vor, wird
+    # daher analog zur km-/Tage-Achse ab der bei der Prüfung gespeicherten
+    # Baseline (checked_at_weather_wear_km) gerechnet, sonst bleibt eine
+    # Freigabe für diese Achse wirkungslos und die Komponente erscheint trotz
+    # "Freigeben" weiter als überfällig.
     if component.weather_wear_km is not None:
+        if latest_check is not None and latest_check.checked_at_weather_wear_km is not None:
+            weather_km_since_check = component.weather_wear_km - latest_check.checked_at_weather_wear_km
+        else:
+            weather_km_since_check = component.weather_wear_km
+
         if warn_km:
-            result["warn_status_weather_km"] = WarnStatus.from_ratio(component.weather_wear_km / warn_km)
+            result["warn_status_weather_km"] = WarnStatus.from_ratio(weather_km_since_check / warn_km)
         else:
             result["warn_status_weather_km"] = WarnStatus.OK
 
@@ -150,6 +160,7 @@ class ComponentCheckSerializer(serializers.ModelSerializer):
             "id",
             "checked_at",
             "checked_at_distance_km",
+            "checked_at_weather_wear_km",
             "condition_pct",
             "snooze_km",
             "snooze_days",

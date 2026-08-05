@@ -302,6 +302,15 @@ class ComponentCheck(models.Model):
         blank=True,
         help_text="Km-Stand des Fahrrads zum Zeitpunkt der Prüfung",
     )
+    checked_at_weather_wear_km = models.FloatField(
+        null=True,
+        blank=True,
+        help_text=(
+            "component.weather_wear_km zum Zeitpunkt der Prüfung — Baseline, damit "
+            "der wetterbereinigte Warn-Status nach einer Freigabe ebenfalls zurückgesetzt "
+            "wird (analog zu checked_at_distance_km für die km-Achse)."
+        ),
+    )
     condition_pct = models.PositiveSmallIntegerField(
         null=True,
         blank=True,
