@@ -294,3 +294,169 @@ class ComponentWeatherExplanationViewTests(APITestCase):
         self.assertIn("Regen", response.data["explanation"])
         # Gemini hatte keinen Key (kein HTTP-Call), Groq wurde genau 1x aufgerufen.
         mock_post.assert_called_once()
+
+
+@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key")
+class ComponentCheckInstructionsViewTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="check-instructions", password="pw")
+        self.profile = _make_profile(self.user, strava_athlete_id=98766)
+        self.client.force_login(self.user)
+        session = self.client.session
+        session["strava_athlete_id"] = self.profile.strava_athlete_id
+        session.save()
+
+        self.bike = Bike.objects.create(
+            athlete=self.profile, strava_bike_id="wb3", name="Anleitungsrad", bike_type=BikeType.ROAD
+        )
+        # warn_days=10 sorgt dafür, dass die 30 Tage alte Komponente initial "critical" ist —
+        # damit lässt sich die Status-Änderung nach einer Freigabe testen.
+        self.template = ComponentTemplate.objects.create(
+            name="Kette", category=ComponentCategory.DRIVETRAIN, warn_days=10, is_system=False
+        )
+        self.slot = ComponentSlot.objects.create(bike=self.bike, template=self.template)
+        self.component = Component.objects.create(
+            slot=self.slot,
+            brand="KMC",
+            installed_at=date.today() - timedelta(days=30),
+            is_mounted=True,
+        )
+
+    def _url(self, refresh=False):
+        url = f"/api/maintenance/components/{self.component.id}/check-instructions/"
+        return url + "?refresh=true" if refresh else url
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_happy_path_generates_and_caches_instructions(self, mock_post):
+        mock_post.return_value = _gemini_response("- Prüfe die Kette auf Längung mit einer Lehre.")
+
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["cached"])
+        self.assertIn("Kette", response.data["instructions"])
+        mock_post.assert_called_once()
+
+        # Zweiter Aufruf: aus DB-Cache, kein erneuter Provider-Call
+        response2 = self.client.get(self._url())
+        self.assertEqual(response2.status_code, status.HTTP_200_OK)
+        self.assertTrue(response2.data["cached"])
+        mock_post.assert_called_once()
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_status_change_invalidates_cached_instructions(self, mock_post):
+        mock_post.return_value = _gemini_response()
+        self.client.get(self._url())
+        mock_post.assert_called_once()
+
+        # Freigabe setzt den Status von "critical" auf "ok" zurück -> Cache ungültig.
+        response = self.client.post(f"/api/maintenance/components/{self.component.id}/check/", data={})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        response2 = self.client.get(self._url())
+        self.assertFalse(response2.data["cached"])
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_refresh_forces_regeneration(self, mock_post):
+        mock_post.return_value = _gemini_response()
+        self.client.get(self._url())
+        mock_post.assert_called_once()
+
+        response = self.client.get(self._url(refresh=True))
+        self.assertFalse(response.data["cached"])
+        self.assertEqual(mock_post.call_count, 2)
+
+    @override_settings(GEMINI_API_KEY="", GROQ_API_KEY="")
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_missing_api_keys_returns_503_without_http_call(self, mock_post):
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        mock_post.assert_not_called()
+
+    def test_requires_authentication(self):
+        self.client.logout()
+        response = self.client.get(self._url())
+        self.assertIn(
+            response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+        )
+
+
+@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key")
+class BikeConditionReportViewTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="condition-report", password="pw")
+        self.profile = _make_profile(self.user, strava_athlete_id=11111)
+        self.client.force_login(self.user)
+        session = self.client.session
+        session["strava_athlete_id"] = self.profile.strava_athlete_id
+        session.save()
+
+        self.bike = Bike.objects.create(
+            athlete=self.profile, strava_bike_id="cr1", name="Berichtrad", bike_type=BikeType.ROAD
+        )
+        self.template = ComponentTemplate.objects.create(
+            name="Kette", category=ComponentCategory.DRIVETRAIN, warn_km=2000, is_system=False
+        )
+        self.slot = ComponentSlot.objects.create(bike=self.bike, template=self.template)
+        self.component = Component.objects.create(
+            slot=self.slot,
+            brand="KMC",
+            installed_at=date.today() - timedelta(days=30),
+            distance_at_install=0,
+            is_mounted=True,
+        )
+
+    def _url(self, refresh=False):
+        url = f"/api/maintenance/bikes/{self.bike.id}/condition-report/"
+        return url + "?refresh=true" if refresh else url
+
+    def test_no_mounted_components_returns_404(self):
+        self.component.is_mounted = False
+        self.component.save()
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data["code"], "no_data")
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_happy_path_generates_and_caches_report(self, mock_post):
+        mock_post.return_value = _gemini_response(
+            "Die Kette ist unauffällig, keine Komponente braucht aktuell Aufmerksamkeit."
+        )
+
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["cached"])
+        self.assertIn("Kette", response.data["report"])
+        mock_post.assert_called_once()
+
+        # Zweiter Aufruf: aus DB-Cache, kein erneuter Provider-Call
+        response2 = self.client.get(self._url())
+        self.assertEqual(response2.status_code, status.HTTP_200_OK)
+        self.assertTrue(response2.data["cached"])
+        mock_post.assert_called_once()
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_new_ride_invalidates_cached_report(self, mock_post):
+        mock_post.return_value = _gemini_response()
+        self.client.get(self._url())
+        mock_post.assert_called_once()
+
+        Ride.objects.create(
+            strava_id=9001,
+            name="Neue Fahrt",
+            distance=10000,
+            start_date=timezone.now(),
+            athlete=self.profile,
+            bike=self.bike,
+        )
+
+        response = self.client.get(self._url())
+        self.assertFalse(response.data["cached"])
+        self.assertEqual(mock_post.call_count, 2)
+
+    def test_requires_authentication(self):
+        self.client.logout()
+        response = self.client.get(self._url())
+        self.assertIn(
+            response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+        )

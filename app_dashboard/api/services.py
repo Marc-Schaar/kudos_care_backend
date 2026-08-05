@@ -256,6 +256,45 @@ class GeoSimplifyService:
         return list(simplified.coords)
 
 
+def _mean(values):
+    values = [v for v in (values or []) if v is not None]
+    return round(sum(values) / len(values), 1) if values else None
+
+
+def build_ride_summary_prompt(ride: Ride) -> tuple[str, str]:
+    """
+    Baut (system_prompt, user_prompt) fuer die KI-Zusammenfassung einer Fahrt.
+    Fasst nur bereits vorhandene Zahlen (Distanz/Dauer/Wetter/Gegenwind) in
+    Worten zusammen — die KI berechnet nichts selbst.
+    """
+    weather = ride.weather_data or {}
+    distance_km = round(ride.distance / 1000, 1) if ride.distance else None
+    duration_min = round(ride.elapsed_time / 60) if ride.elapsed_time else None
+
+    system_prompt = (
+        "Du bist ein Assistent für eine Fahrrad-Wartungs-App mit Strava-Integration. Du "
+        "bekommst bereits fertig berechnete Kennzahlen zu einer einzelnen Fahrt (Distanz, "
+        "Dauer, Wetter, Gegenwind). Fasse die Fahrt in 2-3 kurzen, allgemeinverständlichen "
+        "Sätzen auf Deutsch zusammen, wie ein kurzer Rückblick. Nutze ausschließlich die "
+        "gegebenen Zahlen — führe KEINE eigenen Berechnungen durch und erfinde KEINE "
+        "zusätzlichen Werte oder Statistiken. Fehlende Werte einfach weglassen, nicht "
+        "erwähnen. Halte den Ton sachlich, aber freundlich. Antworte nur mit dem Text, "
+        "ohne Einleitung, ohne Anführungszeichen."
+    )
+    user_prompt = (
+        f"Name der Fahrt: {ride.name}\n"
+        f"Fahrrad: {ride.bike.name if ride.bike else 'unbekannt'}\n"
+        f"Datum: {ride.start_date}\n"
+        f"Distanz: {distance_km} km\n"
+        f"Dauer: {duration_min} Minuten\n"
+        f"Durchschnittstemperatur: {_mean(weather.get('temperature_2m'))} °C\n"
+        f"Durchschnittlicher Niederschlag: {_mean(weather.get('precipitation'))} mm/h\n"
+        f"Durchschnittliche Windgeschwindigkeit: {_mean(weather.get('wind_speed_10m'))} km/h\n"
+        f"Durchschnittlicher Gegenwind: {weather.get('avg_headwind')} km/h\n"
+    )
+    return system_prompt, user_prompt
+
+
 class WeatherService:
     @staticmethod
     def get_historical_weather(lat, lon, date):

@@ -41,16 +41,23 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `weather_data` JSONField, FK zu `StravaProfile`+`Bike`), `RideStream` (Rohdaten-Zeitreihe).
   `api/services.py`: `StravaSyncService` (Bikes + paginierte Activities),
   `StravaImportService.sync_activity_to_db` (Polyline-Decode → Shapely-RDP-Simplify →
-  Gear-Matching → Streams → Open-Meteo-Wetter → Headwind-Berechnung), `WeatherService`.
+  Gear-Matching → Streams → Open-Meteo-Wetter → Headwind-Berechnung), `WeatherService`,
+  `build_ride_summary_prompt` (baut den Prompt für die optionale KI-Fahrt-Zusammenfassung,
+  nutzt denselben `app_maintenance.api.ai_providers.get_ai_provider()` wie die
+  Wetter-Verschleiß-Erklärung — App-Grenze bewusst überschritten statt dupliziert).
   Celery-Task `run_strava_sync` in `api/tasks.py`. Management-Command `recompute_wind.py`
-  (Backfill, `--dry-run`).
+  (Backfill, `--dry-run`). Endpoint `GET /api/activities/<id>/summary/?refresh=true`
+  liefert eine gecachte KI-Zusammenfassung der Fahrt (Distanz/Dauer/Wetter/Gegenwind);
+  Cache-Felder `Ride.ai_summary`/`ai_summary_generated_at`, keine Staleness-Prüfung nötig
+  da Ride-Zahlen nach dem Import unveränderlich sind (anders als beim Bike-Zustandsbericht).
 - **`app_maintenance`** — Kern-Domäne Verschleiß-Tracking. Models: `Bike`,
   `ComponentTemplate` (Katalog, Fixture `fixtures/component_templates.json`), `ComponentSlot`
   (Position am Bike, unique je `(bike, template)`), `Component` (physisches Teil,
   `is_mounted` via `clean()`/`save()`-Override erzwungen: nur 1 montiertes Teil je Slot;
   zusätzlich `weather_wear_km`/`weather_wear_ride_count`/`weather_wear_computed_at` — async
   von `WeatherWearService` befüllt, nie live berechnet), `WeatherSensitivityCoefficient`
-  (Regen/Hitze/Kälte/Wind-Gewichtung je `ComponentCategory`, geseedet in Migration `0006`,
+  (Regen/Hitze/Kälte/Wind-Gewichtung je `ComponentCategory`, geseedet in Migration `0006`
+  bzw. für neu hinzugekommene Kategorien in Folgemigrationen wie `0011`,
   Basis für eine spätere Kalibrierung aus `ComponentCheck.condition_pct`-Verlauf),
   `ComponentCheck` (Log eines Checks/Release, optional `condition_pct` + Snooze).
   `AthleteMixin` (`api/views.py`) scoped alle Querysets auf
@@ -66,11 +73,24 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `AI_PROVIDER=gemini` (Default) läuft intern ein `FallbackAIProvider`: primär das günstige
   Gemini-Flash-Lite-Modell (`GEMINI_MODEL`, Default `gemini-2.0-flash-lite`), bei Fehlschlag
   (fehlender Key/Timeout/Rate-Limit/...) automatisch Fallback auf Groq. `AI_PROVIDER=groq`
-  nutzt direkt nur Groq, ohne Fallback-Kette. Management-Command
-  `recompute_weather_wear.py` (Backfill, `--dry-run`).
-  Endpoints unter `/api/maintenance/`: `bikes/`, `bikes/<id>/slots/`, `slots/<id>/mount|unmount`,
-  `slots/<id>/components/`, `components/<id>/check/`, `components/<id>/weather-explanation/`,
-  `templates/`.
+  nutzt direkt nur Groq, ohne Fallback-Kette. Zweite KI-Erklärung analog dazu:
+  `bikes/<id>/condition-report/` fasst `compute_wear()` über alle aktuell montierten
+  Komponenten eines Bikes zusammen (statt nur eine Komponente/nur die Wetter-Achse);
+  Cache-Felder `Bike.condition_report`/`condition_report_generated_at`, Staleness über
+  `services.py::bike_condition_report_is_stale()` (Max über letzten Ride-Import,
+  `weather_wear_computed_at` der montierten Komponenten, letzten `ComponentCheck`).
+  Dritte KI-Erklärung: `components/<id>/check-instructions/` liefert eine praktische
+  Schritt-für-Schritt-Anleitung, wie der Nutzer die Komponente selbst prüfen kann
+  (`services.py::build_check_instructions_prompt`) — bekommt `compute_wear()`s
+  `warn_status_overall` nur als Dringlichkeits-Kontext, berechnet sonst nichts selbst.
+  Cache-Felder `Component.check_instructions`/`check_instructions_status`/
+  `check_instructions_generated_at`; Staleness simpler als bei den anderen beiden KI-Endpoints
+  (kein Zahlen-Vergleich nötig) — ungültig sobald sich `warn_status_overall` seit der letzten
+  Generierung geändert hat (typischerweise nach einer Freigabe via `ComponentCheckView`).
+  Management-Command `recompute_weather_wear.py` (Backfill, `--dry-run`).
+  Endpoints unter `/api/maintenance/`: `bikes/`, `bikes/<id>/slots/`, `bikes/<id>/condition-report/`,
+  `slots/<id>/mount|unmount`, `slots/<id>/components/`, `components/<id>/check/`,
+  `components/<id>/weather-explanation/`, `components/<id>/check-instructions/`, `templates/`.
 - **`app_strava_webhook`** — Strava-Push-Webhook, Endpoint **außerhalb** von `/api/`:
   `/strava/webhook/`. `GET` = Subscription-Challenge, `POST` → Celery-Task
   `process_strava_webhook` (max_retries=3): `delete` löscht `Ride`, `create` importiert via
@@ -128,14 +148,18 @@ funktioniert unabhängig davon. Werte niemals in Doku oder Code-Kommentare über
 
 Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
 - `app_dashboard/tests.py`: `StravaSyncView` (Dispatch, No-Double-Dispatch, Auth-Required),
-  `run_strava_sync`-Task (Success, 403-Reconnect, Generic-Failure) via `unittest.mock`.
+  `run_strava_sync`-Task (Success, 403-Reconnect, Generic-Failure) via `unittest.mock`,
+  `ActivitySummaryViewTests` (KI-Fahrt-Zusammenfassung, Caching/Refresh, `requests.post`
+  gemockt über `app_maintenance.api.ai_providers.requests.post`).
 - `app_maintenance/tests.py`: `ComponentCheckTests` (Custom-Warn-Days, Overdue/Critical,
   `condition_pct`-Rejection, Release via Check mit Snooze, Auth-Required, Wetter-Achse
   treibt `warn_status_overall`).
 - `app_maintenance/test_weather_wear.py`: `WeatherWearCalculatorTests` (reine Formel, keine
   DB), `WeatherWearServiceTests` (Recompute gegen echte `Ride`-Objekte),
   `ComponentWeatherExplanationViewTests` (KI-Endpoint, `requests.post` gemockt in
-  `ai_providers.py`).
+  `ai_providers.py`), `ComponentCheckInstructionsViewTests` (KI-Prüfanleitung, Caching,
+  Invalidierung durch Status-Änderung nach Freigabe), `BikeConditionReportViewTests`
+  (KI-Zustandsbericht, Caching, Invalidierung durch neuen Ride-Import).
 - Keine Tests für `app_auth`/`app_strava_webhook`.
 
 ---

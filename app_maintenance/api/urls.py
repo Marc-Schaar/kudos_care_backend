@@ -13,6 +13,8 @@ from .views import (
     ComponentDetailView,
     ComponentCheckView,
     ComponentWeatherExplanationView,
+    ComponentCheckInstructionsView,
+    BikeConditionReportView,
 )
 
 urlpatterns = [
@@ -22,6 +24,11 @@ urlpatterns = [
         "maintenance/bikes/<int:bike_id>/distance-at/",
         BikeDistanceAtDateView.as_view(),
         name="bike-distance-at",
+    ),
+    path(
+        "maintenance/bikes/<int:pk>/condition-report/",
+        BikeConditionReportView.as_view(),
+        name="bike-condition-report",
     ),
     path(
         "maintenance/bikes/<int:bike_id>/slots/",
@@ -60,6 +67,11 @@ urlpatterns = [
         "maintenance/components/<int:pk>/weather-explanation/",
         ComponentWeatherExplanationView.as_view(),
         name="component-weather-explanation",
+    ),
+    path(
+        "maintenance/components/<int:pk>/check-instructions/",
+        ComponentCheckInstructionsView.as_view(),
+        name="component-check-instructions",
     ),
     path(
         "maintenance/templates/",

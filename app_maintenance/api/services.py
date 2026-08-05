@@ -1,8 +1,9 @@
 import logging
 
+from django.db.models import Max
 from django.utils import timezone
 
-from app_maintenance.models import Bike, Component, WeatherSensitivityCoefficient
+from app_maintenance.models import Bike, Component, ComponentCheck, WeatherSensitivityCoefficient
 
 logger = logging.getLogger("my_app_debug")
 
@@ -191,4 +192,102 @@ def build_weather_explanation_prompt(component: Component, wear: dict) -> tuple[
         f"Empfohlene Lebensdauer: {component.effective_warn_km} km\n"
         f"Aktueller wetterbereinigter Status: {wear.get('warn_status_weather_km')}\n"
     )
+    return system_prompt, user_prompt
+
+
+def build_check_instructions_prompt(component: Component, wear: dict) -> tuple[str, str]:
+    """
+    Baut (system_prompt, user_prompt) fuer eine KI-Anleitung, WIE der Nutzer die
+    Komponente selbst am besten prueft. Anders als build_weather_explanation_prompt
+    (erklaert bereits berechnete Zahlen) geht es hier um praktische Handlungsschritte —
+    die KI bekommt den aktuellen Verschleiss-Status nur als Kontext fuer die
+    Dringlichkeit, erfindet aber keine eigenen Zahlen.
+    """
+    template = component.slot.template
+
+    system_prompt = (
+        "Du bist ein Assistent für eine Fahrrad-Wartungs-App. Ein Nutzer möchte wissen, "
+        "wie er eine bestimmte Fahrradkomponente selbst prüfen kann. Gib eine kurze, "
+        "praktische Schritt-für-Schritt-Anleitung auf Deutsch (3-6 Punkte als Liste mit "
+        "Bindestrichen), worauf beim Prüfen zu achten ist, welche einfachen Hilfsmittel "
+        "ggf. nötig sind, und welche Anzeichen für einen notwendigen Austausch sprechen. "
+        "Nutze den angegebenen Verschleiß-Status nur, um die Dringlichkeit einzuordnen — "
+        "erfinde KEINE eigenen Zahlen oder Messwerte. Weise bei sicherheitskritischen "
+        "Komponenten (z.B. Bremsen, Federung, Rahmen) klar darauf hin, dass im Zweifel "
+        "eine Fachwerkstatt die Prüfung übernehmen sollte. Antworte nur mit der Anleitung, "
+        "ohne Einleitung, ohne Anführungszeichen."
+    )
+    user_prompt = (
+        f"Komponente: {template.name} ({template.get_category_display()})\n"
+        f"Verschleiß seit Einbau: {wear.get('wear_km')} km / {wear.get('wear_days')} Tage\n"
+        f"Wetterbereinigter Verschleiß: {component.weather_wear_km} km\n"
+        f"Empfohlene Lebensdauer: {component.effective_warn_km} km / "
+        f"{component.effective_warn_days} Tage\n"
+        f"Aktueller Gesamt-Status: {wear.get('warn_status_overall')}\n"
+    )
+    return system_prompt, user_prompt
+
+
+def bike_condition_report_is_stale(bike: Bike) -> bool:
+    """
+    True wenn der gecachte Zustandsbericht noch nie generiert wurde, oder wenn
+    sich seither Zahlen geändert haben könnten, die in den Bericht eingeflossen
+    sind: neue Fahrten (km-Achse), eine Wetter-Verschleiß-Neuberechnung, oder
+    eine neue Prüfung/Freigabe. Es gibt keinen einzelnen "computed_at"-Zeitstempel
+    für den Gesamtzustand (anders als bei Component.weather_wear_computed_at),
+    daher die Max-Aggregation über die drei Signalquellen.
+    """
+    generated_at = bike.condition_report_generated_at
+    if generated_at is None:
+        return True
+
+    latest_ride = bike.rides.aggregate(latest=Max("created_at"))["latest"]
+    if latest_ride and latest_ride > generated_at:
+        return True
+
+    mounted = Component.objects.filter(slot__bike=bike, is_mounted=True)
+    latest_weather = mounted.aggregate(latest=Max("weather_wear_computed_at"))["latest"]
+    if latest_weather and latest_weather > generated_at:
+        return True
+
+    latest_check = ComponentCheck.objects.filter(component__slot__bike=bike).aggregate(
+        latest=Max("created_at")
+    )["latest"]
+    if latest_check and latest_check > generated_at:
+        return True
+
+    return False
+
+
+def build_bike_condition_report_prompt(bike: Bike, component_summaries: list[dict]) -> tuple[str, str]:
+    """
+    Baut (system_prompt, user_prompt) fuer den Gesamt-Zustandsbericht eines Bikes.
+    `component_summaries` enthält je montierter Komponente Name/Kategorie plus das
+    compute_wear()-Ergebnis (siehe BikeConditionReportView) — die KI berechnet nichts
+    selbst, sie fasst nur die bereits berechneten Werte in Worten zusammen.
+    """
+    system_prompt = (
+        "Du bist ein Assistent für eine Fahrrad-Wartungs-App. Du bekommst bereits fertig "
+        "berechnete Verschleiß-Kennzahlen aller aktuell montierten Komponenten eines "
+        "Fahrrads. Fasse den Gesamtzustand in 3-5 kurzen, allgemeinverständlichen Sätzen "
+        "auf Deutsch zusammen: welche Komponenten kritisch oder bald fällig sind und "
+        "welche unproblematisch sind. Nutze ausschließlich die gegebenen Zahlen — führe "
+        "KEINE eigenen Berechnungen durch und erfinde KEINE zusätzlichen Werte oder "
+        "Komponenten. Halte den Ton sachlich und konkret. Antworte nur mit dem Text, "
+        "ohne Einleitung, ohne Anführungszeichen."
+    )
+
+    lines = [
+        f"Fahrrad: {bike.name} ({bike.get_bike_type_display()})",
+        f"Gesamtkilometer: {bike.total_distance_km}",
+        "Komponenten:",
+    ]
+    for summary in component_summaries:
+        lines.append(
+            f"- {summary['name']} ({summary['category']}): "
+            f"{summary['wear_km']} km / {summary['wear_days']} Tage seit Einbau, "
+            f"wetterbereinigt {summary['weather_wear_km']} km, "
+            f"Status: {summary['warn_status_overall']}"
+        )
+    user_prompt = "\n".join(lines)
     return system_prompt, user_prompt

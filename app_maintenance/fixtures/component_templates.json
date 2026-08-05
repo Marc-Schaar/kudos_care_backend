@@ -837,5 +837,156 @@
       "is_system": true,
       "notes": ""
     }
+  },
+
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 54,
+    "fields": {
+      "name": "Kettenwachs (Heißwachs/Tauchbad) auffrischen",
+      "category": "drivetrain",
+      "applicable_bike_types": [],
+      "warn_km": 300,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Kette vor dem Wachsen rückstandsfrei entwachsen/reinigen (z.B. Ultraschall). Bei Nässe früher auffrischen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 55,
+    "fields": {
+      "name": "Kettenwachs (Tropf-/Flüssigwachs) auffrischen",
+      "category": "drivetrain",
+      "applicable_bike_types": [],
+      "warn_km": 150,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Flüssigwachs (z.B. Tropfwachs) hält kürzer als Tauchwachs, besonders bei Nässe."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 56,
+    "fields": {
+      "name": "Kettenöl / Kettenschmierung auffrischen",
+      "category": "drivetrain",
+      "applicable_bike_types": [],
+      "warn_km": 200,
+      "warn_hours": null,
+      "warn_days": null,
+      "is_system": true,
+      "notes": "Klassisches Nass-/Trockenschmiermittel. Bei Regen deutlich früher nachschmieren."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 57,
+    "fields": {
+      "name": "Schaltung Akku (Di2/AXS) laden",
+      "category": "drivetrain",
+      "applicable_bike_types": [
+        "road",
+        "gravel",
+        "cx",
+        "mtb",
+        "triathlon",
+        "ebike_road",
+        "ebike_mtb"
+      ],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 21,
+      "is_system": true,
+      "notes": "Elektronische Schaltung (z.B. Shimano Di2, SRAM AXS). Ladeintervall variiert stark je nach Akkugröße/Nutzung, hier nur als Erinnerung."
+    }
+  },
+
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 58,
+    "fields": {
+      "name": "Felgenband vorne",
+      "category": "wheels",
+      "applicable_bike_types": [],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 1095,
+      "is_system": true,
+      "notes": "Auf Risse, Verrutschen oder Durchscheuern prüfen, v.a. bei Tubeless."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 59,
+    "fields": {
+      "name": "Felgenband hinten",
+      "category": "wheels",
+      "applicable_bike_types": [],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 1095,
+      "is_system": true,
+      "notes": ""
+    }
+  },
+
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 60,
+    "fields": {
+      "name": "Schutzbleche",
+      "category": "accessories",
+      "applicable_bike_types": ["city", "ebike_city", "gravel", "cx", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 730,
+      "is_system": true,
+      "notes": "Auf Risse, lockere Streben und Scheuern am Reifen prüfen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 61,
+    "fields": {
+      "name": "Gepäckträger",
+      "category": "accessories",
+      "applicable_bike_types": ["city", "ebike_city", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 730,
+      "is_system": true,
+      "notes": "Schrauben auf festen Sitz prüfen, v.a. bei Lastentransport."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 62,
+    "fields": {
+      "name": "Ständer",
+      "category": "accessories",
+      "applicable_bike_types": ["city", "ebike_city", "other"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 730,
+      "is_system": true,
+      "notes": "Klemmung und Gelenk auf Spiel prüfen."
+    }
+  },
+  {
+    "model": "app_maintenance.componenttemplate",
+    "pk": 63,
+    "fields": {
+      "name": "Powermeter Batterie",
+      "category": "accessories",
+      "applicable_bike_types": ["road", "gravel", "cx", "mtb", "triathlon"],
+      "warn_km": null,
+      "warn_hours": null,
+      "warn_days": 90,
+      "is_system": true,
+      "notes": "Knopfzelle oder Akku je nach Hersteller (z.B. 4iiii, Quarq, Assioma)."
+    }
   }
 ]

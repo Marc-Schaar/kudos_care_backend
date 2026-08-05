@@ -29,6 +29,7 @@ class ComponentCategory(models.TextChoices):
     FRAME = "frame", "Rahmen & Lager"
     ELECTRIC = "electric", "E-Antrieb"
     LIGHTING = "lighting", "Beleuchtung"
+    ACCESSORIES = "accessories", "Zubehör"
     OTHER = "other", "Sonstiges"
 
 
@@ -48,6 +49,19 @@ class Bike(models.Model):
     retired = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Zwischengespeicherter KI-Zustandsbericht über alle montierten Komponenten
+    # (siehe app_maintenance/api/services.py::build_bike_condition_report_prompt).
+    condition_report = models.TextField(
+        blank=True,
+        default="",
+        help_text="Zwischengespeicherte KI-generierte Zusammenfassung (Deutsch) des Gesamtzustands des Bikes.",
+    )
+    condition_report_generated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Zeitpunkt der letzten Zustandsbericht-Generierung.",
+    )
 
     class Meta:
         ordering = ["name"]
@@ -246,6 +260,29 @@ class Component(models.Model):
             "weather_wear_computed_at verglichen, um die Erklärung bei neuen Zahlen "
             "ungültig zu machen."
         ),
+    )
+
+    # Zwischengespeicherte KI-Anleitung "wie prüfe ich diese Komponente" (siehe
+    # app_maintenance/api/services.py::build_check_instructions_prompt). Anders als bei
+    # weather_wear_explanation gibt es keinen einzelnen "Quelldaten geändert"-Zeitstempel,
+    # gegen den man vergleichen könnte — die Anleitung wird stattdessen ungültig, wenn sich
+    # der Gesamt-Warn-Status seit der Generierung verändert hat (siehe
+    # check_instructions_status).
+    check_instructions = models.TextField(
+        blank=True,
+        default="",
+        help_text="Zwischengespeicherte KI-generierte Prüfanleitung (Deutsch) für diese Komponente.",
+    )
+    check_instructions_status = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        help_text="warn_status_overall zum Zeitpunkt der letzten Anleitung-Generierung.",
+    )
+    check_instructions_generated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Zeitpunkt der letzten Prüfanleitung-Generierung.",
     )
 
     created_at = models.DateTimeField(auto_now_add=True)

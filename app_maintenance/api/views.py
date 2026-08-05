@@ -27,7 +27,12 @@ from .serializers import (
     ComponentCheckCreateSerializer,
     compute_wear,
 )
-from .services import build_weather_explanation_prompt
+from .services import (
+    build_weather_explanation_prompt,
+    build_check_instructions_prompt,
+    build_bike_condition_report_prompt,
+    bike_condition_report_is_stale,
+)
 from .ai_providers import get_ai_provider
 import logging
 logger = logging.getLogger('my_app_debug')
@@ -419,6 +424,146 @@ class ComponentWeatherExplanationView(AthleteMixin, APIView):
             {
                 "explanation": explanation,
                 "generated_at": component.weather_wear_explanation_generated_at,
+                "cached": False,
+            }
+        )
+
+
+class ComponentCheckInstructionsView(AthleteMixin, APIView):
+    """
+    GET /api/maintenance/components/{pk}/check-instructions/?refresh=true
+
+    Liefert eine gecachte, KI-generierte Schritt-für-Schritt-Anleitung, wie der
+    Nutzer diese Komponente selbst prüfen kann. Regeneriert nur wenn noch keine
+    existiert, sich der Gesamt-Warn-Status seit der letzten Generierung geändert
+    hat, oder ?refresh=true übergeben wurde. Die KI erfindet dabei keine eigenen
+    Verschleiß-Zahlen — sie bekommt den bereits berechneten Status nur als
+    Kontext für die Dringlichkeit.
+    """
+
+    def get(self, request, pk):
+        component = get_object_or_404(
+            Component, pk=pk, slot__bike__athlete=self.get_athlete()
+        )
+
+        wear = compute_wear(component, component.slot.bike.total_distance_km)
+
+        force_refresh = request.query_params.get("refresh") == "true"
+        is_stale = component.check_instructions_status != wear["warn_status_overall"]
+
+        if component.check_instructions and not is_stale and not force_refresh:
+            return Response(
+                {
+                    "instructions": component.check_instructions,
+                    "generated_at": component.check_instructions_generated_at,
+                    "cached": True,
+                }
+            )
+
+        system_prompt, user_prompt = build_check_instructions_prompt(component, wear)
+        instructions = get_ai_provider().generate_text(system_prompt, user_prompt)
+
+        if instructions is None:
+            return Response(
+                {
+                    "error": "KI-Prüfanleitung aktuell nicht verfügbar. Bitte später erneut versuchen.",
+                    "code": "ai_unavailable",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        component.check_instructions = instructions
+        component.check_instructions_status = wear["warn_status_overall"]
+        component.check_instructions_generated_at = timezone.now()
+        component.save(
+            update_fields=[
+                "check_instructions",
+                "check_instructions_status",
+                "check_instructions_generated_at",
+            ]
+        )
+
+        return Response(
+            {
+                "instructions": instructions,
+                "generated_at": component.check_instructions_generated_at,
+                "cached": False,
+            }
+        )
+
+
+class BikeConditionReportView(AthleteMixin, APIView):
+    """
+    GET /api/maintenance/bikes/{pk}/condition-report/?refresh=true
+
+    Liefert einen gecachten, KI-generierten Zustandsbericht über alle aktuell
+    montierten Komponenten des Bikes. Regeneriert nur wenn noch keiner existiert,
+    sich die zugrunde liegenden Zahlen seither geändert haben könnten (siehe
+    bike_condition_report_is_stale), oder ?refresh=true übergeben wurde. Die KI
+    berechnet dabei nichts selbst — sie fasst nur bereits von compute_wear()
+    berechnete Werte in Worten zusammen.
+    """
+
+    def get(self, request, pk):
+        bike = get_object_or_404(Bike, pk=pk, athlete=self.get_athlete())
+
+        slots = bike.slots.select_related("template").prefetch_related("components")
+        component_summaries = []
+        for slot in slots:
+            comp = slot.mounted_component
+            if comp is None:
+                continue
+            wear = compute_wear(comp, bike.total_distance_km)
+            component_summaries.append(
+                {
+                    "name": slot.display_name,
+                    "category": slot.template.get_category_display(),
+                    "wear_km": wear["wear_km"],
+                    "wear_days": wear["wear_days"],
+                    "weather_wear_km": comp.weather_wear_km,
+                    "warn_status_overall": wear["warn_status_overall"],
+                }
+            )
+
+        if not component_summaries:
+            return Response(
+                {
+                    "error": "Keine montierten Komponenten für einen Zustandsbericht vorhanden.",
+                    "code": "no_data",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        force_refresh = request.query_params.get("refresh") == "true"
+        if bike.condition_report and not force_refresh and not bike_condition_report_is_stale(bike):
+            return Response(
+                {
+                    "report": bike.condition_report,
+                    "generated_at": bike.condition_report_generated_at,
+                    "cached": True,
+                }
+            )
+
+        system_prompt, user_prompt = build_bike_condition_report_prompt(bike, component_summaries)
+        report = get_ai_provider().generate_text(system_prompt, user_prompt)
+
+        if report is None:
+            return Response(
+                {
+                    "error": "KI-Zustandsbericht aktuell nicht verfügbar. Bitte später erneut versuchen.",
+                    "code": "ai_unavailable",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        bike.condition_report = report
+        bike.condition_report_generated_at = timezone.now()
+        bike.save(update_fields=["condition_report", "condition_report_generated_at"])
+
+        return Response(
+            {
+                "report": report,
+                "generated_at": bike.condition_report_generated_at,
                 "cached": False,
             }
         )

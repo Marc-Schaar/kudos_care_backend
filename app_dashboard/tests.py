@@ -1,14 +1,17 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
 from django.contrib.auth import get_user_model
+from django.test import override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
 from app_dashboard.api.tasks import run_strava_sync
 from app_dashboard.api.services import StravaImportService
+from app_dashboard.models import Ride
 from app_maintenance.models import Bike, BikeType
 
 
@@ -257,3 +260,88 @@ class SyncActivityToDbWeatherWearHookTests(APITestCase):
         StravaImportService.sync_activity_to_db(self._activity_data(2002, gear_id=None), self.profile)
 
         mock_delay.assert_not_called()
+
+
+@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key")
+class ActivitySummaryViewTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="ride-summary", password="pw")
+        self.profile = _make_profile(self.user)
+        self.client.force_login(self.user)
+        session = self.client.session
+        session["strava_athlete_id"] = self.profile.strava_athlete_id
+        session.save()
+
+        self.ride = Ride.objects.create(
+            strava_id=5001,
+            name="Feierabendrunde",
+            distance=25000,
+            elapsed_time=3600,
+            start_date=timezone.now(),
+            athlete=self.profile,
+            weather_data={
+                "temperature_2m": [18.0, 19.0],
+                "precipitation": [0.0, 0.0],
+                "wind_speed_10m": [10.0, 12.0],
+                "avg_headwind": 2.5,
+            },
+        )
+
+    def _url(self, refresh=False):
+        url = f"/api/activities/{self.ride.id}/summary/"
+        return url + "?refresh=true" if refresh else url
+
+    def _gemini_response(self, text):
+        resp = Mock()
+        resp.raise_for_status = Mock()
+        resp.json.return_value = {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+        return resp
+
+    def test_no_ride_data_returns_404(self):
+        empty_ride = Ride.objects.create(strava_id=5002, name="Leer", athlete=self.profile)
+        response = self.client.get(f"/api/activities/{empty_ride.id}/summary/")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data["code"], "no_data")
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_happy_path_generates_and_caches_summary(self, mock_post):
+        mock_post.return_value = self._gemini_response(
+            "Eine entspannte Feierabendrunde bei mildem Wetter."
+        )
+
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["cached"])
+        self.assertIn("Feierabendrunde", response.data["summary"])
+        mock_post.assert_called_once()
+
+        # Zweiter Aufruf: aus DB-Cache, kein erneuter Provider-Call
+        response2 = self.client.get(self._url())
+        self.assertEqual(response2.status_code, status.HTTP_200_OK)
+        self.assertTrue(response2.data["cached"])
+        mock_post.assert_called_once()
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_refresh_forces_regeneration(self, mock_post):
+        mock_post.return_value = self._gemini_response("Erste Zusammenfassung.")
+        self.client.get(self._url())
+        mock_post.assert_called_once()
+
+        mock_post.return_value = self._gemini_response("Zweite Zusammenfassung.")
+        response = self.client.get(self._url(refresh=True))
+        self.assertFalse(response.data["cached"])
+        self.assertEqual(mock_post.call_count, 2)
+
+    @override_settings(GEMINI_API_KEY="", GROQ_API_KEY="")
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_missing_api_keys_returns_503_without_http_call(self, mock_post):
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        mock_post.assert_not_called()
+
+    def test_requires_authentication(self):
+        self.client.logout()
+        response = self.client.get(self._url())
+        self.assertIn(
+            response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+        )
