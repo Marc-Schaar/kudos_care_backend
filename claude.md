@@ -114,6 +114,11 @@ Django Built-in `User` (kein `AUTH_USER_MODEL`-Override), 1:1 verknüpft mit `St
 Frontend holt Strava-OAuth-`code` → `POST /api/strava/auth/` → Backend tauscht Token,
 erstellt/aktualisiert `User`+`StravaProfile`, ruft `login()`, speichert zusätzlich
 `strava_athlete_id` in der Session (wird downstream statt `request.user` genutzt).
+Der echte Name (`firstname`/`lastname` aus der Strava-Antwort) wird bewusst **nicht**
+persistiert (kein DB-Feld, daher auch nicht im Admin sichtbar) — `StravaAuthCallbackView`
+gibt ihn nur einmalig im Login-Response direkt aus `athlete_data` zurück, `GET /api/strava/me/`
+liefert nur die `athlete_id`. Das Frontend cached den Namen für die Begrüßung clientseitig
+in `localStorage` (`StravaService.setLoggedInUser`/`displayNameStorageKey`), nicht im Backend.
 **Nur Session-Cookie-Auth**, kein JWT. `CsrfExemptSessionAuthentication`
 (`app_auth/mixins.py`) nur auf Login/Logout. Jede View setzt `permission_classes` explizit.
 
