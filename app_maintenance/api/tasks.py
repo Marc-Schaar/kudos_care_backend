@@ -14,6 +14,7 @@ def recompute_weather_wear_for_bike(self, bike_id: int):
     """
     from app_maintenance.models import Bike
     from app_maintenance.api.services import WeatherWearService
+    from app_notifications.tasks import check_component_warnings_for_bike
 
     try:
         bike = Bike.objects.get(pk=bike_id)
@@ -23,6 +24,10 @@ def recompute_weather_wear_for_bike(self, bike_id: int):
 
     try:
         count = WeatherWearService.recompute_bike(bike)
+        # Nach der Neuberechnung koennen sich warn_status_overall-Werte geaendert haben
+        # (km- und wetter-Achse) — direkt pruefen, ob eine Warn-E-Mail faellig ist, statt
+        # bis zum naechsten taeglichen Check zu warten (siehe app_notifications).
+        check_component_warnings_for_bike.delay(bike.id)
         return f"{count} Komponenten fuer Bike {bike_id} neu berechnet."
     except Exception as exc:
         logger.exception("Wetter-Verschleiss-Neuberechnung fuer Bike %s fehlgeschlagen.", bike_id)

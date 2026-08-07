@@ -28,7 +28,7 @@ class RideAdmin(GISModelAdmin):
         "elapsed_time",
     ]
     list_filter = ["bike__bike_type", "start_date"]
-    search_fields = ["name", "strava_id", "athlete__firstname", "athlete__lastname"]
+    search_fields = ["name", "strava_id", "athlete__strava_athlete_id"]
     date_hierarchy = "start_date"
     raw_id_fields = ["athlete", "bike"]
     readonly_fields = [

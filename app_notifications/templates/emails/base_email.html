@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Kudos Care{% endblock %}</title>
+<style>
+  body { margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  .wrapper { width: 100%; background-color: #f3f4f6; padding: 24px 0; }
+  .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; }
+  .header { background-color: #111827; padding: 20px 32px; }
+  .header .brand { color: #ffffff; font-size: 18px; font-weight: 700; text-decoration: none; letter-spacing: 0.02em; }
+  .body { padding: 32px; color: #1f2937; font-size: 15px; line-height: 1.6; }
+  .body h1 { font-size: 20px; margin: 0 0 16px; color: #111827; }
+  .body p { margin: 0 0 16px; }
+  .cta { display: inline-block; background-color: #111827; color: #ffffff !important; text-decoration: none; padding: 12px 20px; border-radius: 6px; font-size: 14px; font-weight: 600; margin-top: 8px; }
+  .item-list { width: 100%; border-collapse: collapse; margin: 8px 0 20px; }
+  .item-list td { padding: 10px 0; border-bottom: 1px solid #e5e7eb; font-size: 14px; vertical-align: top; }
+  .item-title { font-weight: 600; color: #111827; }
+  .item-meta { color: #6b7280; font-size: 13px; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; white-space: nowrap; }
+  .badge-warn { background-color: #fef3c7; color: #92400e; }
+  .badge-critical { background-color: #fee2e2; color: #991b1b; }
+  .footer { padding: 20px 32px 28px; color: #9ca3af; font-size: 12px; line-height: 1.5; }
+  .footer a { color: #9ca3af; }
+</style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="container">
+    <div class="header">
+      <span class="brand">Kudos Care</span>
+    </div>
+    <div class="body">
+      {% block content %}{% endblock %}
+    </div>
+    <div class="footer">
+      Diese E-Mail wurde automatisch von Kudos Care verschickt, basierend auf deinen
+      getrackten Fahrten und Komponenten.
+    </div>
+  </div>
+</div>
+</body>
+</html>

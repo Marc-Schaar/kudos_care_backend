@@ -6,21 +6,27 @@ from .models import StravaProfile
 @admin.register(StravaProfile)
 class StravaProfileAdmin(admin.ModelAdmin):
     list_display = [
-        "__str__",
-        "user",
         "strava_athlete_id",
+        "user",
+        "email_notifications_enabled",
+        "welcome_email_sent_at",
         "sync_status",
         "sync_finished_at",
         "last_sync_count",
     ]
-    list_filter = ["sync_status"]
-    search_fields = ["firstname", "lastname", "strava_athlete_id", "user__username", "user__email"]
+    list_filter = ["email_notifications_enabled", "sync_status"]
+    search_fields = ["strava_athlete_id", "user__username", "user__email"]
     autocomplete_fields = ["user"]
+    actions = ["send_welcome_email"]
 
     fieldsets = [
         (
             None,
-            {"fields": ["user", "strava_athlete_id", "firstname", "lastname"]},
+            {"fields": ["user", "strava_athlete_id"]},
+        ),
+        (
+            "Benachrichtigungen",
+            {"fields": ["email_notifications_enabled", "welcome_email_sent_at"]},
         ),
         (
             "Tokens",
@@ -46,6 +52,7 @@ class StravaProfileAdmin(admin.ModelAdmin):
         ),
     ]
     readonly_fields = [
+        "welcome_email_sent_at",
         "access_token_preview",
         "refresh_token_preview",
         "sync_started_at",
@@ -54,6 +61,23 @@ class StravaProfileAdmin(admin.ModelAdmin):
         "sync_progress_current",
         "sync_progress_total",
     ]
+
+    @admin.action(description="Willkommens-E-Mail senden")
+    def send_welcome_email(self, request, queryset):
+        from app_notifications.tasks import send_welcome_email_task
+
+        eligible = queryset.filter(user__isnull=False).exclude(user__email="")
+        skipped = queryset.count() - eligible.count()
+
+        for profile in eligible:
+            send_welcome_email_task.delay(profile.id)
+
+        message = f"Willkommens-E-Mail für {eligible.count()} Profil(e) eingeplant."
+        if skipped:
+            message += (
+                f" {skipped} Profil(e) übersprungen (keine E-Mail-Adresse hinterlegt)."
+            )
+        self.message_user(request, message)
 
     @admin.display(description="Access Token")
     def access_token_preview(self, obj):

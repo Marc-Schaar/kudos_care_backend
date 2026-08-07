@@ -13,7 +13,7 @@ from .models import (
 class BikeAdmin(admin.ModelAdmin):
     list_display = ["name", "bike_type", "athlete", "retired", "total_distance_km"]
     list_filter = ["bike_type", "retired"]
-    search_fields = ["name", "strava_bike_id", "athlete__firstname", "athlete__lastname"]
+    search_fields = ["name", "strava_bike_id", "athlete__strava_athlete_id"]
     raw_id_fields = ["athlete"]
     readonly_fields = ["created_at", "updated_at", "condition_report", "condition_report_generated_at"]
 

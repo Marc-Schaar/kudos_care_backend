@@ -32,7 +32,9 @@ class WarnStatus:
         return WarnStatus.OK
 
 
-def compute_wear(component: Component, bike_total_km: float | None) -> dict:
+def compute_wear(
+    component: Component, bike_total_km: float | None, as_of: date | None = None
+) -> dict:
     """
     Berechnet Verschleiß und Warn-Status für eine montierte Komponente.
     Gibt ein Dict zurück das direkt im Serializer verwendet wird.
@@ -42,7 +44,14 @@ def compute_wear(component: Component, bike_total_km: float | None) -> dict:
     ab dem Zeitpunkt der letzten Prüfung neu berechnet ("Freigeben"), mit dem
     dabei angegebenen Snooze-Intervall (falls keins angegeben wurde, gilt ab
     der Prüfung wieder die normale empfohlene/individuelle Lebensdauer).
+
+    `as_of` erlaubt eine Projektion auf ein zukünftiges Datum (siehe
+    app_notifications — "voraussichtlich unsafe bei nächster Fahrt"): nur die
+    Tage-Achse wird dadurch wirklich projiziert, `bike_total_km` bleibt der
+    übergebene (heutige) Wert, da zukünftige Distanz nicht bekannt ist. Default
+    (None) = heute, identisch zum bisherigen Verhalten.
     """
+    as_of = as_of or date.today()
     warn_km = component.effective_warn_km
     warn_days = component.effective_warn_days
 
@@ -61,7 +70,7 @@ def compute_wear(component: Component, bike_total_km: float | None) -> dict:
 
     # ── Tage-Verschleiß (informativ, seit Einbau) ─────────────────────────────
     if component.installed_at:
-        result["wear_days"] = (date.today() - component.installed_at).days
+        result["wear_days"] = (as_of - component.installed_at).days
 
     # ── Status-Baseline: letzte Prüfung falls vorhanden, sonst Einbau ────────
     latest_check = component.checks.first()
@@ -75,7 +84,7 @@ def compute_wear(component: Component, bike_total_km: float | None) -> dict:
             else:
                 result["warn_status_km"] = WarnStatus.OK
 
-        days_since_check = (date.today() - latest_check.checked_at).days
+        days_since_check = (as_of - latest_check.checked_at).days
         threshold_days = latest_check.snooze_days or warn_days
         if threshold_days:
             result["warn_status_days"] = WarnStatus.from_ratio(days_since_check / threshold_days)

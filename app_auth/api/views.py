@@ -15,6 +15,7 @@ from app_auth.models import StravaProfile
 from .serializers import StravaAuthSerializer
 
 from app_auth.mixins import CsrfExemptSessionAuthentication
+from app_notifications.tasks import send_welcome_email_task
 from .utils import sync_bikes_from_strava
 
 
@@ -66,8 +67,6 @@ class StravaAuthCallbackView(APIView):
             profile, created = StravaProfile.objects.update_or_create(
                 strava_athlete_id=athlete_data.get("id"),
                 defaults={
-                    "firstname": athlete_data.get("firstname", ""),
-                    "lastname": athlete_data.get("lastname", ""),
                     "access_token": response_data.get("access_token"),
                     "refresh_token": response_data.get("refresh_token"),
                     "expires_at": response_data.get("expires_at"),
@@ -81,6 +80,7 @@ class StravaAuthCallbackView(APIView):
                 profile.user = user
                 profile.save()
                 sync_bikes_from_strava(athlete_data, profile)
+                send_welcome_email_task.delay(profile.id)
 
             login(request, profile.user)
 
@@ -91,8 +91,8 @@ class StravaAuthCallbackView(APIView):
                     "message": "Erfolgreich mit Strava verbunden!",
                     "athlete": {
                         "id": profile.strava_athlete_id,
-                        "firstname": profile.firstname,
-                        "lastname": profile.lastname,
+                        "firstname": athlete_data.get("firstname", ""),
+                        "lastname": athlete_data.get("lastname", ""),
                     },
                 },
                 status=status.HTTP_200_OK,
@@ -127,6 +127,4 @@ class CurrentUserView(APIView):
 
         profile = get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
 
-        return Response(
-            {"athlete_id": profile.strava_athlete_id, "firstname": profile.firstname}
-        )
+        return Response({"athlete_id": profile.strava_athlete_id})

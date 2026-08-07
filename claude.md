@@ -9,7 +9,9 @@ Bike-Komponenten (Kette, Reifen, Bremsbeläge, ...) wird anhand von km/Stunden/T
 Montage getrackt, zusätzlich wetter-gewichtet (Regen/Hitze/Kälte/Wind pro Ride, siehe
 `app_maintenance/api/services.py::WeatherWearService`), mit Status `ok` / `warn` / `critical`.
 Eine optionale KI-Erklärung (Gemini/Groq) narriert auf Anfrage die berechneten Zahlen in
-Worten, berechnet aber nie selbst. UI-Sprache und viele Code-Kommentare sind Deutsch.
+Worten, berechnet aber nie selbst. Bei Wartungsbedarf (aktuell oder anhand einer
+Fahrt-Vorhersage) sowie bei Erstanmeldung verschickt die App automatisch E-Mails (Brevo SMTP,
+siehe `app_notifications`). UI-Sprache und viele Code-Kommentare sind Deutsch.
 Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`.
 
 ## Tech Stack
@@ -27,6 +29,9 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
 - Migrations: `python manage.py makemigrations && python manage.py migrate`
 - Dev Server: `python manage.py runserver`
 - Celery Worker (nötig für Strava-Sync/Webhook): `celery -A core worker -l info` (Redis muss laufen)
+- Celery Beat (nötig für die täglichen `app_notifications`-Checks): `celery -A core beat -l info`
+  — zusätzlich zum Worker; in Produktion als eigenes Supervisor-Programm `celery-beat`
+  eingerichtet, wird von `deploy.yml` mitneugestartet
 - Tests: `python manage.py test` (kein pytest konfiguriert, trotz anderslautender Vermutung)
 - Linter/Formatter: `black . && isort . && flake8`
 
@@ -63,12 +68,19 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `AthleteMixin` (`api/views.py`) scoped alle Querysets auf
   `request.session["strava_athlete_id"]`. `WarnStatus` (`api/serializers.py`) berechnet
   `ok`/`warn`/`critical`/`unknown` aus einem Ratio (≥1.0 critical, ≥0.8 warn);
-  `compute_wear()` kombiniert km-/Tage-/Wetter-Achse zum schlechtesten Einzelwert.
+  `compute_wear()` kombiniert km-/Tage-/Wetter-Achse zum schlechtesten Einzelwert; optionaler
+  `as_of`-Parameter (Default: heute) projiziert nur die Tage-Achse auf ein zukünftiges Datum —
+  genutzt von `app_notifications` für die Fahrt-Vorhersage-Warnung, km-/Wetter-Achse bleiben
+  auf dem aktuellen Stand, da zukünftige Distanz unbekannt ist.
   `api/services.py`: `WeatherWearCalculator` (reine Formel: Wetter → Verschleiß-Multiplikator
   pro Ride) + `WeatherWearService` (voller Recompute über die Ride-Historie seit Einbau, nur
-  aktuell montierte Komponenten). Celery-Task `recompute_weather_wear_for_bike` in
+  aktuell montierte Komponenten); außerdem `get_new_component_warnings()`/
+  `get_predicted_unsafe_bikes()` als fachliche Grundlage für `app_notifications` (siehe dort).
+  Celery-Task `recompute_weather_wear_for_bike` in
   `api/tasks.py`, getriggert nach jedem Ride-Import (Hook in
-  `app_dashboard/api/services.py::sync_activity_to_db`). `api/ai_providers.py`: austauschbarer
+  `app_dashboard/api/services.py::sync_activity_to_db`); löst nach erfolgreicher
+  Neuberechnung zusätzlich `app_notifications.tasks.check_component_warnings_for_bike` aus.
+  `api/ai_providers.py`: austauschbarer
   Gemini/Groq-Adapter (`AI_PROVIDER`-Setting) für die On-Demand-KI-Erklärung. Bei
   `AI_PROVIDER=gemini` (Default) läuft intern ein `FallbackAIProvider`: primär das günstige
   Gemini-Flash-Lite-Modell (`GEMINI_MODEL`, Default `gemini-2.0-flash-lite`), bei Fehlschlag
@@ -91,6 +103,30 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   Endpoints unter `/api/maintenance/`: `bikes/`, `bikes/<id>/slots/`, `bikes/<id>/condition-report/`,
   `slots/<id>/mount|unmount`, `slots/<id>/components/`, `components/<id>/check/`,
   `components/<id>/weather-explanation/`, `components/<id>/check-instructions/`, `templates/`.
+- **`app_notifications`** — E-Mail-Versand, kein eigenes Domain-Model (keine Endpoints, kein
+  `urls.py`). Dedupe-/Status-Felder für Benachrichtigungen liegen stattdessen direkt an den
+  betroffenen Domain-Models (analog zu den KI-Cache-Feldern in `app_maintenance`):
+  `StravaProfile.email_notifications_enabled`/`welcome_email_sent_at`,
+  `Component.last_warn_notified_status`, `Bike.predicted_unsafe_notified_for_date`.
+  `services.py::send_templated_email()` rendert ein gemeinsames HTML-Template
+  (`templates/emails/base_email.html`, alle E-Mails erben per `{% extends %}` davon) mit
+  Plaintext-Fallback via `strip_tags`; gibt bei Opt-out/fehlender E-Mail/Versandfehler `False`
+  zurück statt zu werfen. Drei E-Mail-Typen, alle über `tasks.py`: (1) Willkommens-Mail
+  (`send_welcome_email_task`) — automatisch bei Erstanmeldung (Hook in
+  `app_auth/api/views.py::StravaAuthCallbackView`), rückwirkend für Bestandsnutzer per
+  Admin-Action "Willkommens-E-Mail senden" auf `StravaProfileAdmin`; (2) Komponenten-Warnung
+  (warn/critical, gebündelt als eine Sammel-Mail statt einer Mail pro Komponente) — zwei
+  Auslöser teilen sich denselben Dedupe (`Component.last_warn_notified_status`): sofort nach
+  einer Fahrt (`check_component_warnings_for_bike`, siehe Hook in `app_maintenance`) und
+  täglich als Sicherheitsnetz für rein kalenderbasierte Fälle ohne neue Fahrt
+  (`check_component_warnings`, Celery Beat); (3) Fahrt-Vorhersage
+  (`check_bike_unsafe_predictions`, täglich) — sagt aus dem Ride-Verlauf eines Bikes (Median
+  der Tage-Lücken zwischen den letzten Fahrten, siehe
+  `app_dashboard/api/services.py::predict_next_ride_date`) das nächste voraussichtliche
+  Fahrtdatum voraus und warnt, wenn eine Komponente bis dahin voraussichtlich kritisch wird
+  (`compute_wear(..., as_of=predicted_date)`), obwohl sie **heute** noch nicht kritisch ist —
+  ist sie das schon, deckt (2) den Fall bereits ab, keine doppelte Mail. `tasks.py` liegt
+  bewusst auf oberster Ebene statt unter `api/` (siehe Celery-Autodiscover-Hinweis unten).
 - **`app_strava_webhook`** — Strava-Push-Webhook, Endpoint **außerhalb** von `/api/`:
   `/strava/webhook/`. `GET` = Subscription-Challenge, `POST` → Celery-Task
   `process_strava_webhook` (max_retries=3): `delete` löscht `Ride`, `create` importiert via
@@ -114,6 +150,11 @@ Django Built-in `User` (kein `AUTH_USER_MODEL`-Override), 1:1 verknüpft mit `St
 Frontend holt Strava-OAuth-`code` → `POST /api/strava/auth/` → Backend tauscht Token,
 erstellt/aktualisiert `User`+`StravaProfile`, ruft `login()`, speichert zusätzlich
 `strava_athlete_id` in der Session (wird downstream statt `request.user` genutzt).
+Der echte Name (`firstname`/`lastname` aus der Strava-Antwort) wird bewusst **nicht**
+persistiert (kein DB-Feld, daher auch nicht im Admin sichtbar) — `StravaAuthCallbackView`
+gibt ihn nur einmalig im Login-Response direkt aus `athlete_data` zurück, `GET /api/strava/me/`
+liefert nur die `athlete_id`. Das Frontend cached den Namen für die Begrüßung clientseitig
+in `localStorage` (`StravaService.setLoggedInUser`/`displayNameStorageKey`), nicht im Backend.
 **Nur Session-Cookie-Auth**, kein JWT. `CsrfExemptSessionAuthentication`
 (`app_auth/mixins.py`) nur auf Login/Logout. Jede View setzt `permission_classes` explizit.
 
@@ -133,16 +174,28 @@ erstellt/aktualisiert `User`+`StravaProfile`, ruft `login()`, speichert zusätzl
   transitiv über `views.py`-Importe (`from .tasks import ...`) geladen werden. Neue Tasks
   müssen auf derselben Import-Kette reiten (siehe `recompute_weather_wear_for_bike` als
   Beispiel) — nach jedem Deploy mit `celery -A core inspect registered` verifizieren.
-
+  Ausnahme: `app_notifications/tasks.py` liegt bewusst auf oberster Ebene (nicht unter
+  `api/`), gerade weil seine Tasks von Celery Beat direkt per Namen aufgerufen werden (kein
+  View importiert sie) — `autodiscover_tasks()` findet es dort nativ, ohne auf die fragile
+  Import-Kette angewiesen zu sein.
 ## Env Vars (`.env`, nicht committed)
 
 `DJANGO_SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`,
 `CSRF_TRUSTED_ORIGINS`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`,
 `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`,
 `AI_PROVIDER` (`gemini`|`groq`, Default `gemini`), `GEMINI_API_KEY`, `GEMINI_MODEL`,
-`GROQ_API_KEY`, `GROQ_MODEL`. Die AI-Keys werden nur für die optionale
+`GROQ_API_KEY`, `GROQ_MODEL`, `EMAIL_BACKEND` (Default Djangos SMTP-Backend),
+`EMAIL_HOST` (Default `smtp-relay.brevo.com`), `EMAIL_PORT` (Default `587`),
+`EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS` (Default `True`),
+`DEFAULT_FROM_EMAIL` (Default = `EMAIL_HOST_USER`), `FRONTEND_URL` (für Links in E-Mails,
+Default `http://localhost:3000`), `MAINTENANCE_EMAIL_CHECK_HOUR` (Default `7`, Stunde der
+täglichen `app_notifications`-Checks). Die AI-Keys werden nur für die optionale
 KI-Erklärung gebraucht — ohne sie liefert der Endpoint kontrolliert 503, der Rest der App
-funktioniert unabhängig davon. Werte niemals in Doku oder Code-Kommentare übernehmen.
+funktioniert unabhängig davon; E-Mail-Versand ist analog fehlertolerant
+(`send_templated_email()` loggt und gibt `False` zurück statt zu werfen, auch bei fehlenden
+`EMAIL_*`-Werten). Alle `EMAIL_*`-Settings sind bewusst generisch/env-gesteuert gehalten,
+damit ein späterer Wechsel von Brevo auf einen eigenen SMTP-Server nur `.env`-Werte ändert,
+keinen Code. Werte niemals in Doku oder Code-Kommentare übernehmen.
 
 ## Testing
 
@@ -153,14 +206,27 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   gemockt über `app_maintenance.api.ai_providers.requests.post`).
 - `app_maintenance/tests.py`: `ComponentCheckTests` (Custom-Warn-Days, Overdue/Critical,
   `condition_pct`-Rejection, Release via Check mit Snooze, Auth-Required, Wetter-Achse
-  treibt `warn_status_overall`).
+  treibt `warn_status_overall`), `ComputeWearAsOfProjectionTests` (Tage-Achse-Projektion für
+  die Fahrt-Vorhersage-Warnung, `as_of` defaultet auf heute).
 - `app_maintenance/test_weather_wear.py`: `WeatherWearCalculatorTests` (reine Formel, keine
   DB), `WeatherWearServiceTests` (Recompute gegen echte `Ride`-Objekte),
   `ComponentWeatherExplanationViewTests` (KI-Endpoint, `requests.post` gemockt in
   `ai_providers.py`), `ComponentCheckInstructionsViewTests` (KI-Prüfanleitung, Caching,
   Invalidierung durch Status-Änderung nach Freigabe), `BikeConditionReportViewTests`
-  (KI-Zustandsbericht, Caching, Invalidierung durch neuen Ride-Import).
-- Keine Tests für `app_auth`/`app_strava_webhook`.
+  (KI-Zustandsbericht, Caching, Invalidierung durch neuen Ride-Import),
+  `RecomputeWeatherWearForBikeTaskTests` (löst nach erfolgreicher Neuberechnung
+  `app_notifications.tasks.check_component_warnings_for_bike` aus, aber nicht bei Fehlschlag).
+- `app_notifications/tests.py`: `SendTemplatedEmailTests` (Opt-out-Flag, fehlende
+  E-Mail-Adresse), `PredictNextRideDateTests` (Median-Vorhersage, Clamping bei
+  Überfälligkeit auf "heute", zu wenig Historie → `None`), `CheckComponentWarningsTests`/
+  `CheckComponentWarningsForBikeTests` (Sammel-Mail, Dedupe via
+  `last_warn_notified_status`, Eskalation löst erneuten Versand aus, gemeinsamer Dedupe
+  zwischen event- und tages-getriggertem Check), `CheckBikeUnsafePredictionsTests`
+  (Projektion, Ausschluss bereits heute kritischer Bikes, Dedupe via
+  `predicted_unsafe_notified_for_date`), `SendWelcomeEmailTaskTests`.
+- `app_auth/tests.py`: `StravaAuthCallbackWelcomeEmailTests` (Willkommens-Mail-Trigger nur bei
+  Erstanlage eines Profils, nicht bei Re-Login) — sonst keine weiteren Tests für `app_auth`.
+  Keine Tests für `app_strava_webhook`.
 
 ---
 

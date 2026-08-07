@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from celery.schedules import crontab
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,6 +20,20 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-lite")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+# E-Mail-Versand (Benachrichtigungen, siehe app_notifications). Default = Brevo SMTP-Relay,
+# aber vollstaendig env-gesteuert: ein spaeterer Wechsel auf einen eigenen Mailserver aendert
+# nur .env-Werte, keinen Code.
+EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp-relay.brevo.com")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", 587))
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "True") == "True"
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
+
+# Basis-URL des Frontends fuer Links in E-Mails (z.B. "Zum Bike" in Warn-Mails).
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -84,6 +99,7 @@ INSTALLED_APPS = [
     "app_dashboard",
     "app_strava_webhook",
     "app_maintenance",
+    "app_notifications",
 ]
 
 MIDDLEWARE = [
@@ -182,6 +198,20 @@ CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:63
 # Hard-Limit killt den Worker-Kindprozess danach unbedingt.
 CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", 480))
 CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", 600))
+
+# Taegliche Wartungs-E-Mail-Checks (siehe app_notifications). Benoetigt einen laufenden
+# "celery -A core beat"-Prozess zusaetzlich zum Worker.
+MAINTENANCE_EMAIL_CHECK_HOUR = int(os.getenv("MAINTENANCE_EMAIL_CHECK_HOUR", 7))
+CELERY_BEAT_SCHEDULE = {
+    "check-component-warnings-daily": {
+        "task": "app_notifications.tasks.check_component_warnings",
+        "schedule": crontab(hour=MAINTENANCE_EMAIL_CHECK_HOUR, minute=0),
+    },
+    "check-bike-unsafe-predictions-daily": {
+        "task": "app_notifications.tasks.check_bike_unsafe_predictions",
+        "schedule": crontab(hour=MAINTENANCE_EMAIL_CHECK_HOUR, minute=15),
+    },
+}
 
 STRAVA_SYNC_PAGE_SIZE = int(os.getenv("STRAVA_SYNC_PAGE_SIZE", 50))
 

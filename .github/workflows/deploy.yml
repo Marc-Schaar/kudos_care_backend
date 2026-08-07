@@ -38,7 +38,14 @@ jobs:
             python manage.py migrate
             python manage.py collectstatic --noinput
 
+            echo "=== Static-Dateien fuer nginx synchronisieren ==="
+            # nginx (www-data) kann nicht unter /home/marc lesen, daher Kopie nach /var/www.
+            # Eigenes Verzeichnis (nicht der Frontend-Deploy-Ordner!), sonst loescht dessen
+            # rsync --delete-Deploy unsere Static-Dateien beim naechsten Frontend-Push wieder.
+            # Zielordner gehoert marc:www-data (einmalig manuell angelegt), kein sudo noetig.
+            rsync -a --delete static/ /var/www/kudoscare-static/
+
             echo "=== Restart ==="
-            sudo supervisorctl restart gunicorn celery
+            sudo supervisorctl restart gunicorn celery celery-beat
 
             echo "=== Fertig ==="
