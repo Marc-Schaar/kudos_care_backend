@@ -30,8 +30,8 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
 - Dev Server: `python manage.py runserver`
 - Celery Worker (nötig für Strava-Sync/Webhook): `celery -A core worker -l info` (Redis muss laufen)
 - Celery Beat (nötig für die täglichen `app_notifications`-Checks): `celery -A core beat -l info`
-  — zusätzlich zum Worker; in Produktion noch nicht als Supervisor-Programm eingerichtet
-  (siehe Bekannte Lücken)
+  — zusätzlich zum Worker; in Produktion als eigenes Supervisor-Programm `celery-beat`
+  eingerichtet, wird von `deploy.yml` mitneugestartet
 - Tests: `python manage.py test` (kein pytest konfiguriert, trotz anderslautender Vermutung)
 - Linter/Formatter: `black . && isort . && flake8`
 
@@ -178,12 +178,6 @@ in `localStorage` (`StravaService.setLoggedInUser`/`displayNameStorageKey`), nic
   `api/`), gerade weil seine Tasks von Celery Beat direkt per Namen aufgerufen werden (kein
   View importiert sie) — `autodiscover_tasks()` findet es dort nativ, ohne auf die fragile
   Import-Kette angewiesen zu sein.
-- Celery Beat läuft in Produktion noch nicht — `.github/workflows/deploy.yml` restartet aktuell
-  nur die Supervisor-Programme `gunicorn`/`celery` (Worker). Die beiden täglichen
-  `app_notifications`-Checks feuern serverseitig also noch nicht von selbst, bis ein weiteres
-  Supervisor-Programm für `celery -A core beat -l info` angelegt und die Restart-Zeile in
-  `deploy.yml` entsprechend ergänzt wird.
-
 ## Env Vars (`.env`, nicht committed)
 
 `DJANGO_SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`,
