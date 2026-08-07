@@ -15,6 +15,7 @@ from app_maintenance.api.services import (
     WeatherWearCalculator,
     WeatherWearService,
 )
+from app_maintenance.api.tasks import recompute_weather_wear_for_bike
 from app_maintenance.models import (
     Bike,
     BikeType,
@@ -184,6 +185,36 @@ class WeatherWearServiceTests(APITestCase):
         self.assertEqual(self.component.weather_wear_km, 30.0)
         self.assertEqual(self.component.weather_wear_ride_count, 1)
         self.assertIsNotNone(self.component.weather_wear_computed_at)
+
+
+class RecomputeWeatherWearForBikeTaskTests(APITestCase):
+    """
+    Deckt den in app_notifications hinzugefügten Hook ab: nach erfolgreicher
+    Neuberechnung wird sofort geprüft, ob eine Warn-E-Mail fällig ist, statt erst beim
+    nächsten täglichen Check (siehe app_maintenance/api/tasks.py).
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="hook-athlete", password="pw")
+        self.profile = _make_profile(self.user, strava_athlete_id=54322)
+        self.bike = Bike.objects.create(
+            athlete=self.profile, strava_bike_id="hook1", name="Hookrad", bike_type=BikeType.ROAD
+        )
+
+    @patch("app_notifications.tasks.check_component_warnings_for_bike.delay")
+    def test_enqueues_warning_check_after_successful_recompute(self, mock_delay):
+        recompute_weather_wear_for_bike(self.bike.id)
+        mock_delay.assert_called_once_with(self.bike.id)
+
+    @patch("app_maintenance.api.services.WeatherWearService.recompute_bike")
+    @patch("app_notifications.tasks.check_component_warnings_for_bike.delay")
+    def test_does_not_enqueue_when_recompute_fails(self, mock_delay, mock_recompute_bike):
+        mock_recompute_bike.side_effect = Exception("boom")
+
+        with self.assertRaises(Exception):
+            recompute_weather_wear_for_bike(self.bike.id)
+
+        mock_delay.assert_not_called()
 
 
 def _gemini_response(text="Regen hat deine Kette stärker beansprucht als die reinen km zeigen."):

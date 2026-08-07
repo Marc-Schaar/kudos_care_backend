@@ -5,6 +5,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
+from app_maintenance.api.serializers import compute_wear
 from app_maintenance.models import (
     Bike,
     BikeType,
@@ -152,3 +153,45 @@ class ComponentCheckTests(APITestCase):
         self.assertEqual(response.data["warn_status_weather_km"], "ok")
         self.assertEqual(response.data["warn_status_overall"], "ok")
         self.assertEqual(response.data["last_check"]["checked_at_weather_wear_km"], 150)
+
+
+class ComputeWearAsOfProjectionTests(APITestCase):
+    """
+    Deckt die as_of-Erweiterung von compute_wear() ab (siehe app_notifications —
+    "voraussichtlich unsafe bei nächster Fahrt"): nur die Tage-Achse wird projiziert.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="projection-athlete", password="pw")
+        self.profile = _make_profile(self.user, strava_athlete_id=99999)
+        self.bike = Bike.objects.create(
+            athlete=self.profile, strava_bike_id="proj1", name="Projektionsrad", bike_type=BikeType.ROAD
+        )
+        self.template = ComponentTemplate.objects.create(
+            name="Kette", category=ComponentCategory.DRIVETRAIN, warn_days=10, is_system=False
+        )
+        self.slot = ComponentSlot.objects.create(bike=self.bike, template=self.template)
+        self.component = Component.objects.create(
+            slot=self.slot,
+            brand="KMC",
+            installed_at=date.today() - timedelta(days=5),
+            is_mounted=True,
+        )
+
+    def test_as_of_projects_days_axis_into_the_future(self):
+        # Heute: 5 von 10 Tagen -> ok.
+        today_wear = compute_wear(self.component, None)
+        self.assertEqual(today_wear["warn_status_overall"], "ok")
+
+        # In 10 Tagen: 15 von 10 Tagen -> critical, obwohl heute noch alles ok ist.
+        future = date.today() + timedelta(days=10)
+        projected_wear = compute_wear(self.component, None, as_of=future)
+        self.assertEqual(projected_wear["wear_days"], 15)
+        self.assertEqual(projected_wear["warn_status_days"], "critical")
+        self.assertEqual(projected_wear["warn_status_overall"], "critical")
+
+    def test_as_of_defaults_to_today(self):
+        self.assertEqual(
+            compute_wear(self.component, None),
+            compute_wear(self.component, None, as_of=date.today()),
+        )

@@ -28,5 +28,20 @@ class StravaProfile(models.Model):
     sync_progress_current = models.IntegerField(null=True, blank=True)
     sync_progress_total = models.IntegerField(null=True, blank=True)
 
+    # Benachrichtigungen (siehe app_notifications) — Kill-Switch fuer alle automatischen
+    # E-Mails, aktuell nur per Admin togglebar (kein Frontend-Toggle).
+    email_notifications_enabled = models.BooleanField(
+        default=True,
+        help_text="Kill-Switch fuer Warn-/Vorhersage-/Willkommens-E-Mails. Nur per Admin togglebar.",
+    )
+    welcome_email_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Zeitpunkt des letzten Versands der Willkommens-E-Mail — automatisch gesetzt bei "
+            "Erstanmeldung, erneut auslösbar über die Admin-Action 'Willkommens-E-Mail senden'."
+        ),
+    )
+
     def __str__(self):
         return f"Strava ID: {self.strava_athlete_id}"

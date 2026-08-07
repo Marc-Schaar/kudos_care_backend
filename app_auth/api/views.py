@@ -15,6 +15,7 @@ from app_auth.models import StravaProfile
 from .serializers import StravaAuthSerializer
 
 from app_auth.mixins import CsrfExemptSessionAuthentication
+from app_notifications.tasks import send_welcome_email_task
 from .utils import sync_bikes_from_strava
 
 
@@ -79,6 +80,7 @@ class StravaAuthCallbackView(APIView):
                 profile.user = user
                 profile.save()
                 sync_bikes_from_strava(athlete_data, profile)
+                send_welcome_email_task.delay(profile.id)
 
             login(request, profile.user)
 

@@ -1,0 +1,35 @@
+{% extends "emails/base_email.html" %}
+
+{% block title %}Kudos Care: Komponenten benötigen Aufmerksamkeit{% endblock %}
+
+{% block content %}
+{% if immediate %}
+<h1>Nach deiner letzten Fahrt</h1>
+<p>Deine letzte Fahrt hat den Verschleiß einer oder mehrerer Komponenten über die
+   empfohlene Grenze gebracht:</p>
+{% else %}
+<h1>Tägliche Übersicht</h1>
+<p>Folgende Komponenten benötigen aktuell deine Aufmerksamkeit:</p>
+{% endif %}
+
+<table class="item-list">
+  {% for w in warnings %}
+  <tr>
+    <td>
+      <div class="item-title">
+        {{ w.slot.display_name }}
+        <span class="badge badge-{{ w.wear.warn_status_overall }}">{{ w.wear.warn_status_overall }}</span>
+      </div>
+      <div class="item-meta">
+        {{ w.bike.name }} &middot;
+        {% if w.wear.wear_km != None %}{{ w.wear.wear_km }} km{% else %}? km{% endif %} /
+        {% if w.wear.wear_days != None %}{{ w.wear.wear_days }} Tage{% else %}? Tage{% endif %}
+        seit Einbau
+      </div>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+<p><a class="cta" href="{{ frontend_url }}/maintenance">Zur Wartungsübersicht</a></p>
+{% endblock %}

@@ -1,0 +1,34 @@
+{% extends "emails/base_email.html" %}
+
+{% block title %}Kudos Care: Vor der nächsten Fahrt prüfen{% endblock %}
+
+{% block content %}
+<h1>Bald wieder unterwegs?</h1>
+<p>
+  Basierend auf deinem bisherigen Fahrverhalten schätzen wir, wann du folgende Bikes
+  voraussichtlich wieder fährst. Bis dahin werden einzelne Komponenten voraussichtlich
+  fällig — am besten vorher kurz prüfen:
+</p>
+
+{% for p in predictions %}
+<p class="item-title">{{ p.bike.name }} — voraussichtlich wieder unterwegs am {{ p.predicted_date }}</p>
+<table class="item-list">
+  {% for c in p.components %}
+  <tr>
+    <td>
+      <div class="item-title">
+        {{ c.slot.display_name }}
+        <span class="badge badge-critical">critical</span>
+      </div>
+      <div class="item-meta">
+        voraussichtlich
+        {% if c.wear.wear_days != None %}{{ c.wear.wear_days }} Tage{% else %}? Tage{% endif %}
+        seit Einbau bis dahin
+      </div>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+<p><a class="cta" href="{{ frontend_url }}/maintenance/bikes/{{ p.bike.id }}">Zu {{ p.bike.name }}</a></p>
+{% endfor %}
+{% endblock %}

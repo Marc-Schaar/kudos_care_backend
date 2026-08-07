@@ -3,7 +3,9 @@ import logging
 from django.db.models import Max
 from django.utils import timezone
 
+from app_auth.models import StravaProfile
 from app_maintenance.models import Bike, Component, ComponentCheck, WeatherSensitivityCoefficient
+from .serializers import WarnStatus, compute_wear
 
 logger = logging.getLogger("my_app_debug")
 
@@ -291,3 +293,86 @@ def build_bike_condition_report_prompt(bike: Bike, component_summaries: list[dic
         )
     user_prompt = "\n".join(lines)
     return system_prompt, user_prompt
+
+
+# ── Benachrichtigungen (siehe app_notifications) ──────────────────────────────────────────
+# Fachliche "was ist los"-Logik fuer die Warn-/Vorhersage-E-Mails. app_notifications ruft
+# diese Funktionen auf und kuemmert sich nur um Versand/Scheduling/Dedupe-Persistierung.
+
+
+def get_new_component_warnings(profile: StravaProfile, bike: Bike | None = None) -> list[dict]:
+    """
+    Ermittelt montierte Komponenten des Profils (optional auf ein einzelnes Bike
+    eingeschraenkt), deren warn_status_overall aktuell warn/critical ist UND sich seit der
+    letzten Warn-E-Mail geaendert hat (Component.last_warn_notified_status). Wird sowohl vom
+    event-getriggerten Einzel-Bike-Check (nach einer Fahrt) als auch vom taeglichen
+    Voll-Scan verwendet (siehe app_notifications.tasks).
+    """
+    bikes = Bike.objects.filter(athlete=profile, retired=False)
+    if bike is not None:
+        bikes = bikes.filter(pk=bike.pk)
+    bikes = bikes.prefetch_related("slots__components", "slots__template")
+
+    results = []
+    for b in bikes:
+        for slot in b.slots.all():
+            comp = slot.mounted_component
+            if comp is None:
+                continue
+            wear = compute_wear(comp, b.total_distance_km)
+            status = wear["warn_status_overall"]
+            if status in (WarnStatus.WARN, WarnStatus.CRITICAL) and status != comp.last_warn_notified_status:
+                results.append({"bike": b, "slot": slot, "component": comp, "wear": wear})
+    return results
+
+
+def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
+    """
+    Ermittelt Bikes des Profils, die HEUTE noch nicht kritisch sind, aber laut Fahrt-Vorhersage
+    (predict_next_ride_date) bis zur naechsten voraussichtlichen Fahrt voraussichtlich
+    kritisch werden (Tage-Achse auf das vorhergesagte Datum projiziert, siehe
+    compute_wear(..., as_of=...)). Bikes die bereits heute kritisch sind werden ausgeschlossen
+    — das deckt bereits get_new_component_warnings() ab, keine Doppel-Meldung.
+    """
+    from app_dashboard.api.services import predict_next_ride_date  # inline: Cross-App, siehe Architektur-Notiz
+
+    results = []
+    bikes = Bike.objects.filter(athlete=profile, retired=False).prefetch_related(
+        "slots__components", "slots__template"
+    )
+    for bike in bikes:
+        predicted_date = predict_next_ride_date(bike)
+        if predicted_date is None:
+            continue
+        if bike.predicted_unsafe_notified_for_date == predicted_date:
+            continue
+
+        mounted = [(slot, slot.mounted_component) for slot in bike.slots.all()]
+        mounted = [(slot, comp) for slot, comp in mounted if comp is not None]
+        if not mounted:
+            continue
+
+        bike_total_km = bike.total_distance_km
+        today_worst = WarnStatus.UNKNOWN
+        projected_components = []
+        for slot, comp in mounted:
+            today_wear = compute_wear(comp, bike_total_km)
+            if today_wear["warn_status_overall"] == WarnStatus.CRITICAL:
+                today_worst = WarnStatus.CRITICAL
+            projected_wear = compute_wear(comp, bike_total_km, as_of=predicted_date)
+            if projected_wear["warn_status_overall"] == WarnStatus.CRITICAL:
+                projected_components.append({"slot": slot, "component": comp, "wear": projected_wear})
+
+        if today_worst == WarnStatus.CRITICAL:
+            continue  # schon heute kritisch -> deckt get_new_component_warnings() ab
+        if not projected_components:
+            continue
+
+        results.append(
+            {
+                "bike": bike,
+                "predicted_date": predicted_date,
+                "components": projected_components,
+            }
+        )
+    return results

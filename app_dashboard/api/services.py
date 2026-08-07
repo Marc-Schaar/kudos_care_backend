@@ -1,4 +1,7 @@
 import logging
+import statistics
+from datetime import date, timedelta
+
 import polyline
 import requests
 from shapely.geometry import LineString as ShapelyLineString
@@ -22,6 +25,11 @@ from app_maintenance.api.tasks import recompute_weather_wear_for_bike
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 10
+
+# Fahrt-Vorhersage (siehe predict_next_ride_date / app_notifications) — reine
+# Heuristik auf Basis der juengsten Ride-Historie eines Bikes, keine ML-Prognose.
+LOOKBACK_RIDE_COUNT = 10
+MIN_RIDES_FOR_PREDICTION = 4
 
 
 class StravaSyncService:
@@ -293,6 +301,37 @@ def build_ride_summary_prompt(ride: Ride) -> tuple[str, str]:
         f"Durchschnittlicher Gegenwind: {weather.get('avg_headwind')} km/h\n"
     )
     return system_prompt, user_prompt
+
+
+def predict_next_ride_date(bike: Bike) -> date | None:
+    """
+    Schätzt, wann dieses Bike voraussichtlich wieder gefahren wird — Basis für die
+    "voraussichtlich unsafe bei nächster Fahrt"-Benachrichtigung (siehe
+    app_maintenance.api.services.get_predicted_unsafe_bikes). Reine Heuristik: Median
+    der Tage-Lücken zwischen den letzten `LOOKBACK_RIDE_COUNT` Fahrten dieses Bikes,
+    angewandt auf die letzte Fahrt. Median statt Mittelwert, da robuster gegen einzelne
+    Ausreißer (z.B. eine lange Winterpause).
+
+    Gibt None zurück, wenn zu wenig Historie vorliegt (`MIN_RIDES_FOR_PREDICTION`) für
+    eine halbwegs verlässliche Schätzung.
+    """
+    ride_dates = list(
+        Ride.objects.filter(bike=bike, start_date__isnull=False)
+        .order_by("-start_date")
+        .values_list("start_date", flat=True)[:LOOKBACK_RIDE_COUNT]
+    )
+    if len(ride_dates) < MIN_RIDES_FOR_PREDICTION:
+        return None
+
+    gaps_days = [
+        (ride_dates[i] - ride_dates[i + 1]).days for i in range(len(ride_dates) - 1)
+    ]
+    median_gap = statistics.median(gaps_days)
+
+    predicted = ride_dates[0].date() + timedelta(days=median_gap)
+    # Ist der Nutzer laut eigenem Muster schon "überfällig" fürs Fahren, ist "heute" der
+    # sinnvollste Vorhersage-Punkt (keine Rückwärts-Projektion für compute_wear).
+    return max(predicted, date.today())
 
 
 class WeatherService:

@@ -63,6 +63,15 @@ class Bike(models.Model):
         help_text="Zeitpunkt der letzten Zustandsbericht-Generierung.",
     )
 
+    # Dedupe fuer die "voraussichtlich unsafe bei naechster Fahrt"-E-Mail (siehe
+    # app_notifications). Speichert, fuer welches vorhergesagte Datum zuletzt gewarnt wurde,
+    # damit nicht taeglich erneut gemeldet wird solange die Vorhersage stabil bleibt.
+    predicted_unsafe_notified_for_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Vorhergesagtes Next-Ride-Datum, fuer das zuletzt eine Vorhersage-Warn-E-Mail verschickt wurde.",
+    )
+
     class Meta:
         ordering = ["name"]
 
@@ -283,6 +292,17 @@ class Component(models.Model):
         null=True,
         blank=True,
         help_text="Zeitpunkt der letzten Prüfanleitung-Generierung.",
+    )
+
+    # Dedupe fuer die Warn/Critical-E-Mail (siehe app_notifications). Speichert den zuletzt
+    # per E-Mail gemeldeten warn_status_overall, damit derselbe Status nicht wiederholt
+    # gemeldet wird, eine Eskalation (warn -> critical) oder ein erneutes Auftreten nach
+    # einer Freigabe aber erneut eine E-Mail ausloest.
+    last_warn_notified_status = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        help_text="warn_status_overall zum Zeitpunkt der letzten Warn-E-Mail.",
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
