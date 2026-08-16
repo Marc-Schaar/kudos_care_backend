@@ -85,7 +85,14 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `AI_PROVIDER=gemini` (Default) läuft intern ein `FallbackAIProvider`: primär das günstige
   Gemini-Flash-Lite-Modell (`GEMINI_MODEL`, Default `gemini-2.0-flash-lite`), bei Fehlschlag
   (fehlender Key/Timeout/Rate-Limit/...) automatisch Fallback auf Groq. `AI_PROVIDER=groq`
-  nutzt direkt nur Groq, ohne Fallback-Kette. Zweite KI-Erklärung analog dazu:
+  nutzt direkt nur Groq, ohne Fallback-Kette. Die drei Endpoints unter `/api/maintenance/`
+  (weather-explanation, check-instructions, condition-report — NICHT die Fahrt-Zusammenfassung
+  in `app_dashboard`) rufen statt `get_ai_provider().generate_text()` direkt
+  `ai_providers.py::generate_reviewed_text()` auf: lässt die generierte Antwort zusätzlich vom
+  jeweils anderen Gemini/Groq-Modell auf Sinnhaftigkeit/Konsistenz mit den Ausgangsdaten
+  gegenprüfen (fail-open, falls das Gegenstück-Modell keinen Key hat oder die Prüf-Anfrage
+  selbst fehlschlägt), bei durchgefallener Prüfung genau eine Neugenerierung, danach wird
+  ungeprüft ausgeliefert statt ein zweites Mal zu prüfen. Zweite KI-Erklärung analog dazu:
   `bikes/<id>/condition-report/` fasst `compute_wear()` über alle aktuell montierten
   Komponenten eines Bikes zusammen (statt nur eine Komponente/nur die Wetter-Achse);
   Cache-Felder `Bike.condition_report`/`condition_report_generated_at`, Staleness über
@@ -160,9 +167,14 @@ in `localStorage` (`StravaService.setLoggedInUser`/`displayNameStorageKey`), nic
 
 ## Bekannte Lücken / Quirks (Stand: siehe Git-History für Aktualität)
 
-- `app_strava_webhook/api/views.py` liest `settings.STRAVA_VERIFY_TOKEN`, das Setting ist
-  **nirgends definiert** (weder `settings.py` noch `.env`) → GET-Verification würde mit
-  `AttributeError` crashen. Vor Produktiv-Einsatz des Webhooks fixen.
+- Der Strava-Push-Webhook lief in Produktion nie: `settings.STRAVA_VERIFY_TOKEN` war
+  nirgends definiert → `GET /strava/webhook/` (Strava-Verify-Callback beim Anlegen der
+  Subscription) crashte mit `AttributeError`, seitdem existierte nie eine funktionierende
+  Subscription (0 `process_strava_webhook`-Tasks in den Celery-Logs). Setting ist inzwischen
+  in `settings.py`/`.env` ergänzt (siehe Env Vars unten). Zusätzlich meldet Strava's
+  `GET /api/v3/push_subscriptions` aktuell `403 Application Status: Inactive` — die
+  Strava-App selbst ist auf strava.com/settings/api als inaktiv markiert, unabhängig vom
+  Server. Muss dort reaktiviert werden, bevor die Subscription per API angelegt werden kann.
 - `ComponentSlot.wear_km` (models.py) enthält toten Code (`stravaprofile_set`-Zeile).
 - `BikeListView.get_queryset` hat auskommentierten Debug-Code.
 - `debug.log` ist aktuell in Git getrackt (siehe `git status`) — sollte vermutlich in
@@ -183,6 +195,8 @@ in `localStorage` (`StravaService.setLoggedInUser`/`displayNameStorageKey`), nic
 `DJANGO_SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`,
 `CSRF_TRUSTED_ORIGINS`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`,
 `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`,
+`STRAVA_VERIFY_TOKEN` (frei wählbarer Token für den `hub.verify_token`-Handshake beim
+Anlegen der Push-Subscription, muss zu keinem externen Wert passen),
 `AI_PROVIDER` (`gemini`|`groq`, Default `gemini`), `GEMINI_API_KEY`, `GEMINI_MODEL`,
 `GROQ_API_KEY`, `GROQ_MODEL`, `EMAIL_BACKEND` (Default Djangos SMTP-Backend),
 `EMAIL_HOST` (Default `smtp-relay.brevo.com`), `EMAIL_PORT` (Default `587`),
@@ -211,7 +225,9 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
 - `app_maintenance/test_weather_wear.py`: `WeatherWearCalculatorTests` (reine Formel, keine
   DB), `WeatherWearServiceTests` (Recompute gegen echte `Ride`-Objekte),
   `ComponentWeatherExplanationViewTests` (KI-Endpoint, `requests.post` gemockt in
-  `ai_providers.py`), `ComponentCheckInstructionsViewTests` (KI-Prüfanleitung, Caching,
+  `ai_providers.py`, inkl. Zweit-Prüfung durch das jeweils andere Gemini/Groq-Modell:
+  bestandene Prüfung liefert die Antwort direkt, durchgefallene Prüfung löst genau eine
+  Neugenerierung aus), `ComponentCheckInstructionsViewTests` (KI-Prüfanleitung, Caching,
   Invalidierung durch Status-Änderung nach Freigabe), `BikeConditionReportViewTests`
   (KI-Zustandsbericht, Caching, Invalidierung durch neuen Ride-Import),
   `RecomputeWeatherWearForBikeTaskTests` (löst nach erfolgreicher Neuberechnung
