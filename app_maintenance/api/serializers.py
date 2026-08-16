@@ -1,4 +1,5 @@
 from datetime import date
+from typing import cast
 from rest_framework import serializers
 from app_maintenance.models import (
     Bike,
@@ -137,7 +138,7 @@ def compute_wear(
     return result
 
 
-class ComponentTemplateSerializer(serializers.ModelSerializer):
+class ComponentTemplateSerializer(serializers.ModelSerializer[ComponentTemplate]):
     category_display = serializers.CharField(
         source="get_category_display", read_only=True
     )
@@ -160,7 +161,7 @@ class ComponentTemplateSerializer(serializers.ModelSerializer):
         read_only_fields = ["is_system"]
 
 
-class ComponentCheckSerializer(serializers.ModelSerializer):
+class ComponentCheckSerializer(serializers.ModelSerializer[ComponentCheck]):
     """Kompakte, read-only Zusammenfassung der letzten Prüfung."""
 
     class Meta:
@@ -177,7 +178,7 @@ class ComponentCheckSerializer(serializers.ModelSerializer):
         ]
 
 
-class ComponentSerializer(serializers.ModelSerializer):
+class ComponentSerializer(serializers.ModelSerializer[Component]):
     wear_km = serializers.SerializerMethodField()
     wear_days = serializers.SerializerMethodField()
     warn_status_km = serializers.SerializerMethodField()
@@ -230,11 +231,12 @@ class ComponentSerializer(serializers.ModelSerializer):
 
     def _get_wear(self, obj: Component) -> dict:
         """Wear-Dict einmal berechnen und im Serializer-Context cachen."""
+        context = cast(dict, self.context)
         cache_key = f"_wear_{obj.pk}"
-        if cache_key not in self.context:
+        if cache_key not in context:
             bike = obj.slot.bike
-            self.context[cache_key] = compute_wear(obj, bike.total_distance_km)
-        return self.context[cache_key]
+            context[cache_key] = compute_wear(obj, bike.total_distance_km)
+        return context[cache_key]
 
     def get_wear_km(self, obj):
         return self._get_wear(obj)["wear_km"]
@@ -309,7 +311,7 @@ class ComponentMountSerializer(serializers.Serializer):
     component_id = serializers.IntegerField(required=False)
 
 
-class ComponentSlotSerializer(serializers.ModelSerializer):
+class ComponentSlotSerializer(serializers.ModelSerializer[ComponentSlot]):
     display_name = serializers.CharField(read_only=True)
     template_detail = ComponentTemplateSerializer(source="template", read_only=True)
     mounted_component = serializers.SerializerMethodField()
@@ -346,7 +348,7 @@ class ComponentSlotSerializer(serializers.ModelSerializer):
         return wear["warn_status_overall"]
 
 
-class ComponentSlotListSerializer(serializers.ModelSerializer):
+class ComponentSlotListSerializer(serializers.ModelSerializer[ComponentSlot]):
     """
     Kompakte Variante für Listen — ohne verschachtelte Components.
     """
@@ -377,10 +379,11 @@ class ComponentSlotListSerializer(serializers.ModelSerializer):
     def _get_wear(self, comp: Component, obj: ComponentSlot) -> dict:
         """Wear-Dict einmal berechnen und im Serializer-Context cachen (wird von
         get_warn_status und get_mounted_component gemeinsam genutzt)."""
+        context = cast(dict, self.context)
         cache_key = f"_wear_{comp.pk}"
-        if cache_key not in self.context:
-            self.context[cache_key] = compute_wear(comp, obj.bike.total_distance_km)
-        return self.context[cache_key]
+        if cache_key not in context:
+            context[cache_key] = compute_wear(comp, obj.bike.total_distance_km)
+        return context[cache_key]
 
     def get_warn_status(self, obj: ComponentSlot) -> str:
         comp = obj.mounted_component
@@ -406,7 +409,7 @@ class ComponentSlotListSerializer(serializers.ModelSerializer):
         }
 
 
-class BikeSerializer(serializers.ModelSerializer):
+class BikeSerializer(serializers.ModelSerializer[Bike]):
     bike_type_display = serializers.CharField(
         source="get_bike_type_display", read_only=True
     )
@@ -458,7 +461,7 @@ class BikeSerializer(serializers.ModelSerializer):
         return WarnStatus.UNKNOWN
 
 
-class BikeListSerializer(serializers.ModelSerializer):
+class BikeListSerializer(serializers.ModelSerializer[Bike]):
     """Kompakte Variante für Listen ohne Slots."""
 
     bike_type_display = serializers.CharField(

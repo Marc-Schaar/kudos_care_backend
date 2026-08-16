@@ -1,10 +1,16 @@
 from datetime import date
+from typing import TYPE_CHECKING
 
 from django.db import models
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 
 from app_auth.models import StravaProfile
+
+if TYPE_CHECKING:
+    from django.db.models.fields.related_descriptors import RelatedManager
+
+    from app_dashboard.models import Ride
 
 
 class BikeType(models.TextChoices):
@@ -75,6 +81,13 @@ class Bike(models.Model):
     class Meta:
         ordering = ["name"]
 
+    if TYPE_CHECKING:
+        id: int
+        rides: RelatedManager["Ride"]
+        slots: RelatedManager["ComponentSlot"]
+
+        def get_bike_type_display(self) -> str: ...
+
     def __str__(self):
         return f"{self.name} ({self.get_bike_type_display()})"
 
@@ -138,6 +151,12 @@ class ComponentTemplate(models.Model):
     class Meta:
         ordering = ["category", "name"]
 
+    if TYPE_CHECKING:
+        id: int
+        slots: RelatedManager["ComponentSlot"]
+
+        def get_category_display(self) -> str: ...
+
     def __str__(self):
         return f"{self.get_category_display()} — {self.name}"
 
@@ -172,6 +191,10 @@ class ComponentSlot(models.Model):
         # Pro Fahrrad darf jeder Template-Slot nur einmal existieren
         unique_together = [("bike", "template")]
         ordering = ["template__category", "template__name"]
+
+    if TYPE_CHECKING:
+        id: int
+        components: RelatedManager["Component"]
 
     def __str__(self):
         return f"{self.bike.name} — {self.display_name}"
@@ -311,6 +334,10 @@ class Component(models.Model):
     class Meta:
         ordering = ["-installed_at"]
 
+    if TYPE_CHECKING:
+        id: int
+        checks: RelatedManager["ComponentCheck"]
+
     def __str__(self):
         status = "montiert" if self.is_mounted else "ausgebaut"
         label = f"{self.brand} {self.model_name}".strip() or "Unbekannt"
@@ -391,6 +418,9 @@ class ComponentCheck(models.Model):
     class Meta:
         ordering = ["-checked_at", "-id"]
 
+    if TYPE_CHECKING:
+        id: int
+
     def __str__(self):
         return f"Check {self.checked_at} @ {self.component}"
 
@@ -430,6 +460,11 @@ class WeatherSensitivityCoefficient(models.Model):
         ordering = ["category"]
         verbose_name = "Wetter-Sensitivitäts-Koeffizient"
         verbose_name_plural = "Wetter-Sensitivitäts-Koeffizienten"
+
+    if TYPE_CHECKING:
+        id: int
+
+        def get_category_display(self) -> str: ...
 
     def __str__(self):
         return self.get_category_display()

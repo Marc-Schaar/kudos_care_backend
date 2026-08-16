@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 from django.contrib.gis.db import models
 from app_auth.models import StravaProfile
 from app_maintenance.models import Bike
@@ -34,6 +36,11 @@ class Ride(models.Model):
         related_name="rides",
     )
 
+    if TYPE_CHECKING:
+        id: int
+        bike_id: int | None
+        streams: "RideStream"
+
     def __str__(self):
         return self.name
 
@@ -45,3 +52,6 @@ class RideStream(models.Model):
     latlngs = models.JSONField()
     time_series = models.JSONField()
     avg_headwind = models.FloatField(null=True, blank=True)
+
+    if TYPE_CHECKING:
+        id: int
