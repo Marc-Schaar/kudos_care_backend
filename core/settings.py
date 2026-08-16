@@ -14,6 +14,7 @@ if os.name == "nt":
 
 STRAVA_CLIENT_ID = os.environ.get("STRAVA_CLIENT_ID")
 STRAVA_CLIENT_SECRET = os.environ.get("STRAVA_CLIENT_SECRET")
+STRAVA_VERIFY_TOKEN = os.environ.get("STRAVA_VERIFY_TOKEN")
 
 AI_PROVIDER = os.environ.get("AI_PROVIDER", "gemini")  # "gemini" | "groq"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
