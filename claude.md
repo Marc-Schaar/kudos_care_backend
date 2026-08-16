@@ -56,7 +56,11 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   Cache-Felder `Ride.ai_summary`/`ai_summary_generated_at`, keine Staleness-Prüfung nötig
   da Ride-Zahlen nach dem Import unveränderlich sind (anders als beim Bike-Zustandsbericht).
 - **`app_maintenance`** — Kern-Domäne Verschleiß-Tracking. Models: `Bike`,
-  `ComponentTemplate` (Katalog, Fixture `fixtures/component_templates.json`), `ComponentSlot`
+  `ComponentGroup` (Katalog-Baugruppe, z.B. "Laufrad vorne" — verbindet mehrere
+  `ComponentTemplate`s, die physisch typischerweise zusammen gewechselt werden; bewusst
+  generisch, weitere Gruppen lassen sich rein über den Admin anlegen, siehe Quick-Change
+  unten), `ComponentTemplate` (Katalog, Fixture `fixtures/component_templates.json`,
+  optionales FK `group`), `ComponentSlot`
   (Position am Bike, unique je `(bike, template)`), `Component` (physisches Teil,
   `is_mounted` via `clean()`/`save()`-Override erzwungen: nur 1 montiertes Teil je Slot;
   zusätzlich `weather_wear_km`/`weather_wear_ride_count`/`weather_wear_computed_at` — async
@@ -107,9 +111,18 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   (kein Zahlen-Vergleich nötig) — ungültig sobald sich `warn_status_overall` seit der letzten
   Generierung geändert hat (typischerweise nach einer Freigabe via `ComponentCheckView`).
   Management-Command `recompute_weather_wear.py` (Backfill, `--dry-run`).
+  Quick-Change (`slots/<id>/quick-change/`, `SlotQuickChangeView`): `GET` liefert alle
+  Geschwister-Slots derselben `ComponentGroup` auf demselben Bike (inkl. `pk`-Slot selbst)
+  zur Vorschau; `POST` wechselt die als `include: true` markierten Slots atomar in einer
+  Aktion (z.B. beim Laufradwechsel Reifen/Felge/Nabenlager/Speichen/Felgenband vorne
+  zusammen) — ein gemeinsames `installed_at`, aber Marke/Modell je Slot individuell. Erlaubte
+  `slot_id`s werden serverseitig aus `slot.template.group` hergeleitet, nicht aus dem Request
+  übernommen. Wiederverwendet dasselbe Unmount-dann-Mount-Muster wie `SlotMountView`. Initiale
+  Gruppen "Laufrad vorne"/"Laufrad hinten" geseedet in Migration `0014`.
   Endpoints unter `/api/maintenance/`: `bikes/`, `bikes/<id>/slots/`, `bikes/<id>/condition-report/`,
-  `slots/<id>/mount|unmount`, `slots/<id>/components/`, `components/<id>/check/`,
-  `components/<id>/weather-explanation/`, `components/<id>/check-instructions/`, `templates/`.
+  `slots/<id>/mount|unmount`, `slots/<id>/quick-change/`, `slots/<id>/components/`,
+  `components/<id>/check/`, `components/<id>/weather-explanation/`,
+  `components/<id>/check-instructions/`, `templates/`.
 - **`app_notifications`** — E-Mail-Versand, kein eigenes Domain-Model (keine Endpoints, kein
   `urls.py`). Dedupe-/Status-Felder für Benachrichtigungen liegen stattdessen direkt an den
   betroffenen Domain-Models (analog zu den KI-Cache-Feldern in `app_maintenance`):
@@ -232,6 +245,10 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   (KI-Zustandsbericht, Caching, Invalidierung durch neuen Ride-Import),
   `RecomputeWeatherWearForBikeTaskTests` (löst nach erfolgreicher Neuberechnung
   `app_notifications.tasks.check_component_warnings_for_bike` aus, aber nicht bei Fehlschlag).
+- `app_maintenance/test_quick_change.py`: `SlotQuickChangeViewTests` (Geschwister-Slots
+  derselben `ComponentGroup` per GET, 404 bei Slot ohne Gruppe, POST wechselt nur
+  `include: true`-Items mit gemeinsamem `installed_at`/individueller Marke, Ablehnung von
+  `slot_id`s außerhalb der Gruppe, Auth-Required, Ein-Montiert-Invariante bleibt gewahrt).
 - `app_notifications/tests.py`: `SendTemplatedEmailTests` (Opt-out-Flag, fehlende
   E-Mail-Adresse), `PredictNextRideDateTests` (Median-Vorhersage, Clamping bei
   Überfälligkeit auf "heute", zu wenig Historie → `None`), `CheckComponentWarningsTests`/

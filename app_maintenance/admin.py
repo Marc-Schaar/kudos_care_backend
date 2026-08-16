@@ -1,12 +1,19 @@
 from django.contrib import admin
 from .models import (
     Bike,
+    ComponentGroup,
     ComponentTemplate,
     ComponentSlot,
     Component,
     ComponentCheck,
     WeatherSensitivityCoefficient,
 )
+
+
+@admin.register(ComponentGroup)
+class ComponentGroupAdmin(admin.ModelAdmin):
+    list_display = ["name"]
+    search_fields = ["name"]
 
 
 @admin.register(Bike)
@@ -25,8 +32,8 @@ class BikeAdmin(admin.ModelAdmin):
 
 @admin.register(ComponentTemplate)
 class ComponentTemplateAdmin(admin.ModelAdmin):
-    list_display = ["name", "category", "warn_km", "warn_days", "is_system"]
-    list_filter = ["category", "is_system", "supports_condition_estimate"]
+    list_display = ["name", "category", "group", "warn_km", "warn_days", "is_system"]
+    list_filter = ["category", "group", "is_system", "supports_condition_estimate"]
     search_fields = ["name"]
 
 

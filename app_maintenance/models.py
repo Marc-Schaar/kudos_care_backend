@@ -115,6 +115,30 @@ class Bike(models.Model):
         return (result or 0) / 1000  # Strava liefert Meter
 
 
+class ComponentGroup(models.Model):
+    """
+    Baugruppe im Katalog, die mehrere ComponentTemplates verbindet, die
+    physisch typischerweise zusammen gewechselt werden (z.B. "Laufrad vorne"
+    umfasst Reifen/Felge/Nabenlager/Speichen/Felgenband vorne). Grundlage für
+    den Quick-Change-Flow (siehe app_maintenance/api/views.py::SlotQuickChangeView).
+    Bewusst generisch gehalten — weitere Gruppen (z.B. "Bremse vorne") lassen
+    sich rein über den Admin anlegen, ohne Codeänderung.
+    """
+
+    name = models.CharField(max_length=100)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    if TYPE_CHECKING:
+        id: int
+        templates: RelatedManager["ComponentTemplate"]
+
+    def __str__(self):
+        return self.name
+
+
 class ComponentTemplate(models.Model):
     """
     Vordefinierter Katalog aller möglichen Verschleißkomponenten.
@@ -123,6 +147,14 @@ class ComponentTemplate(models.Model):
 
     name = models.CharField(max_length=100)
     category = models.CharField(max_length=20, choices=ComponentCategory.choices)
+    group = models.ForeignKey(
+        ComponentGroup,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="templates",
+        help_text="Optionale Baugruppe für den Quick-Change (z.B. 'Laufrad vorne').",
+    )
     applicable_bike_types = models.JSONField(
         default=list,
         help_text="Liste von BikeType-Keys. Leer = gilt für alle.",

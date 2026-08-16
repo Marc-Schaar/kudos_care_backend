@@ -142,6 +142,7 @@ class ComponentTemplateSerializer(serializers.ModelSerializer[ComponentTemplate]
     category_display = serializers.CharField(
         source="get_category_display", read_only=True
     )
+    group_name = serializers.CharField(source="group.name", read_only=True, default=None)
 
     class Meta:
         model = ComponentTemplate
@@ -157,6 +158,8 @@ class ComponentTemplateSerializer(serializers.ModelSerializer[ComponentTemplate]
             "is_system",
             "supports_condition_estimate",
             "notes",
+            "group",
+            "group_name",
         ]
         read_only_fields = ["is_system"]
 
@@ -309,6 +312,22 @@ class ComponentMountSerializer(serializers.Serializer):
     """
 
     component_id = serializers.IntegerField(required=False)
+
+
+class QuickChangeItemSerializer(serializers.Serializer):
+    """Ein einzelnes Item im Body von POST /slots/{id}/quick-change/."""
+
+    slot_id = serializers.IntegerField()
+    include = serializers.BooleanField(default=True)
+    brand = serializers.CharField(required=False, allow_blank=True, default="")
+    model_name = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class QuickChangeRequestSerializer(serializers.Serializer):
+    """Body von POST /slots/{id}/quick-change/."""
+
+    installed_at = serializers.DateField(required=False)
+    items = QuickChangeItemSerializer(many=True)
 
 
 class ComponentSlotSerializer(serializers.ModelSerializer[ComponentSlot]):
