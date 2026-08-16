@@ -33,7 +33,7 @@ from .services import (
     build_bike_condition_report_prompt,
     bike_condition_report_is_stale,
 )
-from .ai_providers import get_ai_provider
+from .ai_providers import generate_reviewed_text
 import logging
 logger = logging.getLogger('my_app_debug')
 
@@ -403,7 +403,7 @@ class ComponentWeatherExplanationView(AthleteMixin, APIView):
 
         wear = compute_wear(component, component.slot.bike.total_distance_km)
         system_prompt, user_prompt = build_weather_explanation_prompt(component, wear)
-        explanation = get_ai_provider().generate_text(system_prompt, user_prompt)
+        explanation = generate_reviewed_text(system_prompt, user_prompt)
 
         if explanation is None:
             return Response(
@@ -461,7 +461,7 @@ class ComponentCheckInstructionsView(AthleteMixin, APIView):
             )
 
         system_prompt, user_prompt = build_check_instructions_prompt(component, wear)
-        instructions = get_ai_provider().generate_text(system_prompt, user_prompt)
+        instructions = generate_reviewed_text(system_prompt, user_prompt)
 
         if instructions is None:
             return Response(
@@ -545,7 +545,7 @@ class BikeConditionReportView(AthleteMixin, APIView):
             )
 
         system_prompt, user_prompt = build_bike_condition_report_prompt(bike, component_summaries)
-        report = get_ai_provider().generate_text(system_prompt, user_prompt)
+        report = generate_reviewed_text(system_prompt, user_prompt)
 
         if report is None:
             return Response(

@@ -231,7 +231,22 @@ def _groq_response(text="Regen hat deine Kette stärker beansprucht als die rein
     return resp
 
 
-@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key")
+def _make_post_side_effect(gemini_texts=None, groq_texts=None):
+    """Gemini- und Groq-Aufrufe unterscheiden sich nur durch den Host in der URL —
+    liefert der Reihe nach die naechste konfigurierte Antwort fuer den jeweiligen
+    Provider, unabhaengig davon ob er gerade generiert oder eine Zweit-Pruefung macht."""
+    gemini_iter = iter(gemini_texts or [])
+    groq_iter = iter(groq_texts or [])
+
+    def _side_effect(url, *args, **kwargs):
+        if "generativelanguage.googleapis.com" in url:
+            return _gemini_response(next(gemini_iter))
+        return _groq_response(next(groq_iter))
+
+    return _side_effect
+
+
+@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key", GROQ_API_KEY="")
 class ComponentWeatherExplanationViewTests(APITestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="weather-explain", password="pw")
@@ -311,6 +326,42 @@ class ComponentWeatherExplanationViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         mock_post.assert_not_called()
 
+    @override_settings(GROQ_API_KEY="test-groq-key")
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_review_by_other_provider_passes_and_returns_explanation(self, mock_post):
+        self.component.weather_wear_km = 60.0
+        self.component.weather_wear_ride_count = 3
+        self.component.weather_wear_computed_at = timezone.now()
+        self.component.save()
+        mock_post.side_effect = _make_post_side_effect(
+            gemini_texts=["Regen hat deine Kette stärker beansprucht als die reinen km zeigen."],
+            groq_texts=["OK"],
+        )
+
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("Regen", response.data["explanation"])
+        # Gemini generiert, Groq prueft gegen (2 Aufrufe, keine Neugenerierung noetig).
+        self.assertEqual(mock_post.call_count, 2)
+
+    @override_settings(GROQ_API_KEY="test-groq-key")
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_failed_review_triggers_one_regeneration(self, mock_post):
+        self.component.weather_wear_km = 60.0
+        self.component.weather_wear_ride_count = 3
+        self.component.weather_wear_computed_at = timezone.now()
+        self.component.save()
+        mock_post.side_effect = _make_post_side_effect(
+            gemini_texts=["Erste, fragwürdige Antwort.", "Zweite, bessere Antwort."],
+            groq_texts=["FEHLER: widerspricht den angegebenen Zahlen"],
+        )
+
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("Zweite", response.data["explanation"])
+        # Generieren, Zweit-Pruefung (durchgefallen), einmalige Neugenerierung.
+        self.assertEqual(mock_post.call_count, 3)
+
     @override_settings(GEMINI_API_KEY="", GROQ_API_KEY="test-groq-key")
     @patch("app_maintenance.api.ai_providers.requests.post")
     def test_gemini_failure_falls_back_to_groq(self, mock_post):
@@ -327,7 +378,7 @@ class ComponentWeatherExplanationViewTests(APITestCase):
         mock_post.assert_called_once()
 
 
-@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key")
+@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key", GROQ_API_KEY="")
 class ComponentCheckInstructionsViewTests(APITestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="check-instructions", password="pw")
@@ -412,7 +463,7 @@ class ComponentCheckInstructionsViewTests(APITestCase):
         )
 
 
-@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key")
+@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key", GROQ_API_KEY="")
 class BikeConditionReportViewTests(APITestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="condition-report", password="pw")
