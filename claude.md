@@ -178,6 +178,24 @@ in `localStorage` (`StravaService.setLoggedInUser`/`displayNameStorageKey`), nic
 **Nur Session-Cookie-Auth**, kein JWT. `CsrfExemptSessionAuthentication`
 (`app_auth/mixins.py`) nur auf Login/Logout. Jede View setzt `permission_classes` explizit.
 
+### Dev-Mock ohne echten Strava-Login
+
+Für lokale Entwicklung ohne Strava-OAuth-Roundtrip: `POST /api/dev/login/`
+(`app_auth/api/dev_views.py::DevLoginView`) loggt einen festen Fake-Athleten
+(`app_auth/dev_auth.py::DEV_ATHLETE_ID`) ein — legt `User`+`StravaProfile` on-demand an,
+ruft `login()` und setzt `strava_athlete_id` in der Session, genau wie
+`StravaAuthCallbackView`. Die Route wird nur bei `settings.DEBUG=True` in
+`app_auth/api/urls.py` registriert (existiert in Produktion also gar nicht), die View
+prüft `DEBUG` zusätzlich selbst als zweite Absicherung. Passende Testdaten dazu liefert
+das Management-Command `python manage.py seed_dev_data` (`app_maintenance/management/
+commands/seed_dev_data.py`, ebenfalls nur mit `DEBUG=True` lauffähig): legt ein Bike,
+montierte Komponenten (aus der bestehenden `component_templates`-Fixture) und eine
+Ride-Historie mit synthetischen Wetterdaten an und berechnet `weather_wear_km` synchron
+(kein Celery-Worker nötig). `--reset` löscht vorhandene Fake-Daten vorher, `--rides N`
+steuert die Anzahl der Fake-Rides. Läuft weiterhin gegen die echte Postgres/PostGIS-DB
+(kein SQLite-Fallback) — "fake" bezieht sich auf Auth-Roundtrip und Dateninhalt, nicht auf
+die DB-Engine.
+
 ## Bekannte Lücken / Quirks (Stand: siehe Git-History für Aktualität)
 
 - Der Strava-Push-Webhook lief in Produktion nie: `settings.STRAVA_VERIFY_TOKEN` war
