@@ -10,7 +10,17 @@ from django.utils import timezone
 
 from app_auth.dev_auth import get_or_create_dev_profile
 from app_maintenance.api.services import WeatherWearService
-from app_maintenance.models import Bike, BikeType, Component, ComponentSlot, ComponentTemplate
+from app_maintenance.models import (
+    Bike,
+    BikeAssembly,
+    BikeType,
+    Component,
+    ComponentGroup,
+    ComponentSlot,
+    ComponentTemplate,
+    MaintenanceInterval,
+    MaintenanceKind,
+)
 
 logger = logging.getLogger("my_app_debug")
 
@@ -44,7 +54,9 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         if not settings.DEBUG:
-            raise CommandError("seed_dev_data läuft nur mit DEBUG=True — nicht für Produktion gedacht.")
+            raise CommandError(
+                "seed_dev_data läuft nur mit DEBUG=True — nicht für Produktion gedacht."
+            )
 
         from app_dashboard.models import Ride
 
@@ -53,14 +65,19 @@ class Command(BaseCommand):
         rng = random.Random(42)
 
         profile = get_or_create_dev_profile()
-        self.stdout.write(f"StravaProfile (athlete_id={profile.strava_athlete_id}) bereit.")
+        self.stdout.write(
+            f"StravaProfile (athlete_id={profile.strava_athlete_id}) bereit."
+        )
 
         if ComponentTemplate.objects.count() == 0:
-            self.stdout.write("Keine ComponentTemplates vorhanden, lade Fixture 'component_templates'...")
+            self.stdout.write(
+                "Keine ComponentTemplates vorhanden, lade Fixture 'component_templates'..."
+            )
             call_command("loaddata", "component_templates")
 
         if reset:
             Ride.objects.filter(bike__strava_bike_id=DEV_BIKE_STRAVA_ID).delete()
+            # Bike-CASCADE räumt Slots/Components/Assemblies/Intervalle mit ab.
             Bike.objects.filter(strava_bike_id=DEV_BIKE_STRAVA_ID).delete()
 
         bike, _ = Bike.objects.update_or_create(
@@ -74,7 +91,7 @@ class Command(BaseCommand):
         )
         self.stdout.write(f"Bike '{bike.name}' (id={bike.pk}) bereit.")
 
-        # ── Slots + montierte Komponenten ─────────────────────────────────────
+        # ── Baugruppen + montierte Komponenten + Wartungs-Intervalle ──────────
         # installed_at wird bewusst vor den aeltesten Fake-Ride gelegt (mit Streuung),
         # damit WeatherWearService beim Recompute unten auf eine sinnvolle Ride-Historie
         # trifft und der Verschleiss-Status je Komponente unterschiedlich ausfaellt
@@ -82,23 +99,69 @@ class Command(BaseCommand):
         max_ride_days_ago = ride_count * 4 + 2
         today = timezone.now().date()
         mounted = 0
-        for template in ComponentTemplate.objects.all():
-            if not template.applies_to(bike.bike_type):
+        intervals_created = 0
+        for group in ComponentGroup.objects.prefetch_related("templates"):
+            if not group.applies_to(bike.bike_type):
                 continue
-            slot, _ = ComponentSlot.objects.get_or_create(bike=bike, template=template)
-            if slot.mounted_component is not None:
+            templates = [
+                t for t in group.templates.all() if t.applies_to(bike.bike_type)
+            ]
+            if not templates:
                 continue
-            days_back = rng.randint(max_ride_days_ago + 15, max_ride_days_ago + 280)
-            Component.objects.create(
-                slot=slot,
-                brand="DevBrand",
-                model_name=template.name,
-                distance_at_install=0,
-                installed_at=today - timedelta(days=days_back),
-                is_mounted=True,
+
+            assembly, created = BikeAssembly.objects.get_or_create(
+                bike=bike, group=group, is_active=True, defaults={"name": ""}
             )
-            mounted += 1
-        self.stdout.write(f"{mounted} neue Komponenten montiert (bereits vorhandene Slots übersprungen).")
+            if not created:
+                continue
+
+            for template in templates:
+                days_back = rng.randint(max_ride_days_ago + 15, max_ride_days_ago + 280)
+                installed_at = today - timedelta(days=days_back)
+
+                if template.maintenance_kind == MaintenanceKind.CONSUMABLE:
+                    MaintenanceInterval.objects.create(
+                        bike=bike,
+                        assembly=assembly,
+                        template=template,
+                        label=template.name,
+                        interval_km=template.warn_km,
+                        interval_days=template.warn_days,
+                        last_done_at=installed_at,
+                        last_done_distance_km=0,
+                    )
+                    intervals_created += 1
+                    continue
+
+                slot, _ = ComponentSlot.objects.get_or_create(
+                    assembly=assembly, template=template, defaults={"bike": bike}
+                )
+                if slot.mounted_component is not None:
+                    continue
+                Component.objects.create(
+                    slot=slot,
+                    brand="DevBrand",
+                    model_name=template.name,
+                    distance_at_install=0,
+                    installed_at=installed_at,
+                    is_mounted=True,
+                )
+                mounted += 1
+
+            if assembly.installed_at is None:
+                installs = [
+                    c.installed_at
+                    for s in assembly.slots.all()
+                    for c in s.components.all()
+                    if c.installed_at
+                ]
+                if installs:
+                    assembly.installed_at = min(installs)
+                    assembly.save(update_fields=["installed_at"])
+
+        self.stdout.write(
+            f"{mounted} Komponenten montiert, {intervals_created} Wartungs-Intervalle angelegt."
+        )
 
         # ── Fake-Rides mit Wetterdaten ─────────────────────────────────────────
         now = timezone.now()
@@ -126,15 +189,25 @@ class Command(BaseCommand):
             is_windy = rng.random() < 0.2
 
             precipitation = [
-                round(rng.uniform(2.0, 8.0), 1) if is_rainy else round(rng.uniform(0.0, 0.3), 1)
+                (
+                    round(rng.uniform(2.0, 8.0), 1)
+                    if is_rainy
+                    else round(rng.uniform(0.0, 0.3), 1)
+                )
                 for _ in range(4)
             ]
             base_temp = (
-                rng.uniform(2.0, 8.0) if is_cold else rng.uniform(29.0, 35.0) if is_hot else rng.uniform(12.0, 22.0)
+                rng.uniform(2.0, 8.0)
+                if is_cold
+                else rng.uniform(29.0, 35.0) if is_hot else rng.uniform(12.0, 22.0)
             )
-            temperature_2m = [round(base_temp + rng.uniform(-1.5, 1.5), 1) for _ in range(4)]
+            temperature_2m = [
+                round(base_temp + rng.uniform(-1.5, 1.5), 1) for _ in range(4)
+            ]
             base_wind = rng.uniform(22.0, 35.0) if is_windy else rng.uniform(3.0, 15.0)
-            wind_speed_10m = [round(base_wind + rng.uniform(-3.0, 3.0), 1) for _ in range(4)]
+            wind_speed_10m = [
+                round(base_wind + rng.uniform(-3.0, 3.0), 1) for _ in range(4)
+            ]
 
             Ride.objects.update_or_create(
                 strava_id=strava_id,

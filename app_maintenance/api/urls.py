@@ -3,6 +3,10 @@ from .views import (
     BikeListView,
     BikeDetailView,
     BikeDistanceAtDateView,
+    BikeAssemblyListView,
+    BikeAssemblyDetailView,
+    AssemblySwapView,
+    ComponentGroupListView,
     ComponentTemplateListView,
     ComponentTemplateDetailView,
     ComponentSlotListView,
@@ -16,6 +20,9 @@ from .views import (
     ComponentWeatherExplanationView,
     ComponentCheckInstructionsView,
     BikeConditionReportView,
+    MaintenanceIntervalListCreateView,
+    MaintenanceIntervalDetailView,
+    MaintenanceIntervalLogView,
 )
 
 urlpatterns = [
@@ -25,6 +32,37 @@ urlpatterns = [
         "maintenance/bikes/<int:bike_id>/distance-at/",
         BikeDistanceAtDateView.as_view(),
         name="bike-distance-at",
+    ),
+    path("maintenance/groups/", ComponentGroupListView.as_view(), name="group-list"),
+    path(
+        "maintenance/bikes/<int:bike_id>/assemblies/",
+        BikeAssemblyListView.as_view(),
+        name="assembly-list",
+    ),
+    path(
+        "maintenance/assemblies/<int:pk>/",
+        BikeAssemblyDetailView.as_view(),
+        name="assembly-detail",
+    ),
+    path(
+        "maintenance/assemblies/<int:pk>/swap/",
+        AssemblySwapView.as_view(),
+        name="assembly-swap",
+    ),
+    path(
+        "maintenance/bikes/<int:bike_id>/intervals/",
+        MaintenanceIntervalListCreateView.as_view(),
+        name="interval-create",
+    ),
+    path(
+        "maintenance/intervals/<int:pk>/",
+        MaintenanceIntervalDetailView.as_view(),
+        name="interval-detail",
+    ),
+    path(
+        "maintenance/intervals/<int:pk>/log/",
+        MaintenanceIntervalLogView.as_view(),
+        name="interval-log",
     ),
     path(
         "maintenance/bikes/<int:pk>/condition-report/",

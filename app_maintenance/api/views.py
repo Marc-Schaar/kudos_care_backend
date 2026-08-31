@@ -12,19 +12,31 @@ from rest_framework.views import APIView
 from app_auth.models import StravaProfile
 from app_maintenance.models import (
     Bike,
+    BikeAssembly,
+    ComponentGroup,
     ComponentTemplate,
     ComponentSlot,
     Component,
     ComponentCheck,
+    MaintenanceInterval,
+    MaintenanceIntervalKind,
+    MaintenanceKind,
+    MaintenanceLog,
 )
 from .serializers import (
     BikeSerializer,
     BikeListSerializer,
+    BikeAssemblySerializer,
+    ComponentGroupSerializer,
     ComponentTemplateSerializer,
     ComponentSlotSerializer,
     ComponentSlotListSerializer,
     ComponentSerializer,
     ComponentCheckCreateSerializer,
+    AssemblyCreateRequestSerializer,
+    MaintenanceIntervalSerializer,
+    MaintenanceIntervalCreateSerializer,
+    MaintenanceIntervalLogRequestSerializer,
     QuickChangeRequestSerializer,
     compute_wear,
 )
@@ -36,7 +48,8 @@ from .services import (
 )
 from .ai_providers import generate_reviewed_text
 import logging
-logger = logging.getLogger('my_app_debug')
+
+logger = logging.getLogger("my_app_debug")
 
 
 class AthleteMixin:
@@ -61,13 +74,19 @@ class BikeListView(AthleteMixin, generics.ListCreateAPIView):
 
     def get_queryset(self):
         profile = self.get_athlete()
-        logger.debug(f"DEBUG: Suche Fahrräder für Profile ID: {profile.id} (Strava-ID: {profile.strava_athlete_id})")
-        
+        logger.debug(
+            f"DEBUG: Suche Fahrräder für Profile ID: {profile.id} (Strava-ID: {profile.strava_athlete_id})"
+        )
+
         all_bikes = Bike.objects.all()
         for b in all_bikes:
-            logger.debug(f"DEBUG: Bike gefunden: {b.name}, verknüpft mit Profile ID: {getattr(b, 'athlete_id', 'None')}")
-            
-        return Bike.objects.filter(athlete=profile).prefetch_related("slots__template", "slots__components", "rides")
+            logger.debug(
+                f"DEBUG: Bike gefunden: {b.name}, verknüpft mit Profile ID: {getattr(b, 'athlete_id', 'None')}"
+            )
+
+        return Bike.objects.filter(athlete=profile).prefetch_related(
+            "slots__template", "slots__components", "rides"
+        )
         # logging.debug(f"Fetching bikes for athlete: {self.get_athlete()}")
         # logger.debug(f" Bikes: {Bike.objects.filter(athlete=self.get_athlete())}")
         # return Bike.objects.filter(athlete=self.get_athlete()).prefetch_related(
@@ -76,7 +95,7 @@ class BikeListView(AthleteMixin, generics.ListCreateAPIView):
 
     def get_serializer_class(self):
         return BikeSerializer if self.request.method == "POST" else BikeListSerializer
-    
+
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
@@ -98,7 +117,7 @@ class BikeDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         return Bike.objects.filter(athlete=self.get_athlete()).prefetch_related(
-            "slots__template", "slots__components", "rides"
+            "slots__template", "slots__components", "rides", "intervals__logs"
         )
 
 
@@ -323,7 +342,10 @@ class SlotQuickChangeView(AthleteMixin, APIView):
         group, siblings = self._sibling_slots(slot)
         if group is None:
             return Response(
-                {"error": "Diese Komponente gehört zu keiner Baugruppe.", "code": "no_group"},
+                {
+                    "error": "Diese Komponente gehört zu keiner Baugruppe.",
+                    "code": "no_group",
+                },
                 status=status.HTTP_404_NOT_FOUND,
             )
 
@@ -358,14 +380,19 @@ class SlotQuickChangeView(AthleteMixin, APIView):
         group, siblings = self._sibling_slots(slot)
         if group is None:
             return Response(
-                {"error": "Diese Komponente gehört zu keiner Baugruppe.", "code": "no_group"},
+                {
+                    "error": "Diese Komponente gehört zu keiner Baugruppe.",
+                    "code": "no_group",
+                },
                 status=status.HTTP_404_NOT_FOUND,
             )
         allowed_slots = {s.id: s for s in siblings}
 
         body_serializer = QuickChangeRequestSerializer(data=request.data)
         body_serializer.is_valid(raise_exception=True)
-        installed_at = body_serializer.validated_data.get("installed_at") or datetime.date.today()
+        installed_at = (
+            body_serializer.validated_data.get("installed_at") or datetime.date.today()
+        )
 
         target_slots = []
         for item in body_serializer.validated_data["items"]:
@@ -374,7 +401,9 @@ class SlotQuickChangeView(AthleteMixin, APIView):
             target_slot = allowed_slots.get(item["slot_id"])
             if target_slot is None:
                 return Response(
-                    {"error": f"slot_id {item['slot_id']} gehört nicht zur Baugruppe dieses Bikes."},
+                    {
+                        "error": f"slot_id {item['slot_id']} gehört nicht zur Baugruppe dieses Bikes."
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             target_slots.append((target_slot, item))
@@ -510,7 +539,8 @@ class ComponentWeatherExplanationView(AthleteMixin, APIView):
         is_stale = (
             component.weather_wear_explanation_generated_at is None
             or component.weather_wear_computed_at is None
-            or component.weather_wear_explanation_generated_at < component.weather_wear_computed_at
+            or component.weather_wear_explanation_generated_at
+            < component.weather_wear_computed_at
         )
 
         if component.weather_wear_explanation and not is_stale and not force_refresh:
@@ -538,7 +568,10 @@ class ComponentWeatherExplanationView(AthleteMixin, APIView):
         component.weather_wear_explanation = explanation
         component.weather_wear_explanation_generated_at = timezone.now()
         component.save(
-            update_fields=["weather_wear_explanation", "weather_wear_explanation_generated_at"]
+            update_fields=[
+                "weather_wear_explanation",
+                "weather_wear_explanation_generated_at",
+            ]
         )
 
         return Response(
@@ -656,7 +689,11 @@ class BikeConditionReportView(AthleteMixin, APIView):
             )
 
         force_refresh = request.query_params.get("refresh") == "true"
-        if bike.condition_report and not force_refresh and not bike_condition_report_is_stale(bike):
+        if (
+            bike.condition_report
+            and not force_refresh
+            and not bike_condition_report_is_stale(bike)
+        ):
             return Response(
                 {
                     "report": bike.condition_report,
@@ -665,7 +702,9 @@ class BikeConditionReportView(AthleteMixin, APIView):
                 }
             )
 
-        system_prompt, user_prompt = build_bike_condition_report_prompt(bike, component_summaries)
+        system_prompt, user_prompt = build_bike_condition_report_prompt(
+            bike, component_summaries
+        )
         report = generate_reviewed_text(system_prompt, user_prompt)
 
         if report is None:
@@ -687,4 +726,405 @@ class BikeConditionReportView(AthleteMixin, APIView):
                 "generated_at": bike.condition_report_generated_at,
                 "cached": False,
             }
+        )
+
+
+# ── Baugruppen (BikeAssembly) & Wartungs-Intervalle ───────────────────────────
+
+
+def _interval_kind_for_template(template: ComponentTemplate) -> str:
+    name = template.name.lower()
+    if "dichtmilch" in name:
+        return MaintenanceIntervalKind.SEALANT
+    if "kette" in name and ("wachs" in name or "öl" in name or "schmier" in name):
+        return MaintenanceIntervalKind.CHAIN_LUBE
+    if "bremsflüssigkeit" in name:
+        return MaintenanceIntervalKind.BRAKE_BLEED
+    if "di2" in name or "axs" in name:
+        return MaintenanceIntervalKind.DI2_CHARGE
+    if "akku" in name or "batterie" in name:
+        return MaintenanceIntervalKind.BATTERY
+    return MaintenanceIntervalKind.CUSTOM
+
+
+def _build_assembly_from_request(
+    bike: Bike, group: ComponentGroup, data: dict
+) -> BikeAssembly:
+    """
+    Legt eine BikeAssembly + ihre Slots/Components + MaintenanceIntervals atomar an.
+    Erwartet bereits validierte Daten (AssemblyCreateRequestSerializer) und
+    vorab-geprüfte Template-Zugehörigkeit zur Gruppe. Wiederverwendet das
+    Unmount-dann-Mount-Muster aus SlotMountView/SlotQuickChangeView.
+    """
+    installed_at = data.get("installed_at") or datetime.date.today()
+    bike_total_km = bike.total_distance_km
+
+    with transaction.atomic():
+        assembly = BikeAssembly(
+            bike=bike,
+            group=group,
+            name=data.get("name", "") or "",
+            installed_at=installed_at,
+            is_active=True,
+        )
+        assembly.save()
+
+        allowed_parts = {
+            t.id: t
+            for t in group.templates.filter(maintenance_kind=MaintenanceKind.PART)
+        }
+        allowed_consumables = {
+            t.id: t
+            for t in group.templates.filter(maintenance_kind=MaintenanceKind.CONSUMABLE)
+        }
+
+        for item in data.get("parts", []):
+            if not item["include"]:
+                continue
+            template = allowed_parts[item["template_id"]]
+            slot, _ = ComponentSlot.objects.get_or_create(
+                assembly=assembly, template=template, defaults={"bike": bike}
+            )
+            Component.objects.filter(slot=slot, is_mounted=True).update(
+                is_mounted=False, retired_at=datetime.date.today()
+            )
+            Component(
+                slot=slot,
+                brand=item.get("brand", ""),
+                model_name=item.get("model_name", ""),
+                installed_at=installed_at,
+                distance_at_install=bike_total_km,
+                custom_warn_km=item.get("custom_warn_km"),
+                custom_warn_days=item.get("custom_warn_days"),
+                is_mounted=True,
+            ).save()
+
+        for item in data.get("intervals", []):
+            if not item["include"]:
+                continue
+            template = allowed_consumables[item["template_id"]]
+            MaintenanceInterval.objects.create(
+                bike=bike,
+                assembly=assembly,
+                template=template,
+                kind=_interval_kind_for_template(template),
+                label=template.name,
+                interval_km=item.get("interval_km") or template.warn_km,
+                interval_days=item.get("interval_days") or template.warn_days,
+                last_done_at=installed_at,
+                last_done_distance_km=bike_total_km,
+            )
+
+    return assembly
+
+
+def _validate_assembly_items(group: ComponentGroup, data: dict) -> str | None:
+    """Prüft, dass alle referenzierten Templates zur Gruppe + richtigen Art gehören."""
+    part_ids = {
+        t.id for t in group.templates.filter(maintenance_kind=MaintenanceKind.PART)
+    }
+    consumable_ids = {
+        t.id
+        for t in group.templates.filter(maintenance_kind=MaintenanceKind.CONSUMABLE)
+    }
+    for item in data.get("parts", []):
+        if item["template_id"] not in part_ids:
+            return f"Template {item['template_id']} gehört nicht als Verschleißteil zu '{group.name}'."
+    for item in data.get("intervals", []):
+        if item["template_id"] not in consumable_ids:
+            return f"Template {item['template_id']} gehört nicht als Verbrauchsmaterial zu '{group.name}'."
+    return None
+
+
+class ComponentGroupListView(AthleteMixin, generics.ListAPIView):
+    """
+    GET /api/maintenance/groups/?bike_type=gravel
+
+    Katalog aller Baugruppen-Blueprints mit genesteten Templates (parts/
+    consumables). Für den Neu-Bike-Stepper und den "Baugruppe hinzufügen"-Dialog.
+    """
+
+    serializer_class = ComponentGroupSerializer
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx["bike_type"] = self.request.query_params.get("bike_type")
+        return ctx
+
+    def get_queryset(self):
+        qs = ComponentGroup.objects.prefetch_related("templates")
+        bike_type = self.request.query_params.get("bike_type")
+        if bike_type:
+            qs = [g for g in qs if g.applies_to(bike_type)]
+        return qs
+
+
+class BikeAssemblyListView(AthleteMixin, APIView):
+    """
+    GET  /api/maintenance/bikes/{bike_id}/assemblies/
+    POST /api/maintenance/bikes/{bike_id}/assemblies/
+
+    GET liefert die aktiven Baugruppen des Bikes (inkl. Slots mit Wear +
+    Intervall-Status), die noch nicht zugeordneten Alt-Slots (`ungrouped_slots`,
+    nach Kategorie) und die noch verfügbaren Katalog-Gruppen (`available_groups`).
+    POST legt eine neue Baugruppe komplett an (ein Dialog = eine Baugruppe).
+    """
+
+    def get_bike(self) -> Bike:
+        return get_object_or_404(
+            Bike, pk=self.kwargs["bike_id"], athlete=self.get_athlete()
+        )
+
+    def get(self, request, bike_id):
+        bike = self.get_bike()
+        context = {"bike_total_km": bike.total_distance_km}
+
+        assemblies = (
+            BikeAssembly.objects.filter(bike=bike, is_active=True)
+            .select_related("group")
+            .prefetch_related(
+                "group__templates",
+                "slots__template",
+                "slots__components__checks",
+                "intervals__logs",
+            )
+        )
+        assembly_data = BikeAssemblySerializer(
+            assemblies, many=True, context=context
+        ).data
+
+        ungrouped = (
+            ComponentSlot.objects.filter(bike=bike, assembly__isnull=True)
+            .select_related("template")
+            .prefetch_related("components__checks")
+        )
+        ungrouped_data = ComponentSlotListSerializer(
+            ungrouped, many=True, context=dict(context)
+        ).data
+
+        used_group_ids = set(assemblies.values_list("group_id", flat=True))
+        available = [
+            g
+            for g in ComponentGroup.objects.prefetch_related("templates")
+            if g.id not in used_group_ids and g.applies_to(bike.bike_type)
+        ]
+        available_data = ComponentGroupSerializer(
+            available, many=True, context={"bike_type": bike.bike_type}
+        ).data
+
+        return Response(
+            {
+                "assemblies": assembly_data,
+                "ungrouped_slots": ungrouped_data,
+                "available_groups": available_data,
+            }
+        )
+
+    def post(self, request, bike_id):
+        bike = self.get_bike()
+        body = AssemblyCreateRequestSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        group_id = data.get("group_id")
+        if not group_id:
+            return Response(
+                {"error": "group_id fehlt."}, status=status.HTTP_400_BAD_REQUEST
+            )
+        group = get_object_or_404(ComponentGroup, pk=group_id)
+
+        if not group.applies_to(bike.bike_type):
+            return Response(
+                {
+                    "error": f"Baugruppe '{group.name}' passt nicht zum Bike-Typ.",
+                    "code": "bike_type_mismatch",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if BikeAssembly.objects.filter(bike=bike, group=group, is_active=True).exists():
+            return Response(
+                {
+                    "error": f"Für '{group.name}' ist bereits eine Baugruppe aktiv. "
+                    "Bitte 'Baugruppe tauschen' nutzen.",
+                    "code": "already_active",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        err = _validate_assembly_items(group, data)
+        if err:
+            return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
+
+        assembly = _build_assembly_from_request(bike, group, data)
+        return Response(
+            BikeAssemblySerializer(
+                assembly, context={"bike_total_km": bike.total_distance_km}
+            ).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class BikeAssemblyDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET    /api/maintenance/assemblies/{pk}/
+    PATCH  /api/maintenance/assemblies/{pk}/   → name / installed_at / retired_at / is_active
+    DELETE /api/maintenance/assemblies/{pk}/
+    """
+
+    serializer_class = BikeAssemblySerializer
+    http_method_names = ["get", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        return (
+            BikeAssembly.objects.filter(bike__athlete=self.get_athlete())
+            .select_related("group", "bike")
+            .prefetch_related(
+                "group__templates",
+                "slots__template",
+                "slots__components__checks",
+                "intervals__logs",
+            )
+        )
+
+
+class AssemblySwapView(AthleteMixin, APIView):
+    """
+    POST /api/maintenance/assemblies/{pk}/swap/
+
+    Ersetzt die aktive Baugruppe: die alte Instanz wird deaktiviert (ihre
+    Komponenten ausgebaut), eine neue aktive Instanz derselben `group` wird mit
+    frischen Komponenten/Intervallen angelegt. Body identisch zu POST
+    /bikes/{id}/assemblies/ (group_id optional, wird aus der alten Instanz
+    übernommen).
+    """
+
+    def post(self, request, pk):
+        old = get_object_or_404(
+            BikeAssembly.objects.select_related("group", "bike"),
+            pk=pk,
+            bike__athlete=self.get_athlete(),
+        )
+        bike = old.bike
+        group = old.group
+
+        body = AssemblyCreateRequestSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        err = _validate_assembly_items(group, data)
+        if err:
+            return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            Component.objects.filter(slot__assembly=old, is_mounted=True).update(
+                is_mounted=False, retired_at=datetime.date.today()
+            )
+            old.is_active = False
+            old.retired_at = datetime.date.today()
+            old.save()
+
+            new_assembly = _build_assembly_from_request(bike, group, data)
+
+        return Response(
+            BikeAssemblySerializer(
+                new_assembly, context={"bike_total_km": bike.total_distance_km}
+            ).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class MaintenanceIntervalListCreateView(AthleteMixin, APIView):
+    """
+    POST /api/maintenance/bikes/{bike_id}/intervals/  → Ad-hoc-Intervall anlegen
+    """
+
+    def post(self, request, bike_id):
+        bike = get_object_or_404(Bike, pk=bike_id, athlete=self.get_athlete())
+        body = MaintenanceIntervalCreateSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        assembly = None
+        if data.get("assembly"):
+            assembly = get_object_or_404(BikeAssembly, pk=data["assembly"], bike=bike)
+
+        interval = MaintenanceInterval.objects.create(
+            bike=bike,
+            assembly=assembly,
+            kind=data.get("kind", MaintenanceIntervalKind.CUSTOM),
+            label=data["label"],
+            interval_km=data.get("interval_km"),
+            interval_days=data.get("interval_days"),
+            last_done_at=data.get("last_done_at") or datetime.date.today(),
+            last_done_distance_km=bike.total_distance_km,
+            notes=data.get("notes", ""),
+        )
+        return Response(
+            MaintenanceIntervalSerializer(
+                interval, context={"bike_total_km": bike.total_distance_km}
+            ).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class MaintenanceIntervalDetailView(
+    AthleteMixin, generics.RetrieveUpdateDestroyAPIView
+):
+    """
+    GET    /api/maintenance/intervals/{pk}/
+    PATCH  /api/maintenance/intervals/{pk}/
+    DELETE /api/maintenance/intervals/{pk}/
+    """
+
+    serializer_class = MaintenanceIntervalSerializer
+    http_method_names = ["get", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        return (
+            MaintenanceInterval.objects.filter(bike__athlete=self.get_athlete())
+            .select_related("bike")
+            .prefetch_related("logs")
+        )
+
+
+class MaintenanceIntervalLogView(AthleteMixin, APIView):
+    """
+    POST /api/maintenance/intervals/{pk}/log/
+    Body: { "done_at"?: "YYYY-MM-DD", "done_distance_km"?: float, "note"?: str }
+
+    "Erledigt / Erneuert": setzt die km-/Tage-Baseline zurück und hängt einen
+    MaintenanceLog an.
+    """
+
+    def post(self, request, pk):
+        interval = get_object_or_404(
+            MaintenanceInterval, pk=pk, bike__athlete=self.get_athlete()
+        )
+        body = MaintenanceIntervalLogRequestSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        done_at = data.get("done_at") or datetime.date.today()
+        done_km = data.get("done_distance_km")
+        if done_km is None:
+            done_km = interval.bike.total_distance_km
+
+        with transaction.atomic():
+            MaintenanceLog.objects.create(
+                interval=interval,
+                done_at=done_at,
+                done_distance_km=done_km,
+                note=data.get("note", ""),
+            )
+            interval.last_done_at = done_at
+            interval.last_done_distance_km = done_km
+            interval.save(
+                update_fields=["last_done_at", "last_done_distance_km", "updated_at"]
+            )
+
+        return Response(
+            MaintenanceIntervalSerializer(
+                interval, context={"bike_total_km": interval.bike.total_distance_km}
+            ).data
         )

@@ -39,6 +39,42 @@ class ComponentCategory(models.TextChoices):
     OTHER = "other", "Sonstiges"
 
 
+class MaintenanceKind(models.TextChoices):
+    """
+    Unterscheidet physische Verschleißteile (`PART`, werden als ComponentSlot +
+    Component instanziiert und getauscht) von Verbrauchsmaterial/wiederkehrender
+    Pflege (`CONSUMABLE`, z.B. Kettenschmierung, Tubeless-Dichtmilch, Bremse
+    entlüften). Consumables haben keinen prozentualen "Zustand", sondern werden
+    über `MaintenanceInterval` als Intervall getrackt und per "Erledigt"-Log
+    zurückgesetzt.
+    """
+
+    PART = "part", "Verschleißteil"
+    CONSUMABLE = "consumable", "Verbrauchsmaterial / Pflege"
+
+
+class WarnLevel:
+    OK = "ok"
+    WARN = "warn"
+    CRITICAL = "critical"
+    UNKNOWN = "unknown"
+
+
+def warn_status_from_ratio(ratio: float | None) -> str:
+    """
+    Gemeinsame Ampel-Logik (siehe auch api/serializers.py::WarnStatus, das hierher
+    delegiert): ratio = aktueller Wert / Grenzwert.
+    < 0.8 → ok, 0.8–1.0 → warn, ≥ 1.0 → critical, None → unknown.
+    """
+    if ratio is None:
+        return WarnLevel.UNKNOWN
+    if ratio >= 1.0:
+        return WarnLevel.CRITICAL
+    if ratio >= 0.8:
+        return WarnLevel.WARN
+    return WarnLevel.OK
+
+
 class Bike(models.Model):
     athlete = models.ForeignKey(
         StravaProfile,
@@ -123,20 +159,49 @@ class ComponentGroup(models.Model):
     den Quick-Change-Flow (siehe app_maintenance/api/views.py::SlotQuickChangeView).
     Bewusst generisch gehalten — weitere Gruppen (z.B. "Bremse vorne") lassen
     sich rein über den Admin anlegen, ohne Codeänderung.
+
+    Dient als Blueprint: pro Bike wird daraus eine `BikeAssembly`-Instanz
+    (mit eigenem Namen/Verlauf) erzeugt.
     """
 
     name = models.CharField(max_length=100)
     notes = models.TextField(blank=True)
+    category = models.CharField(
+        max_length=20,
+        choices=ComponentCategory.choices,
+        default=ComponentCategory.OTHER,
+        help_text="Bestimmt Icon/Farbe/Sortierung in der UI.",
+    )
+    applicable_bike_types = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Liste von BikeType-Keys. Leer = gilt für alle.",
+    )
+    sort_order = models.PositiveIntegerField(default=0)
+    is_system = models.BooleanField(
+        default=True,
+        help_text="True = aus Migration/Seed, False = vom User angelegt.",
+    )
+    recommended = models.BooleanField(
+        default=True,
+        help_text="Im geführten Stepper für ein neues Bike vorausgewählt.",
+    )
 
     class Meta:
-        ordering = ["name"]
+        ordering = ["sort_order", "name"]
 
     if TYPE_CHECKING:
         id: int
         templates: RelatedManager["ComponentTemplate"]
+        instances: RelatedManager["BikeAssembly"]
 
     def __str__(self):
         return self.name
+
+    def applies_to(self, bike_type: str) -> bool:
+        if not self.applicable_bike_types:
+            return True
+        return bike_type in self.applicable_bike_types
 
 
 class ComponentTemplate(models.Model):
@@ -178,6 +243,20 @@ class ComponentTemplate(models.Model):
             "(z.B. nein bei Lagern/Services)."
         ),
     )
+    maintenance_kind = models.CharField(
+        max_length=20,
+        choices=MaintenanceKind.choices,
+        default=MaintenanceKind.PART,
+        help_text=(
+            "PART = physisches Verschleißteil (Slot + Component). "
+            "CONSUMABLE = Verbrauchsmaterial/Pflege, wird als MaintenanceInterval "
+            "getrackt statt als Component."
+        ),
+    )
+    default_in_group = models.BooleanField(
+        default=True,
+        help_text="Im Baugruppen-Dialog vorausgewählt (seltene Teile: False).",
+    )
     notes = models.TextField(blank=True)
 
     class Meta:
@@ -199,17 +278,137 @@ class ComponentTemplate(models.Model):
         return bike_type in self.applicable_bike_types
 
 
+class BikeAssembly(models.Model):
+    """
+    Instanz einer Baugruppe (ComponentGroup) an einem konkreten Bike, z.B.
+    "Laufrad vorne" oder – vom User umbenannt – "Sommer-LRS". Bündelt die
+    zugehörigen `ComponentSlot`s. Pro `(bike, group)` darf höchstens eine
+    Instanz aktiv sein (`is_active`, erzwungen in `clean()`); inaktive Instanzen
+    bleiben als Wechsel-Historie erhalten. Gleichzeitige Baugruppen
+    unterschiedlicher `group` sind natürlich erlaubt.
+    """
+
+    bike = models.ForeignKey(
+        Bike,
+        on_delete=models.CASCADE,
+        related_name="assemblies",
+    )
+    group = models.ForeignKey(
+        ComponentGroup,
+        on_delete=models.PROTECT,
+        related_name="instances",
+    )
+    name = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Anzeigename, Default = group.name. Editierbar (z.B. 'Sommer-LRS').",
+    )
+    installed_at = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Wann diese Baugruppe (zuletzt komplett) montiert wurde.",
+    )
+    retired_at = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["group__sort_order", "group__name", "-created_at"]
+        verbose_name = "Baugruppe (Bike-Instanz)"
+        verbose_name_plural = "Baugruppen (Bike-Instanzen)"
+
+    if TYPE_CHECKING:
+        id: int
+        slots: RelatedManager["ComponentSlot"]
+        intervals: RelatedManager["MaintenanceInterval"]
+
+    def __str__(self):
+        return f"{self.bike.name} — {self.display_name}"
+
+    @property
+    def display_name(self) -> str:
+        return self.name or self.group.name
+
+    def clean(self):
+        if self.is_active:
+            qs = BikeAssembly.objects.filter(
+                bike=self.bike, group=self.group, is_active=True
+            ).exclude(pk=self.pk)
+            if qs.exists():
+                raise ValidationError(
+                    f"Für '{self.group.name}' an diesem Bike ist bereits eine "
+                    "Baugruppe aktiv. Bitte zuerst die aktuelle deaktivieren."
+                )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def compute_km(self, bike_total_km: float | None) -> float | None:
+        """
+        Gefahrene km seit dieser Baugruppe = bike_total minus dem km-Stand beim
+        Einbau des ältesten noch montierten Teils der Baugruppe.
+        """
+        if bike_total_km is None:
+            return None
+        installs = [
+            c.distance_at_install
+            for slot in self.slots.all()
+            for c in slot.components.all()
+            if c.is_mounted and c.distance_at_install is not None
+        ]
+        if not installs:
+            return None
+        return round(bike_total_km - min(installs), 1)
+
+    def worst_status(self, bike_total_km: float | None) -> str:
+        """Schlechtester Status über montierte Komponenten + zugehörige Intervalle."""
+        from .api.serializers import compute_wear
+
+        statuses: list[str] = []
+        for slot in self.slots.all():
+            comp = slot.mounted_component
+            if comp is None:
+                statuses.append(WarnLevel.UNKNOWN)
+                continue
+            statuses.append(compute_wear(comp, bike_total_km)["warn_status_overall"])
+        for interval in self.intervals.all():
+            statuses.append(interval.status(bike_total_km))
+
+        for level in (
+            WarnLevel.CRITICAL,
+            WarnLevel.WARN,
+            WarnLevel.OK,
+            WarnLevel.UNKNOWN,
+        ):
+            if level in statuses:
+                return level
+        return WarnLevel.UNKNOWN
+
+
 class ComponentSlot(models.Model):
     """
     Ein logischer Steckplatz am Fahrrad, z.B. 'Kette', 'Reifen vorne'.
     Mehrere Component-Instanzen können einem Slot zugeordnet sein,
     aber immer nur eine ist montiert (is_mounted=True).
+
+    Gehört (fast immer) zu einer `BikeAssembly`; `assembly=None` nur für
+    Alt-Slots, die noch keiner Baugruppe zugeordnet wurden. `bike` bleibt
+    denormalisiert gesetzt (== assembly.bike, falls vorhanden).
     """
 
     bike = models.ForeignKey(
         Bike,
         on_delete=models.CASCADE,
         related_name="slots",
+    )
+    assembly = models.ForeignKey(
+        BikeAssembly,
+        on_delete=models.CASCADE,
+        related_name="slots",
+        null=True,
+        blank=True,
     )
     template = models.ForeignKey(
         ComponentTemplate,
@@ -220,8 +419,18 @@ class ComponentSlot(models.Model):
     custom_name = models.CharField(max_length=100, blank=True)
 
     class Meta:
-        # Pro Fahrrad darf jeder Template-Slot nur einmal existieren
-        unique_together = [("bike", "template")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["assembly", "template"],
+                condition=models.Q(assembly__isnull=False),
+                name="uniq_assembly_template",
+            ),
+            models.UniqueConstraint(
+                fields=["bike", "template"],
+                condition=models.Q(assembly__isnull=True),
+                name="uniq_bike_template_ungrouped",
+            ),
+        ]
         ordering = ["template__category", "template__name"]
 
     if TYPE_CHECKING:
@@ -301,7 +510,9 @@ class Component(models.Model):
         ),
     )
     weather_wear_computed_at = models.DateTimeField(
-        null=True, blank=True, help_text="Zeitpunkt der letzten Neuberechnung von weather_wear_km."
+        null=True,
+        blank=True,
+        help_text="Zeitpunkt der letzten Neuberechnung von weather_wear_km.",
     )
     weather_wear_ride_count = models.PositiveIntegerField(
         null=True,
@@ -377,11 +588,19 @@ class Component(models.Model):
 
     @property
     def effective_warn_km(self) -> float | None:
-        return self.custom_warn_km if self.custom_warn_km is not None else self.slot.template.warn_km
+        return (
+            self.custom_warn_km
+            if self.custom_warn_km is not None
+            else self.slot.template.warn_km
+        )
 
     @property
     def effective_warn_days(self) -> int | None:
-        return self.custom_warn_days if self.custom_warn_days is not None else self.slot.template.warn_days
+        return (
+            self.custom_warn_days
+            if self.custom_warn_days is not None
+            else self.slot.template.warn_days
+        )
 
     def clean(self):
         """Stellt sicher dass pro Slot maximal eine Komponente montiert ist."""
@@ -457,6 +676,122 @@ class ComponentCheck(models.Model):
         return f"Check {self.checked_at} @ {self.component}"
 
 
+class MaintenanceIntervalKind(models.TextChoices):
+    CHAIN_LUBE = "chain_lube", "Kettenschmierung"
+    SEALANT = "sealant", "Tubeless-Dichtmilch"
+    BRAKE_BLEED = "brake_bleed", "Bremse entlüften"
+    DI2_CHARGE = "di2_charge", "Schaltungs-Akku laden"
+    BATTERY = "battery", "Batterie/Akku"
+    CUSTOM = "custom", "Sonstiges"
+
+
+class MaintenanceInterval(models.Model):
+    """
+    Verbrauchsmaterial / wiederkehrende Pflege ohne "Zustand" (Kettenschmierung,
+    Tubeless-Dichtmilch, Bremse entlüften, Di2/AXS laden). Bewusst leichter als
+    ComponentSlot/Component: kein Tausch, nur ein "Erledigt"-Log
+    (`MaintenanceLog`), das die km-/Tage-Baseline zurücksetzt.
+    """
+
+    bike = models.ForeignKey(
+        Bike,
+        on_delete=models.CASCADE,
+        related_name="intervals",
+    )
+    assembly = models.ForeignKey(
+        BikeAssembly,
+        on_delete=models.CASCADE,
+        related_name="intervals",
+        null=True,
+        blank=True,
+        help_text="Optionale Zuordnung zu einer Baugruppe (z.B. Dichtmilch → Laufrad).",
+    )
+    template = models.ForeignKey(
+        ComponentTemplate,
+        on_delete=models.SET_NULL,
+        related_name="intervals",
+        null=True,
+        blank=True,
+        help_text="Herkunfts-Vorlage (maintenance_kind=CONSUMABLE), falls aus Katalog.",
+    )
+    kind = models.CharField(
+        max_length=20,
+        choices=MaintenanceIntervalKind.choices,
+        default=MaintenanceIntervalKind.CUSTOM,
+    )
+    label = models.CharField(max_length=100)
+    interval_km = models.FloatField(null=True, blank=True)
+    interval_days = models.IntegerField(null=True, blank=True)
+    last_done_at = models.DateField(null=True, blank=True)
+    last_done_distance_km = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Km-Stand des Bikes bei der letzten Erledigung.",
+    )
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["label"]
+        verbose_name = "Wartungs-Intervall"
+        verbose_name_plural = "Wartungs-Intervalle"
+
+    if TYPE_CHECKING:
+        id: int
+        logs: RelatedManager["MaintenanceLog"]
+
+    def __str__(self):
+        return f"{self.bike.name} — {self.label}"
+
+    def status(self, bike_total_km: float | None, as_of: date | None = None) -> str:
+        """
+        Ampel wie `compute_wear`: schlechtester Wert aus km- und Tage-Achse.
+        `as_of` projiziert nur die Tage-Achse (Default: heute) — analog zur
+        Fahrt-Vorhersage in app_notifications.
+        """
+        as_of = as_of or date.today()
+        ratios: list[float] = []
+
+        if self.interval_km:
+            if bike_total_km is not None and self.last_done_distance_km is not None:
+                ratios.append(
+                    (bike_total_km - self.last_done_distance_km) / self.interval_km
+                )
+            elif bike_total_km is not None:
+                ratios.append(bike_total_km / self.interval_km)
+
+        if self.interval_days and self.last_done_at:
+            ratios.append((as_of - self.last_done_at).days / self.interval_days)
+
+        if not ratios:
+            return WarnLevel.UNKNOWN
+        return warn_status_from_ratio(max(ratios))
+
+
+class MaintenanceLog(models.Model):
+    """Ein Eintrag "erledigt am" für ein MaintenanceInterval (Historie)."""
+
+    interval = models.ForeignKey(
+        MaintenanceInterval,
+        on_delete=models.CASCADE,
+        related_name="logs",
+    )
+    done_at = models.DateField(default=date.today)
+    done_distance_km = models.FloatField(null=True, blank=True)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-done_at", "-id"]
+
+    if TYPE_CHECKING:
+        id: int
+
+    def __str__(self):
+        return f"{self.interval.label} erledigt {self.done_at}"
+
+
 class WeatherSensitivityCoefficient(models.Model):
     """
     Pro-Kategorie-Gewichtung für den wetterbedingten Verschleiß-Multiplikator
@@ -466,10 +801,18 @@ class WeatherSensitivityCoefficient(models.Model):
     Schema-Änderung aktualisieren kann. Ein Datensatz je ComponentCategory.
     """
 
-    category = models.CharField(max_length=20, choices=ComponentCategory.choices, unique=True)
-    rain_sensitivity = models.FloatField(default=0.0, help_text="Gewichtung des Regen-Faktors (0 = kein Effekt).")
-    heat_sensitivity = models.FloatField(default=0.0, help_text="Gewichtung des Hitze-Faktors (0 = kein Effekt).")
-    cold_sensitivity = models.FloatField(default=0.0, help_text="Gewichtung des Kälte-Faktors (0 = kein Effekt).")
+    category = models.CharField(
+        max_length=20, choices=ComponentCategory.choices, unique=True
+    )
+    rain_sensitivity = models.FloatField(
+        default=0.0, help_text="Gewichtung des Regen-Faktors (0 = kein Effekt)."
+    )
+    heat_sensitivity = models.FloatField(
+        default=0.0, help_text="Gewichtung des Hitze-Faktors (0 = kein Effekt)."
+    )
+    cold_sensitivity = models.FloatField(
+        default=0.0, help_text="Gewichtung des Kälte-Faktors (0 = kein Effekt)."
+    )
     wind_sensitivity = models.FloatField(
         default=0.0,
         help_text=(
@@ -483,9 +826,13 @@ class WeatherSensitivityCoefficient(models.Model):
         help_text="Zeitpunkt der letzten Kalibrierung aus echten Nutzerdaten. Null = es gilt noch der Heuristik-Default.",
     )
     calibration_sample_count = models.PositiveIntegerField(
-        null=True, blank=True, help_text="Anzahl Datenpunkte der letzten Kalibrierung. Null = noch nie kalibriert."
+        null=True,
+        blank=True,
+        help_text="Anzahl Datenpunkte der letzten Kalibrierung. Null = noch nie kalibriert.",
     )
-    notes = models.TextField(blank=True, default="", help_text="Begründung/Quelle der aktuellen Werte.")
+    notes = models.TextField(
+        blank=True, default="", help_text="Begründung/Quelle der aktuellen Werte."
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
