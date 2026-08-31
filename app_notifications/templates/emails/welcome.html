@@ -3,18 +3,31 @@
 {% block title %}Willkommen bei Kudos Care{% endblock %}
 
 {% block content %}
-<h1>Willkommen bei Kudos Care!</h1>
+<h1>Willkommen bei Kudos Care</h1>
 <p>
   Schön, dass du dabei bist. Kudos Care trackt automatisch den Verschleiß deiner
   Fahrrad-Komponenten — Kette, Reifen, Bremsbeläge und mehr — basierend auf deinen
-  Strava-Aktivitäten, inklusive einer wettergewichteten Einschätzung (Regen, Hitze, Kälte
-  und Wind wirken sich unterschiedlich auf den Verschleiß aus).
+  Strava-Aktivitäten.
+</p>
+
+<table role="presentation" class="stats" width="100%" cellpadding="0" cellspacing="0">
+  <tr>
+    <td>
+      <div class="stat-label">Wetter zählt mit</div>
+      <div class="stat-value">Regen · Hitze · Kälte · Wind</div>
+    </td>
+  </tr>
+</table>
+
+<p>
+  Eine Regenfahrt kostet deine Bremsbeläge mehr als dieselbe Strecke bei
+  Sonnenschein — genau das rechnet Kudos Care pro Fahrt mit ein, statt nur
+  Kilometer zu zählen.
 </p>
 <p>
-  Sobald eine Komponente Aufmerksamkeit braucht, meldet sich Kudos Care automatisch per
-  E-Mail bei dir — du musst also nicht ständig selbst nachschauen.
+  Sobald eine Komponente Aufmerksamkeit braucht, meldet sich Kudos Care automatisch
+  bei dir. Du musst also nicht ständig selbst nachschauen.
 </p>
-<p>
-  <a class="cta" href="{{ frontend_url }}/dashboard">Zum Dashboard</a>
-</p>
+
+<p><a class="cta" href="{{ frontend_url }}/dashboard">Zum Dashboard</a></p>
 {% endblock %}

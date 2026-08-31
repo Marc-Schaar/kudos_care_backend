@@ -11,10 +11,9 @@ from django.contrib.gis.geos import LineString as DjangoLineString, Point
 from django.db.models import F
 
 from ..models import Ride, RideStream
-from .utils import (
-    find_hourly_index,
-    calculate_headwind,
-    calculate_heading,
+from .wind import (
+    average_headwind,
+    compute_ride_wind,
     get_filtered_weather,
 )
 from app_auth.models import StravaProfile
@@ -208,17 +207,20 @@ class StravaImportService:
             )
             stream_data = None
 
+        avg_headwind = None
         if start_latlng and start_date:
             weather_info = WeatherService.get_historical_weather(
                 start_latlng[0], start_latlng[1], start_date
             )
-            avg_headwind = (
-                WeatherService.analyze_wind(stream_data, weather_info, ride)
-                if stream_data and weather_info
-                else 0.0
+            # Ein einziger Segment-Durchlauf speist beides: den Stunden-Zeitverlauf
+            # fuers Chart und den Durchschnitt fuer die Kopfzeile. Dadurch koennen
+            # Text, Chart und Karte gar nicht mehr auseinanderlaufen.
+            segments, _wind_source = compute_ride_wind(
+                ride, (weather_info or {}).get("hourly") or {}, stream_data
             )
+            avg_headwind = average_headwind(segments)
             ride.weather_data = {
-                **get_filtered_weather(ride, weather_info, stream_data),
+                **get_filtered_weather(ride, weather_info, segments),
                 "avg_headwind": avg_headwind,
             }
             ride.save()
@@ -232,7 +234,7 @@ class StravaImportService:
                 defaults={
                     "latlngs": stream_data.get("latlng", {}).get("data"),
                     "time_series": stream_data.get("time", {}).get("data"),
-                    "avg_headwind": (ride.weather_data or {}).get("avg_headwind", 0.0),
+                    "avg_headwind": avg_headwind,
                 },
             )
 
@@ -353,29 +355,3 @@ class WeatherService:
         except requests.exceptions.RequestException as e:
             logger.error("Wetterdaten-Abruf fehlgeschlagen (%s, %s): %s", lat, lon, e)
             return None
-
-    @staticmethod
-    def analyze_wind(stream_data, weather_info, ride):
-        """
-        Berechnet den durchschnittlichen Gegenwind für eine Fahrt.
-
-        Nutzt den zur Startzeit passenden Wetterwert statt immer Index 0.
-        """
-        latlngs = stream_data.get("latlng", {}).get("data", [])
-        hourly = weather_info.get("hourly", {})
-        wind_directions = hourly.get("wind_direction_10m", [])
-        wind_speeds = hourly.get("wind_speed_10m", [])
-        times = hourly.get("time", [])
-
-        if not latlngs or not wind_directions:
-            return 0.0
-
-        wind_index = find_hourly_index(times, ride.start_date)
-
-        w_dir = wind_directions[wind_index]
-        w_speed = wind_speeds[wind_index]
-
-        heading = calculate_heading(
-            latlngs[0][0], latlngs[0][1], latlngs[-1][0], latlngs[-1][1]
-        )
-        return calculate_headwind(heading, w_dir, w_speed)

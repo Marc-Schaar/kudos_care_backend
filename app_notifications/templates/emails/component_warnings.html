@@ -1,25 +1,36 @@
 {% extends "emails/base_email.html" %}
+{% load notification_extras %}
 
 {% block title %}Kudos Care: Komponenten benötigen Aufmerksamkeit{% endblock %}
 
 {% block content %}
 {% if immediate %}
 <h1>Nach deiner letzten Fahrt</h1>
-<p>Deine letzte Fahrt hat den Verschleiß einer oder mehrerer Komponenten über die
-   empfohlene Grenze gebracht:</p>
+<p>
+  Deine letzte Fahrt hat den Verschleiß einer oder mehrerer Komponenten über die
+  empfohlene Grenze gebracht:
+</p>
 {% else %}
 <h1>Tägliche Übersicht</h1>
 <p>Folgende Komponenten benötigen aktuell deine Aufmerksamkeit:</p>
 {% endif %}
 
-<table class="item-list">
+<table role="presentation" class="item-list" width="100%" cellpadding="0" cellspacing="0">
   {% for w in warnings %}
   <tr>
     <td>
-      <div class="item-title">
-        {{ w.slot.display_name }}
-        <span class="badge badge-{{ w.wear.warn_status_overall }}">{{ w.wear.warn_status_overall }}</span>
-      </div>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td>
+            <span class="item-title">{{ w.slot.display_name }}</span>
+          </td>
+          <td align="right">
+            <span class="badge badge-{{ w.wear.warn_status_overall }}">
+              {{ w.wear.warn_status_overall|warn_label }}
+            </span>
+          </td>
+        </tr>
+      </table>
       <div class="item-meta">
         {{ w.bike.name }} &middot;
         {% if w.wear.wear_km != None %}{{ w.wear.wear_km }} km{% else %}? km{% endif %} /

@@ -38,6 +38,8 @@ from .serializers import (
     MaintenanceIntervalCreateSerializer,
     MaintenanceIntervalLogRequestSerializer,
     QuickChangeRequestSerializer,
+    AssistantModelsRequestSerializer,
+    AssistantSetupRequestSerializer,
     compute_wear,
 )
 from .services import (
@@ -47,6 +49,7 @@ from .services import (
     bike_condition_report_is_stale,
 )
 from .ai_providers import generate_reviewed_text
+from .bike_assistant import suggest_models, suggest_setup
 import logging
 
 logger = logging.getLogger("my_app_debug")
@@ -1128,3 +1131,65 @@ class MaintenanceIntervalLogView(AthleteMixin, APIView):
                 interval, context={"bike_total_km": interval.bike.total_distance_km}
             ).data
         )
+
+
+# ── "Kudo" — KI-Assistent fuers Bike-Anlegen ─────────────────────────────────
+# Beide Endpoints liefern 503 statt eines Fehlers, wenn keine KI verfuegbar ist —
+# das Frontend faellt dann auf die manuelle Einrichtung im Stepper zurueck, die
+# unveraendert funktioniert.
+
+AI_UNAVAILABLE_RESPONSE = {
+    "error": "Kudo ist gerade nicht erreichbar. Du kannst dein Bike weiterhin manuell einrichten.",
+    "code": "ai_unavailable",
+}
+
+
+class AssistantModelsView(AthleteMixin, APIView):
+    """
+    POST /api/maintenance/assistant/models/
+
+    Schritt 1 von Kudo: Hersteller (+ optional Baujahr/Bike-Typ) rein, Liste
+    plausibler Modelle raus, aus der der Nutzer seins auswaehlt.
+    """
+
+    def post(self, request):
+        body = AssistantModelsRequestSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        models = suggest_models(
+            data["manufacturer"], data.get("year"), data.get("bike_type") or "other"
+        )
+        if models is None:
+            return Response(
+                AI_UNAVAILABLE_RESPONSE, status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        return Response({"models": models})
+
+
+class AssistantSetupView(AthleteMixin, APIView):
+    """
+    POST /api/maintenance/bikes/{bike_id}/assistant/setup/
+
+    Schritt 2 von Kudo: gewaehltes Modell rein, Vorbelegung fuer den Setup-Stepper
+    raus. Legt selbst NICHTS an — der Nutzer laeuft danach den normalen Stepper
+    durch und kann jede Zeile korrigieren oder abwaehlen.
+
+    Die zurueckgegebenen `template_id`s sind serverseitig gegen den Katalog geprueft
+    (siehe bike_assistant._filter_to_catalog), erfundene IDs kommen hier nicht an.
+    """
+
+    def post(self, request, bike_id):
+        bike = get_object_or_404(Bike, pk=bike_id, athlete=self.get_athlete())
+        body = AssistantSetupRequestSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        suggestion = suggest_setup(
+            bike, data["manufacturer"], data["model"], data.get("year")
+        )
+        if suggestion is None:
+            return Response(
+                AI_UNAVAILABLE_RESPONSE, status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        return Response(suggestion)

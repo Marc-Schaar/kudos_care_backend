@@ -44,27 +44,61 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   Token-Refresh + 401-Retry — von anderen Apps wiederverwendet.
 - **`app_dashboard`** — Ride-Ingestion, Geodaten, Wetter/Wind. Models `Ride` (PostGIS-Track,
   `weather_data` JSONField, FK zu `StravaProfile`+`Bike`), `RideStream` (Rohdaten-Zeitreihe).
+  **`api/wind.py` ist die einzige Quelle für alles Windbezogene** (ersetzt das frühere
+  `api/utils.py`, das dabei entfallen ist). `build_wind_segments()` teilt den vollen
+  GPS-Stream in Abschnitte *gleicher Distanz* und rechnet je Abschnitt den dortigen Kurs
+  gegen den auf diesen Zeitpunkt interpolierten Wind (Richtung zirkulär interpoliert, sonst
+  läge zwischen 350° und 10° die Südrichtung). Davon abgeleitet: `average_headwind()`
+  (distanzgewichtet → die Kopfzeilen-Zahl) und `hourly_headwind()` (→ das Chart). Dadurch
+  können Text, Chart und Karte nicht mehr auseinanderlaufen — vorher gab es drei
+  unabhängige Berechnungen mit drei verschiedenen Ergebnissen. Ohne GPS-Stream greift
+  `build_coarse_wind_segment()` (Start-Ziel-Gerade), erkennbar an `wind_source="coarse"`.
+  Die Abschnitte werden **nicht persistiert**, sondern im Detail-Request aus `RideStream`
+  + `weather_data` rekonstruiert (`hourly_from_weather_data()`); dafür liegt seit dem
+  Refactoring `wind_direction_10m` mit in `weather_data`. **Altfahrten ohne dieses Feld
+  fallen auf den groben Modus zurück, bis `recompute_wind` gelaufen ist.**
   `api/services.py`: `StravaSyncService` (Bikes + paginierte Activities),
   `StravaImportService.sync_activity_to_db` (Polyline-Decode → Shapely-RDP-Simplify →
-  Gear-Matching → Streams → Open-Meteo-Wetter → Headwind-Berechnung), `WeatherService`,
+  Gear-Matching → Streams → Open-Meteo-Wetter → Windabschnitte), `WeatherService`,
   `build_ride_summary_prompt` (baut den Prompt für die optionale KI-Fahrt-Zusammenfassung,
   nutzt denselben `app_maintenance.api.ai_providers.get_ai_provider()` wie die
   Wetter-Verschleiß-Erklärung — App-Grenze bewusst überschritten statt dupliziert).
   Celery-Task `run_strava_sync` in `api/tasks.py`. Management-Command `recompute_wind.py`
-  (Backfill, `--dry-run`). Endpoint `GET /api/activities/<id>/summary/?refresh=true`
+  (Backfill, `--dry-run`) — rechnet `weather_data` inkl. Windrichtung und
+  `RideStream.avg_headwind` neu. `GET /api/activities/<id>/` liefert neben
+  `geo_json_full` (nur noch für die Bounds) das Feld `wind_segments`: eine
+  GeoJSON-FeatureCollection mit einem Feature je Abschnitt
+  (`headwind`/`wind_direction`/`bearing`/`precipitation`), die das Frontend direkt
+  rendert — die Karte interpoliert selbst nichts mehr.
+  Endpoint `GET /api/activities/<id>/summary/?refresh=true`
   liefert eine gecachte KI-Zusammenfassung der Fahrt (Distanz/Dauer/Wetter/Gegenwind);
   Cache-Felder `Ride.ai_summary`/`ai_summary_generated_at`, keine Staleness-Prüfung nötig
   da Ride-Zahlen nach dem Import unveränderlich sind (anders als beim Bike-Zustandsbericht).
-- **`app_maintenance`** — Kern-Domäne Verschleiß-Tracking. Models: `Bike`,
-  `ComponentGroup` (Katalog-Baugruppe, z.B. "Laufrad vorne" — verbindet mehrere
-  `ComponentTemplate`s, die physisch typischerweise zusammen gewechselt werden; bewusst
-  generisch, weitere Gruppen lassen sich rein über den Admin anlegen, siehe Quick-Change
-  unten), `ComponentTemplate` (Katalog, Fixture `fixtures/component_templates.json`,
-  optionales FK `group`), `ComponentSlot`
-  (Position am Bike, unique je `(bike, template)`), `Component` (physisches Teil,
+- **`app_maintenance`** — Kern-Domäne Verschleiß-Tracking. Ein Bike besteht aus
+  **Baugruppen** (`BikeAssembly`), jede Baugruppe bündelt ihre `ComponentSlot`s
+  (physische Verschleißteile) und `MaintenanceInterval`s (Verbrauchsmaterial/Pflege
+  ohne "Zustand"). Models: `Bike`,
+  `ComponentGroup` (Katalog-Blueprint einer Baugruppe, z.B. "Laufrad vorne"/"Antrieb" —
+  verbindet mehrere `ComponentTemplate`s; `category`/`applicable_bike_types`/`sort_order`/
+  `recommended` steuern UI-Filter + den Neu-Bike-Stepper; bewusst generisch, weitere
+  Gruppen rein über Admin/Migration anlegbar; voller Satz in Migration `0016` geseedet),
+  `BikeAssembly` (per-Bike-Instanz einer `ComponentGroup`: eigener `name`, `installed_at`,
+  `is_active` — max. 1 aktive Instanz je `(bike, group)` via `clean()` erzwungen, inaktive
+  = Wechsel-Historie; `compute_km()`/`worst_status()` als Fat-Model-Methoden),
+  `ComponentTemplate` (Katalog, Fixture `fixtures/component_templates.json`,
+  optionales FK `group`; `maintenance_kind` `part`|`consumable` — `consumable` wird als
+  `MaintenanceInterval` statt als `Component` instanziiert; `default_in_group` = Vorauswahl
+  im Baugruppen-Dialog), `ComponentSlot`
+  (Position innerhalb einer `BikeAssembly`, FK `assembly` null=alt/ungruppiert;
+  bedingte Unique-Constraints `(assembly, template)` bzw. `(bike, template)` statt des
+  früheren `unique_together`), `Component` (physisches Teil,
   `is_mounted` via `clean()`/`save()`-Override erzwungen: nur 1 montiertes Teil je Slot;
   zusätzlich `weather_wear_km`/`weather_wear_ride_count`/`weather_wear_computed_at` — async
-  von `WeatherWearService` befüllt, nie live berechnet), `WeatherSensitivityCoefficient`
+  von `WeatherWearService` befüllt, nie live berechnet),
+  `MaintenanceInterval` (Verbrauchsmaterial/Pflege: `interval_km`/`interval_days` +
+  `last_done_at`/`last_done_distance_km`; `status(bike_total, as_of=None)` spiegelt
+  `compute_wear`; "Erledigt" = neuer `MaintenanceLog` + Baseline-Reset, kein Zustand-%),
+  `MaintenanceLog` (Historie der Erledigungen), `WeatherSensitivityCoefficient`
   (Regen/Hitze/Kälte/Wind-Gewichtung je `ComponentCategory`, geseedet in Migration `0006`
   bzw. für neu hinzugekommene Kategorien in Folgemigrationen wie `0011`,
   Basis für eine spätere Kalibrierung aus `ComponentCheck.condition_pct`-Verlauf),
@@ -111,18 +145,30 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   (kein Zahlen-Vergleich nötig) — ungültig sobald sich `warn_status_overall` seit der letzten
   Generierung geändert hat (typischerweise nach einer Freigabe via `ComponentCheckView`).
   Management-Command `recompute_weather_wear.py` (Backfill, `--dry-run`).
-  Quick-Change (`slots/<id>/quick-change/`, `SlotQuickChangeView`): `GET` liefert alle
-  Geschwister-Slots derselben `ComponentGroup` auf demselben Bike (inkl. `pk`-Slot selbst)
-  zur Vorschau; `POST` wechselt die als `include: true` markierten Slots atomar in einer
-  Aktion (z.B. beim Laufradwechsel Reifen/Felge/Nabenlager/Speichen/Felgenband vorne
-  zusammen) — ein gemeinsames `installed_at`, aber Marke/Modell je Slot individuell. Erlaubte
-  `slot_id`s werden serverseitig aus `slot.template.group` hergeleitet, nicht aus dem Request
-  übernommen. Wiederverwendet dasselbe Unmount-dann-Mount-Muster wie `SlotMountView`. Initiale
-  Gruppen "Laufrad vorne"/"Laufrad hinten" geseedet in Migration `0014`.
-  Endpoints unter `/api/maintenance/`: `bikes/`, `bikes/<id>/slots/`, `bikes/<id>/condition-report/`,
-  `slots/<id>/mount|unmount`, `slots/<id>/quick-change/`, `slots/<id>/components/`,
-  `components/<id>/check/`, `components/<id>/weather-explanation/`,
-  `components/<id>/check-instructions/`, `templates/`.
+  **Baugruppen-Flow** (`api/views.py`): `GET groups/?bike_type=` liefert den
+  `ComponentGroup`-Katalog mit genesteten Templates (getrennt `parts`/`consumables`).
+  `GET bikes/<id>/assemblies/` liefert die aktiven `BikeAssembly`s (Slots inkl. Wear +
+  Intervalle inkl. Status), die noch nicht zugeordneten Alt-Slots (`ungrouped_slots`) und
+  die noch verfügbaren Katalog-Gruppen (`available_groups`). `POST bikes/<id>/assemblies/`
+  legt eine Baugruppe komplett an (ein Dialog = eine Baugruppe): `BikeAssembly` +
+  `ComponentSlot`s (+ montierte `Component`s) für die inkludierten `parts` +
+  `MaintenanceInterval`s für die inkludierten `intervals`, atomar, nach demselben
+  Unmount-dann-Mount-Muster wie `SlotMountView`; Templates werden serverseitig gegen
+  `group.templates` geprüft, Bike-Typ-Mismatch → 400, bereits aktive Gruppe → 409.
+  `POST assemblies/<id>/swap/` ersetzt die aktive Instanz (alte deaktiviert + Komponenten
+  ausgebaut, neue aktive mit frischen Teilen). `POST intervals/<id>/log/` = "Erledigt".
+  Der alte `slots/<id>/quick-change/` (`SlotQuickChangeView`, `template__group`-basiert)
+  besteht als Übergangs-Endpoint weiter, ist aber durch `assemblies/<id>/swap/` abgelöst.
+  `POST bikes/<id>/slots/` (freies Einzel-Slot-Anlegen) entfällt für den Client — Slots
+  entstehen nur über den Baugruppen-Create; `GET` bleibt. Katalog + Zuordnung aller
+  System-Templates zu Gruppen in Migration `0016`, Backfill bestehender Slots →
+  `BikeAssembly`/`MaintenanceInterval` (erzwungen) in `0017`.
+  Endpoints unter `/api/maintenance/`: `bikes/`, `bikes/<id>/condition-report/`,
+  `groups/`, `bikes/<id>/assemblies/` (GET/POST), `assemblies/<id>/` (PATCH/DELETE),
+  `assemblies/<id>/swap/`, `bikes/<id>/intervals/`, `intervals/<id>/` (PATCH/DELETE),
+  `intervals/<id>/log/`, `bikes/<id>/slots/` (nur GET), `slots/<id>/mount|unmount`,
+  `slots/<id>/quick-change/` (Legacy), `slots/<id>/components/`, `components/<id>/check/`,
+  `components/<id>/weather-explanation/`, `components/<id>/check-instructions/`, `templates/`.
 - **`app_notifications`** — E-Mail-Versand, kein eigenes Domain-Model (keine Endpoints, kein
   `urls.py`). Dedupe-/Status-Felder für Benachrichtigungen liegen stattdessen direkt an den
   betroffenen Domain-Models (analog zu den KI-Cache-Feldern in `app_maintenance`):
@@ -191,7 +237,10 @@ das Management-Command `python manage.py seed_dev_data` (`app_maintenance/manage
 commands/seed_dev_data.py`, ebenfalls nur mit `DEBUG=True` lauffähig): legt ein Bike,
 montierte Komponenten (aus der bestehenden `component_templates`-Fixture) und eine
 Ride-Historie mit synthetischen Wetterdaten an und berechnet `weather_wear_km` synchron
-(kein Celery-Worker nötig). `--reset` löscht vorhandene Fake-Daten vorher, `--rides N`
+(kein Celery-Worker nötig). Die Fake-Routen sind **geschlossene Schleifen** mit passendem
+`RideStream` (`_loop_route()`), nicht die frühere Zwei-Punkt-Gerade — nur so drehen sich
+die Kurse über die Fahrt und die Windabschnitte auf der Karte unterscheiden sich
+überhaupt. `--reset` löscht vorhandene Fake-Daten vorher, `--rides N`
 steuert die Anzahl der Fake-Rides. Läuft weiterhin gegen die echte Postgres/PostGIS-DB
 (kein SQLite-Fallback) — "fake" bezieht sich auf Auth-Roundtrip und Dateninhalt, nicht auf
 die DB-Engine.
@@ -249,6 +298,13 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   `run_strava_sync`-Task (Success, 403-Reconnect, Generic-Failure) via `unittest.mock`,
   `ActivitySummaryViewTests` (KI-Fahrt-Zusammenfassung, Caching/Refresh, `requests.post`
   gemockt über `app_maintenance.api.ai_providers.requests.post`).
+- `app_dashboard/test_wind.py`: reine Formel-Tests (`SimpleTestCase`, keine DB) für
+  `api/wind.py`. Kernfall ist `OutAndBackTests` — Hin-und-Rück-Route bei konstantem Wind
+  muss auf dem Hinweg Gegenwind, auf dem Rückweg Rückenwind und im Mittel ~0 liefern;
+  genau das war mit der alten Start-Ziel-Berechnung nicht der Fall. Dazu
+  zirkuläre Windrichtungs-Interpolation, grober Fallback ohne Stream,
+  Distanzgewichtung des Durchschnitts und die Vorzeichen-Konvention
+  (positiv = Gegenwind), an der die UI-Einfärbung hängt.
 - `app_maintenance/tests.py`: `ComponentCheckTests` (Custom-Warn-Days, Overdue/Critical,
   `condition_pct`-Rejection, Release via Check mit Snooze, Auth-Required, Wetter-Achse
   treibt `warn_status_overall`), `ComputeWearAsOfProjectionTests` (Tage-Achse-Projektion für
@@ -263,10 +319,21 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   (KI-Zustandsbericht, Caching, Invalidierung durch neuen Ride-Import),
   `RecomputeWeatherWearForBikeTaskTests` (löst nach erfolgreicher Neuberechnung
   `app_notifications.tasks.check_component_warnings_for_bike` aus, aber nicht bei Fehlschlag).
-- `app_maintenance/test_quick_change.py`: `SlotQuickChangeViewTests` (Geschwister-Slots
-  derselben `ComponentGroup` per GET, 404 bei Slot ohne Gruppe, POST wechselt nur
-  `include: true`-Items mit gemeinsamem `installed_at`/individueller Marke, Ablehnung von
-  `slot_id`s außerhalb der Gruppe, Auth-Required, Ein-Montiert-Invariante bleibt gewahrt).
+- `app_maintenance/test_quick_change.py`: `SlotQuickChangeViewTests` (Legacy-Endpoint:
+  Geschwister-Slots derselben `ComponentGroup` per GET, 404 bei Slot ohne Gruppe, POST
+  wechselt nur `include: true`-Items mit gemeinsamem `installed_at`/individueller Marke,
+  Ablehnung von `slot_id`s außerhalb der Gruppe, Auth-Required, Ein-Montiert-Invariante).
+- `app_maintenance/test_assemblies.py`: `AssemblyCreateTests` (atomar Slots+Components+
+  Intervalle, überspringt `include:false`, lehnt template-fremd/Consumable-in-Parts ab,
+  Bike-Typ-Mismatch → 400, bereits aktive Gruppe → 409, `BikeAssembly.clean()`-Invariante,
+  Auth), `AssemblyListTests` (`assemblies`/`ungrouped_slots`/`available_groups`,
+  `assembly_km` = ältestes montiertes `distance_at_install`, `worst_status` bezieht
+  überfällige Intervalle ein), `AssemblySwapTests` (alte Instanz inaktiv + Komponenten
+  ausgebaut, neue aktiv, Historie abfragbar).
+- `app_maintenance/test_intervals.py`: `MaintenanceIntervalStatusTests` (km-/Tage-Ratio,
+  `as_of`-Projektion der Tage-Achse, `unknown` ohne Grenzen), `MaintenanceIntervalLogViewTests`
+  (`/log/` setzt Baseline zurück + hängt `MaintenanceLog` an, explizite Werte,
+  Athleten-Scoping, Ad-hoc-Intervall anlegen/löschen).
 - `app_notifications/tests.py`: `SendTemplatedEmailTests` (Opt-out-Flag, fehlende
   E-Mail-Adresse), `PredictNextRideDateTests` (Median-Vorhersage, Clamping bei
   Überfälligkeit auf "heute", zu wenig Historie → `None`), `CheckComponentWarningsTests`/

@@ -1,4 +1,5 @@
 import logging
+import math
 import random
 from datetime import timedelta
 
@@ -9,6 +10,11 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from app_auth.dev_auth import get_or_create_dev_profile
+from app_dashboard.api.wind import (
+    average_headwind,
+    build_wind_segments,
+    hourly_headwind,
+)
 from app_maintenance.api.services import WeatherWearService
 from app_maintenance.models import (
     Bike,
@@ -29,6 +35,55 @@ DEV_BIKE_STRAVA_ID = "dev-bike-1"
 RIDE_STRAVA_ID_BASE = 900_000_000_000
 # Grober Startpunkt (München) fuer die Fake-Tracks, geografisch nicht weiter relevant.
 BASE_LAT, BASE_LNG = 48.137, 11.575
+
+# Stuetzpunkte je Fake-Route. Genug, dass die distanzgleiche Segmentierung in
+# app_dashboard/api/wind.py etwas zu tun hat, ohne die Dev-DB aufzublaehen.
+ROUTE_POINTS = 240
+
+
+def _loop_route(
+    center_lat: float,
+    center_lng: float,
+    distance_km: float,
+    elapsed_time: int,
+    rng: random.Random,
+):
+    """
+    Erzeugt eine geschlossene, leicht verbeulte Schleife als Fake-GPS-Stream.
+
+    Eine Schleife (statt der frueheren Start-Ziel-Geraden) ist hier der ganze Punkt:
+    nur wenn der Kurs sich ueber die Fahrt dreht, unterscheiden sich die
+    Gegenwind-Werte der einzelnen Abschnitte — sonst waere die Karte lokal einfarbig
+    und der Kurven-Fall gar nicht testbar.
+
+    Der Radius wird aus `distance_km` abgeleitet, damit die gezeichnete Route ungefaehr
+    so lang ist wie `Ride.distance` behauptet — sonst wundert man sich beim manuellen
+    Nachrechnen ueber eine 8-km-Schleife bei einer 60-km-Fahrt.
+
+    Gibt `(latlngs, time_series)` im selben Format zurueck, das Strava liefert:
+    `[[lat, lon], ...]` plus Sekunden seit Start.
+    """
+    # Umfang = 2*pi*r, ein Grad Breite ~ 111.19 km.
+    radius_lat = distance_km / (2 * math.pi * 111.19)
+    radius_lng = radius_lat / math.cos(math.radians(center_lat))
+    wobble = rng.uniform(0.1, 0.25)
+    phase = rng.uniform(0.0, 2 * math.pi)
+
+    latlngs = []
+    for i in range(ROUTE_POINTS):
+        angle = 2 * math.pi * i / (ROUTE_POINTS - 1)
+        # Dritte Harmonische -> unrunde, realistischer wirkende Schleife.
+        stretch = 1.0 + wobble * math.sin(3 * angle + phase)
+        latlngs.append(
+            [
+                round(center_lat + radius_lat * stretch * math.cos(angle), 6),
+                round(center_lng + radius_lng * stretch * math.sin(angle), 6),
+            ]
+        )
+
+    step = elapsed_time / (ROUTE_POINTS - 1)
+    time_series = [int(i * step) for i in range(ROUTE_POINTS)]
+    return latlngs, time_series
 
 
 class Command(BaseCommand):
@@ -58,7 +113,7 @@ class Command(BaseCommand):
                 "seed_dev_data läuft nur mit DEBUG=True — nicht für Produktion gedacht."
             )
 
-        from app_dashboard.models import Ride
+        from app_dashboard.models import Ride, RideStream
 
         reset = options["reset"]
         ride_count = options["rides"]
@@ -175,13 +230,17 @@ class Command(BaseCommand):
 
             lat_offset = rng.uniform(-0.05, 0.05)
             lng_offset = rng.uniform(-0.05, 0.05)
-            start_point = Point(BASE_LNG + lng_offset, BASE_LAT + lat_offset, srid=4326)
-            end_point = Point(
-                BASE_LNG + lng_offset + rng.uniform(-0.1, 0.1),
-                BASE_LAT + lat_offset + rng.uniform(-0.1, 0.1),
-                srid=4326,
+            center_lat = BASE_LAT + lat_offset
+            center_lng = BASE_LNG + lng_offset
+
+            # Geschlossene Schleife statt der frueheren 2-Punkt-Geraden: nur damit
+            # bekommt die Route ueberhaupt wechselnde Kurse, und nur dann zeigt die
+            # Karte lokal etwas anderes als eine einfarbige Linie.
+            latlngs, time_series = _loop_route(
+                center_lat, center_lng, distance_m / 1000, elapsed_time, rng
             )
-            track = LineString(start_point, end_point, srid=4326)
+            start_point = Point(latlngs[0][1], latlngs[0][0], srid=4326)
+            track = LineString([(lng, lat) for lat, lng in latlngs], srid=4326)
 
             is_rainy = rng.random() < 0.25
             is_cold = rng.random() < 0.2
@@ -208,23 +267,56 @@ class Command(BaseCommand):
             wind_speed_10m = [
                 round(base_wind + rng.uniform(-3.0, 3.0), 1) for _ in range(4)
             ]
+            # Windrichtung dreht ueber die Fahrt leicht — ohne dieses Feld faellt die
+            # Karte auf den groben Start-Ziel-Fallback zurueck (siehe
+            # wind.hourly_from_weather_data).
+            base_direction = rng.uniform(0.0, 360.0)
+            wind_direction_10m = [
+                round((base_direction + h * rng.uniform(-12.0, 12.0)) % 360, 1)
+                for h in range(4)
+            ]
+            hourly_times = [
+                (start_date.replace(minute=0, second=0, microsecond=0) + timedelta(hours=h))
+                .strftime("%Y-%m-%dT%H:00")
+                for h in range(4)
+            ]
 
-            Ride.objects.update_or_create(
+            weather_data = {
+                "time": hourly_times,
+                "precipitation": precipitation,
+                "temperature_2m": temperature_2m,
+                "wind_speed_10m": wind_speed_10m,
+                "wind_direction_10m": wind_direction_10m,
+            }
+            segments = build_wind_segments(
+                latlngs, time_series, start_date, weather_data
+            )
+            weather_data["headwind"] = hourly_headwind(
+                segments, weather_data, start_date
+            )
+            avg_headwind = average_headwind(segments)
+            weather_data["avg_headwind"] = avg_headwind
+
+            ride, _ = Ride.objects.update_or_create(
                 strava_id=strava_id,
                 defaults={
                     "name": f"Dev Ride #{i + 1}",
                     "track": track,
                     "start_latlng": start_point,
-                    "weather_data": {
-                        "precipitation": precipitation,
-                        "temperature_2m": temperature_2m,
-                        "wind_speed_10m": wind_speed_10m,
-                    },
+                    "weather_data": weather_data,
                     "distance": distance_m,
                     "start_date": start_date,
                     "elapsed_time": elapsed_time,
                     "athlete": profile,
                     "bike": bike,
+                },
+            )
+            RideStream.objects.update_or_create(
+                ride=ride,
+                defaults={
+                    "latlngs": latlngs,
+                    "time_series": time_series,
+                    "avg_headwind": avg_headwind,
                 },
             )
         self.stdout.write(f"{ride_count} Fake-Rides angelegt/aktualisiert.")

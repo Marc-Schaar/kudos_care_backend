@@ -31,10 +31,12 @@ class StravaProfile(models.Model):
     sync_progress_total = models.IntegerField(null=True, blank=True)
 
     # Benachrichtigungen (siehe app_notifications) — Kill-Switch fuer alle automatischen
-    # E-Mails, aktuell nur per Admin togglebar (kein Frontend-Toggle).
+    # E-Mails. Vom Nutzer selbst ueber das Usermenue schaltbar
+    # (PATCH /api/strava/me/, app_auth/api/views.py::CurrentUserView) und zusaetzlich
+    # im Admin.
     email_notifications_enabled = models.BooleanField(
         default=True,
-        help_text="Kill-Switch fuer Warn-/Vorhersage-/Willkommens-E-Mails. Nur per Admin togglebar.",
+        help_text="Kill-Switch fuer Warn-/Vorhersage-/Willkommens-E-Mails.",
     )
     welcome_email_sent_at = models.DateTimeField(
         null=True,

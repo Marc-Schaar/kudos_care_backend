@@ -780,3 +780,21 @@ class AssemblyCreateRequestSerializer(serializers.Serializer):
     installed_at = serializers.DateField(required=False)
     parts = AssemblyPartItemSerializer(many=True, required=False, default=list)
     intervals = AssemblyIntervalItemSerializer(many=True, required=False, default=list)
+
+
+class AssistantModelsRequestSerializer(serializers.Serializer):
+    """Body fuer POST /maintenance/assistant/models/ (Kudo, Schritt 1)."""
+
+    manufacturer = serializers.CharField(max_length=100)
+    bike_type = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    # Untergrenze etwa beim ersten Serienfahrrad; Obergrenze grosszuegig fuer
+    # Modelljahre, die dem Kalenderjahr vorauslaufen.
+    year = serializers.IntegerField(required=False, allow_null=True, min_value=1850, max_value=2100)
+
+
+class AssistantSetupRequestSerializer(serializers.Serializer):
+    """Body fuer POST /maintenance/bikes/{id}/assistant/setup/ (Kudo, Schritt 2)."""
+
+    manufacturer = serializers.CharField(max_length=100)
+    model = serializers.CharField(max_length=100)
+    year = serializers.IntegerField(required=False, allow_null=True, min_value=1850, max_value=2100)

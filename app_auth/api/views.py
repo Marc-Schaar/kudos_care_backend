@@ -12,7 +12,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 
 from app_auth.models import StravaProfile
-from .serializers import StravaAuthSerializer
+from .serializers import StravaAuthSerializer, UserSettingsSerializer
 
 from app_auth.mixins import CsrfExemptSessionAuthentication
 from app_notifications.tasks import send_welcome_email_task
@@ -116,15 +116,72 @@ class LogoutView(APIView):
 
 
 class CurrentUserView(APIView):
+    """
+    GET   /api/strava/me/  — Session-Check plus die im Frontend anzeigbaren Einstellungen.
+    PATCH /api/strava/me/  — E-Mail und Benachrichtigungs-Schalter aendern.
+
+    Der echte Name bleibt bewusst aussen vor (wird nicht persistiert, siehe
+    StravaAuthCallbackView). `needs_email` treibt den Dialog beim naechsten Login:
+    ohne E-Mail-Adresse verschickt app_notifications gar nichts, der Nutzer merkt das
+    aber nie von allein.
+    """
+
+    def _profile(self, request) -> StravaProfile | None:
+        athlete_id = request.session.get("strava_athlete_id")
+        if not athlete_id:
+            return None
+        return get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
+
+    def _payload(self, profile: StravaProfile) -> dict:
+        email = getattr(profile.user, "email", "") or ""
+        return {
+            "athlete_id": profile.strava_athlete_id,
+            "email": email,
+            "email_notifications_enabled": profile.email_notifications_enabled,
+            "needs_email": not email,
+        }
+
     @method_decorator(ensure_csrf_cookie)
     def get(self, request):
-        athlete_id = request.session.get("strava_athlete_id")
+        profile = self._profile(request)
+        if profile is None:
+            return Response(
+                {"error": "Nicht eingeloggt"}, status=status.HTTP_401_UNAUTHORIZED
+            )
+        return Response(self._payload(profile))
 
-        if not athlete_id:
+    def patch(self, request):
+        profile = self._profile(request)
+        if profile is None:
             return Response(
                 {"error": "Nicht eingeloggt"}, status=status.HTTP_401_UNAUTHORIZED
             )
 
-        profile = get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
+        serializer = UserSettingsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
 
-        return Response({"athlete_id": profile.strava_athlete_id})
+        user = profile.user
+        had_email = bool(user and user.email)
+
+        if "email" in data and user is not None:
+            user.email = data["email"]
+            user.save(update_fields=["email"])
+
+        if "email_notifications_enabled" in data:
+            profile.email_notifications_enabled = data["email_notifications_enabled"]
+            profile.save(update_fields=["email_notifications_enabled"])
+
+        # Bei Erstanmeldung ohne hinterlegte E-Mail lief die Willkommens-Mail ins
+        # Leere (send_templated_email gibt dann still False zurueck). Sobald zum
+        # ersten Mal eine Adresse da ist, holen wir sie nach.
+        if (
+            not had_email
+            and user is not None
+            and user.email
+            and profile.welcome_email_sent_at is None
+        ):
+            send_welcome_email_task.delay(profile.id)
+
+        profile.refresh_from_db()
+        return Response(self._payload(profile))

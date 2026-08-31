@@ -23,6 +23,8 @@ from .views import (
     MaintenanceIntervalListCreateView,
     MaintenanceIntervalDetailView,
     MaintenanceIntervalLogView,
+    AssistantModelsView,
+    AssistantSetupView,
 )
 
 urlpatterns = [
@@ -34,6 +36,17 @@ urlpatterns = [
         name="bike-distance-at",
     ),
     path("maintenance/groups/", ComponentGroupListView.as_view(), name="group-list"),
+    # "Kudo" — KI-Assistent fuers Bike-Anlegen (siehe api/bike_assistant.py)
+    path(
+        "maintenance/assistant/models/",
+        AssistantModelsView.as_view(),
+        name="assistant-models",
+    ),
+    path(
+        "maintenance/bikes/<int:bike_id>/assistant/setup/",
+        AssistantSetupView.as_view(),
+        name="assistant-setup",
+    ),
     path(
         "maintenance/bikes/<int:bike_id>/assemblies/",
         BikeAssemblyListView.as_view(),

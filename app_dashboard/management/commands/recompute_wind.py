@@ -2,15 +2,20 @@ from django.core.management.base import BaseCommand
 
 from app_dashboard.models import Ride
 from app_dashboard.api.services import WeatherService
-from app_dashboard.api.utils import get_filtered_weather
+from app_dashboard.api.wind import (
+    average_headwind,
+    compute_ride_wind,
+    get_filtered_weather,
+)
 
 
 class Command(BaseCommand):
     help = (
-        "Berechnet weather_data (insbesondere den Gegenwind-Zeitverlauf) fuer bereits "
-        "importierte Fahrten neu, auf Basis der gespeicherten GPS-Streams. Noetig, weil "
-        "aeltere Fahrten mit einer einzigen Start-Ziel-Gerade statt der tatsaechlichen "
-        "Position pro Zeitpunkt berechnet wurden."
+        "Berechnet weather_data (Gegenwind-Zeitverlauf, Durchschnitt und die neu "
+        "mitgespeicherte Windrichtung) fuer bereits importierte Fahrten neu, auf Basis "
+        "der gespeicherten GPS-Streams. Noetig, weil aeltere Fahrten mit einer einzigen "
+        "Start-Ziel-Gerade statt abschnittsweise berechnet wurden — und weil ohne "
+        "wind_direction_10m in weather_data die Karte nur den groben Fallback zeigt."
     )
 
     def add_arguments(self, parser):
@@ -52,9 +57,12 @@ class Command(BaseCommand):
                 "time": {"data": ride.streams.time_series},
             }
 
-            avg_headwind = WeatherService.analyze_wind(stream_data, weather_info, ride)
+            segments, _wind_source = compute_ride_wind(
+                ride, (weather_info or {}).get("hourly") or {}, stream_data
+            )
+            avg_headwind = average_headwind(segments)
             new_weather_data = {
-                **get_filtered_weather(ride, weather_info, stream_data),
+                **get_filtered_weather(ride, weather_info, segments),
                 "avg_headwind": avg_headwind,
             }
 
@@ -68,6 +76,10 @@ class Command(BaseCommand):
             else:
                 ride.weather_data = new_weather_data
                 ride.save(update_fields=["weather_data"])
+                # RideStream.avg_headwind spiegelt denselben Wert und lief bisher
+                # beim Backfill auseinander — hier mitziehen.
+                ride.streams.avg_headwind = avg_headwind
+                ride.streams.save(update_fields=["avg_headwind"])
                 self.stdout.write(
                     f"Ride {ride.id} ({ride.name}): avg_headwind {old_avg} -> {avg_headwind}"
                 )

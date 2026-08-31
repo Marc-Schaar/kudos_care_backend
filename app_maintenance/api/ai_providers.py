@@ -1,4 +1,6 @@
+import json
 import logging
+import re
 from abc import ABC, abstractmethod
 
 import requests
@@ -8,6 +10,34 @@ logger = logging.getLogger("my_app_debug")
 
 # LLM-Calls sind langsamer als der REQUEST_TIMEOUT=10 der Strava/Open-Meteo-Aufrufe.
 AI_REQUEST_TIMEOUT = 20
+
+# Freitext-Antworten sind kurz (2-5 Saetze). Ein komplettes Bike-Setup als JSON hat
+# dagegen leicht 30+ Zeilen — mit 300 Tokens bricht die Antwort mitten im JSON ab.
+AI_MAX_OUTPUT_TOKENS = 300
+AI_JSON_MAX_OUTPUT_TOKENS = 4000
+
+# LLMs verpacken JSON gern in ```json ... ``` trotz gegenteiliger Anweisung.
+_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+
+
+def _parse_json_response(raw: str | None, provider_name: str) -> dict | None:
+    """
+    Parst eine JSON-Antwort robust: entfernt ```json-Fences und akzeptiert nur ein
+    Objekt an oberster Ebene. Gibt None statt zu werfen — dieselbe Zusicherung wie
+    `BaseAIProvider.generate_text()`.
+    """
+    if not raw:
+        return None
+    cleaned = _JSON_FENCE_RE.sub("", raw).strip()
+    try:
+        parsed = json.loads(cleaned)
+    except (ValueError, TypeError) as e:
+        logger.error("%s lieferte kein gueltiges JSON: %s", provider_name, e)
+        return None
+    if not isinstance(parsed, dict):
+        logger.error("%s lieferte JSON, aber kein Objekt (%s).", provider_name, type(parsed))
+        return None
+    return parsed
 
 
 class BaseAIProvider(ABC):
@@ -26,11 +56,22 @@ class BaseAIProvider(ABC):
         text = self.generate_text(system_prompt, user_prompt)
         return text, (self.name if text is not None else None)
 
+    def generate_json(self, system_prompt: str, user_prompt: str) -> dict | None:
+        """
+        Wie generate_text(), erzwingt aber eine JSON-Antwort und gibt sie geparst
+        zurück. Gleicher Vertrag: fängt jeden Fehlerfall selbst ab (inkl. kaputtem
+        JSON) und gibt None zurück, statt zu werfen.
+
+        Default-Implementierung für Provider ohne nativen JSON-Modus.
+        """
+        raw = self.generate_text(system_prompt, user_prompt)
+        return _parse_json_response(raw, self.name)
+
 
 class GeminiProvider(BaseAIProvider):
     name = "gemini"
 
-    def generate_text(self, system_prompt: str, user_prompt: str) -> str | None:
+    def _request(self, system_prompt: str, user_prompt: str, generation_config: dict) -> str | None:
         api_key = settings.GEMINI_API_KEY
         if not api_key:
             logger.warning("GEMINI_API_KEY fehlt, keine KI-Erklaerung moeglich.")
@@ -43,7 +84,7 @@ class GeminiProvider(BaseAIProvider):
         payload = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-            "generationConfig": {"temperature": 0.4, "maxOutputTokens": 300},
+            "generationConfig": generation_config,
         }
         try:
             resp = requests.post(url, json=payload, timeout=AI_REQUEST_TIMEOUT)
@@ -57,11 +98,30 @@ class GeminiProvider(BaseAIProvider):
             logger.error("Gemini-Antwort hatte unerwartetes Format: %s", e)
             return None
 
+    def generate_text(self, system_prompt: str, user_prompt: str) -> str | None:
+        return self._request(
+            system_prompt,
+            user_prompt,
+            {"temperature": 0.4, "maxOutputTokens": AI_MAX_OUTPUT_TOKENS},
+        )
+
+    def generate_json(self, system_prompt: str, user_prompt: str) -> dict | None:
+        raw = self._request(
+            system_prompt,
+            user_prompt,
+            {
+                "temperature": 0.2,
+                "maxOutputTokens": AI_JSON_MAX_OUTPUT_TOKENS,
+                "responseMimeType": "application/json",
+            },
+        )
+        return _parse_json_response(raw, self.name)
+
 
 class GroqProvider(BaseAIProvider):
     name = "groq"
 
-    def generate_text(self, system_prompt: str, user_prompt: str) -> str | None:
+    def _request(self, system_prompt: str, user_prompt: str, extra_payload: dict) -> str | None:
         api_key = settings.GROQ_API_KEY
         if not api_key:
             logger.warning("GROQ_API_KEY fehlt, keine KI-Erklaerung moeglich.")
@@ -75,8 +135,7 @@ class GroqProvider(BaseAIProvider):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": 0.4,
-            "max_tokens": 300,
+            **extra_payload,
         }
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=AI_REQUEST_TIMEOUT)
@@ -90,6 +149,25 @@ class GroqProvider(BaseAIProvider):
             logger.error("Groq-Antwort hatte unerwartetes Format: %s", e)
             return None
 
+    def generate_text(self, system_prompt: str, user_prompt: str) -> str | None:
+        return self._request(
+            system_prompt,
+            user_prompt,
+            {"temperature": 0.4, "max_tokens": AI_MAX_OUTPUT_TOKENS},
+        )
+
+    def generate_json(self, system_prompt: str, user_prompt: str) -> dict | None:
+        raw = self._request(
+            system_prompt,
+            user_prompt,
+            {
+                "temperature": 0.2,
+                "max_tokens": AI_JSON_MAX_OUTPUT_TOKENS,
+                "response_format": {"type": "json_object"},
+            },
+        )
+        return _parse_json_response(raw, self.name)
+
 
 class NullAIProvider(BaseAIProvider):
     """Fallback wenn AI_PROVIDER nicht gesetzt/erkannt ist."""
@@ -97,6 +175,9 @@ class NullAIProvider(BaseAIProvider):
     name = "none"
 
     def generate_text(self, system_prompt: str, user_prompt: str) -> str | None:
+        return None
+
+    def generate_json(self, system_prompt: str, user_prompt: str) -> dict | None:
         return None
 
 
@@ -119,6 +200,15 @@ class FallbackAIProvider(BaseAIProvider):
             if result is not None:
                 return result, provider.name
         return None, None
+
+    def generate_json(self, system_prompt: str, user_prompt: str) -> dict | None:
+        # Auch unparsebares JSON gilt als Fehlschlag und laesst den naechsten Provider
+        # ran — eine halbe Antwort ist hier so unbrauchbar wie gar keine.
+        for provider in self._providers:
+            result = provider.generate_json(system_prompt, user_prompt)
+            if result is not None:
+                return result
+        return None
 
 
 def get_ai_provider() -> BaseAIProvider:
