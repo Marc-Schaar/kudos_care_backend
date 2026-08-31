@@ -11,42 +11,69 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup SSH key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          HOST: ${{ secrets.SERVER_IP }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # Retry, weil sshd auf dem Server Verbindungen per PerSourcePenalties abweisen
+      # kann ("Not allowed at this time" -> handshake failed). Eine Penalty haelt ~15s,
+      # 30s Backoff kommt also sicher darueber. Das Remote-Skript ist idempotent
+      # (reset --hard, pip install, migrate, collectstatic), ein Retry ist gefahrlos.
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.5
-        with:
-          host: ${{ secrets.SERVER_IP }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          timeout: 60s
-          command_timeout: 20m
-          script: |
-            set -e
+        env:
+          HOST: ${{ secrets.SERVER_IP }}
+          DEPLOY_USER: ${{ secrets.SERVER_USER }}
+        run: |
+          set -uo pipefail
 
-            cd /home/marc/projects/kudo_care/kudos_care_backend
+          cat > /tmp/remote_deploy.sh <<'REMOTE'
+          set -e
 
-            echo "=== Git Pull ==="
-            git fetch origin dev
-            git reset --hard origin/dev  # Erzwingt sauberen Stand (kein Merge-Konflikt)
+          cd /home/marc/projects/kudo_care/kudos_care_backend
 
-            echo "=== Env laden ==="
-            set -a && source .env && set +a
+          echo "=== Git Pull ==="
+          git fetch origin dev
+          git reset --hard origin/dev  # Erzwingt sauberen Stand (kein Merge-Konflikt)
 
-            echo "=== Python Setup ==="
-            source venv/bin/activate
-            pip install -r requirements.txt
+          echo "=== Env laden ==="
+          set -a && source .env && set +a
 
-            echo "=== Django ==="
-            python manage.py migrate
-            python manage.py collectstatic --noinput
+          echo "=== Python Setup ==="
+          source venv/bin/activate
+          pip install -r requirements.txt
 
-            echo "=== Static-Dateien fuer nginx synchronisieren ==="
-            # nginx (www-data) kann nicht unter /home/marc lesen, daher Kopie nach /var/www.
-            # Eigenes Verzeichnis (nicht der Frontend-Deploy-Ordner!), sonst loescht dessen
-            # rsync --delete-Deploy unsere Static-Dateien beim naechsten Frontend-Push wieder.
-            # Zielordner gehoert marc:www-data (einmalig manuell angelegt), kein sudo noetig.
-            rsync -a --delete static/ /var/www/kudoscare-static/
+          echo "=== Django ==="
+          python manage.py migrate
+          python manage.py collectstatic --noinput
 
-            echo "=== Restart ==="
-            sudo supervisorctl restart gunicorn celery celery-beat
+          echo "=== Static-Dateien fuer nginx synchronisieren ==="
+          # nginx (www-data) kann nicht unter /home/marc lesen, daher Kopie nach /var/www.
+          # Eigenes Verzeichnis (nicht der Frontend-Deploy-Ordner!), sonst loescht dessen
+          # rsync --delete-Deploy unsere Static-Dateien beim naechsten Frontend-Push wieder.
+          # Zielordner gehoert marc:www-data (einmalig manuell angelegt), kein sudo noetig.
+          rsync -a --delete static/ /var/www/kudoscare-static/
 
-            echo "=== Fertig ==="
+          echo "=== Restart ==="
+          sudo supervisorctl restart gunicorn celery celery-beat
+
+          echo "=== Fertig ==="
+          REMOTE
+
+          for attempt in 1 2 3 4 5; do
+            if ssh -i "$HOME/.ssh/id_deploy" -o ConnectTimeout=15 -o BatchMode=yes \
+                 "$DEPLOY_USER@$HOST" bash -s < /tmp/remote_deploy.sh; then
+              echo "Deploy erfolgreich (Versuch $attempt)"
+              exit 0
+            fi
+            echo "Versuch $attempt fehlgeschlagen, warte 30s"
+            sleep 30
+          done
+          echo "Deploy nach 5 Versuchen fehlgeschlagen"
+          exit 1
