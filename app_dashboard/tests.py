@@ -27,7 +27,9 @@ def _make_profile(user):
 
 class StravaSyncViewTests(APITestCase):
     def setUp(self):
-        self.user = get_user_model().objects.create_user(username="athlete", password="pw")
+        self.user = get_user_model().objects.create_user(
+            username="athlete", password="pw"
+        )
         self.profile = _make_profile(self.user)
         self.client.force_login(self.user)
         session = self.client.session
@@ -63,13 +65,16 @@ class StravaSyncViewTests(APITestCase):
         self.client.logout()
         response = self.client.post("/api/strava/sync/")
         self.assertIn(
-            response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+            response.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
 
 
 class StravaSyncStatusViewTests(APITestCase):
     def setUp(self):
-        self.user = get_user_model().objects.create_user(username="athlete2", password="pw")
+        self.user = get_user_model().objects.create_user(
+            username="athlete2", password="pw"
+        )
         self.profile = _make_profile(self.user)
         self.client.force_login(self.user)
         session = self.client.session
@@ -91,13 +96,16 @@ class StravaSyncStatusViewTests(APITestCase):
         self.client.logout()
         response = self.client.get("/api/strava/sync-status/")
         self.assertIn(
-            response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+            response.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
 
 
 class RunStravaSyncTaskTests(APITestCase):
     def setUp(self):
-        self.user = get_user_model().objects.create_user(username="athlete3", password="pw")
+        self.user = get_user_model().objects.create_user(
+            username="athlete3", password="pw"
+        )
         self.profile = _make_profile(self.user)
         self.profile.sync_status = "running"
         self.profile.save(update_fields=["sync_status"])
@@ -154,7 +162,9 @@ class RunStravaSyncTaskTests(APITestCase):
 
 class StravaSyncCancelViewTests(APITestCase):
     def setUp(self):
-        self.user = get_user_model().objects.create_user(username="athlete4", password="pw")
+        self.user = get_user_model().objects.create_user(
+            username="athlete4", password="pw"
+        )
         self.profile = _make_profile(self.user)
         self.client.force_login(self.user)
         session = self.client.session
@@ -197,7 +207,8 @@ class StravaSyncCancelViewTests(APITestCase):
         self.client.logout()
         response = self.client.post("/api/strava/sync/cancel/")
         self.assertIn(
-            response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+            response.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
 
 
@@ -209,7 +220,9 @@ class SyncActivityToDbWeatherWearHookTests(APITestCase):
     """
 
     def setUp(self):
-        self.user = get_user_model().objects.create_user(username="athlete5", password="pw")
+        self.user = get_user_model().objects.create_user(
+            username="athlete5", password="pw"
+        )
         self.profile = _make_profile(self.user)
 
     def _activity_data(self, strava_id, gear_id=None):
@@ -239,25 +252,36 @@ class SyncActivityToDbWeatherWearHookTests(APITestCase):
     @patch("app_dashboard.api.services.recompute_weather_wear_for_bike.delay")
     @patch("app_dashboard.api.services.StravaStreamService.fetch_activity_streams")
     @patch("app_dashboard.api.services.WeatherService.get_historical_weather")
-    def test_enqueues_recompute_when_bike_matched(self, mock_weather, mock_streams, mock_delay):
+    def test_enqueues_recompute_when_bike_matched(
+        self, mock_weather, mock_streams, mock_delay
+    ):
         bike = Bike.objects.create(
-            athlete=self.profile, strava_bike_id="b42", name="Rad", bike_type=BikeType.ROAD
+            athlete=self.profile,
+            strava_bike_id="b42",
+            name="Rad",
+            bike_type=BikeType.ROAD,
         )
         mock_weather.return_value = self._empty_weather()
         mock_streams.return_value = None
 
-        StravaImportService.sync_activity_to_db(self._activity_data(2001, gear_id="b42"), self.profile)
+        StravaImportService.sync_activity_to_db(
+            self._activity_data(2001, gear_id="b42"), self.profile
+        )
 
         mock_delay.assert_called_once_with(bike.pk)
 
     @patch("app_dashboard.api.services.recompute_weather_wear_for_bike.delay")
     @patch("app_dashboard.api.services.StravaStreamService.fetch_activity_streams")
     @patch("app_dashboard.api.services.WeatherService.get_historical_weather")
-    def test_does_not_enqueue_when_no_bike_matched(self, mock_weather, mock_streams, mock_delay):
+    def test_does_not_enqueue_when_no_bike_matched(
+        self, mock_weather, mock_streams, mock_delay
+    ):
         mock_weather.return_value = self._empty_weather()
         mock_streams.return_value = None
 
-        StravaImportService.sync_activity_to_db(self._activity_data(2002, gear_id=None), self.profile)
+        StravaImportService.sync_activity_to_db(
+            self._activity_data(2002, gear_id=None), self.profile
+        )
 
         mock_delay.assert_not_called()
 
@@ -265,7 +289,9 @@ class SyncActivityToDbWeatherWearHookTests(APITestCase):
 @override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="test-key")
 class ActivitySummaryViewTests(APITestCase):
     def setUp(self):
-        self.user = get_user_model().objects.create_user(username="ride-summary", password="pw")
+        self.user = get_user_model().objects.create_user(
+            username="ride-summary", password="pw"
+        )
         self.profile = _make_profile(self.user)
         self.client.force_login(self.user)
         session = self.client.session
@@ -294,11 +320,15 @@ class ActivitySummaryViewTests(APITestCase):
     def _gemini_response(self, text):
         resp = Mock()
         resp.raise_for_status = Mock()
-        resp.json.return_value = {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+        resp.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": text}]}}]
+        }
         return resp
 
     def test_no_ride_data_returns_404(self):
-        empty_ride = Ride.objects.create(strava_id=5002, name="Leer", athlete=self.profile)
+        empty_ride = Ride.objects.create(
+            strava_id=5002, name="Leer", athlete=self.profile
+        )
         response = self.client.get(f"/api/activities/{empty_ride.id}/summary/")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data["code"], "no_data")
@@ -343,5 +373,6 @@ class ActivitySummaryViewTests(APITestCase):
         self.client.logout()
         response = self.client.get(self._url())
         self.assertIn(
-            response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+            response.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )

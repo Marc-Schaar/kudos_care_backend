@@ -362,7 +362,9 @@ class HtmlToPlaintextTests(SimpleTestCase):
         self.assertEqual(html_to_plaintext(html), "Eins\n\nZwei")
 
     def test_real_template_has_no_css_leftovers(self):
-        html = render_to_string("emails/welcome.html", {"frontend_url": "http://localhost:3000"})
+        html = render_to_string(
+            "emails/welcome.html", {"frontend_url": "http://localhost:3000"}
+        )
         result = html_to_plaintext(html)
 
         self.assertIn("Willkommen bei Kudos Care", result)

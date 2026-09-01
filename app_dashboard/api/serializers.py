@@ -21,8 +21,7 @@ class StravaSyncStatusSerializer(serializers.ModelSerializer[StravaProfile]):
         ]
 
 
-
 class RideSerializer(serializers.ModelSerializer[Ride]):
     class Meta:
         model = Ride
-        fields = '__all__'
+        fields = "__all__"

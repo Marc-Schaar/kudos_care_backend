@@ -19,7 +19,9 @@ def recompute_weather_wear_for_bike(self, bike_id: int):
     try:
         bike = Bike.objects.get(pk=bike_id)
     except Bike.DoesNotExist:
-        logger.warning("recompute_weather_wear_for_bike: Bike %s existiert nicht mehr.", bike_id)
+        logger.warning(
+            "recompute_weather_wear_for_bike: Bike %s existiert nicht mehr.", bike_id
+        )
         return f"Bike {bike_id} nicht gefunden."
 
     try:
@@ -30,5 +32,7 @@ def recompute_weather_wear_for_bike(self, bike_id: int):
         check_component_warnings_for_bike.delay(bike.id)
         return f"{count} Komponenten fuer Bike {bike_id} neu berechnet."
     except Exception as exc:
-        logger.exception("Wetter-Verschleiss-Neuberechnung fuer Bike %s fehlgeschlagen.", bike_id)
+        logger.exception(
+            "Wetter-Verschleiss-Neuberechnung fuer Bike %s fehlgeschlagen.", bike_id
+        )
         raise self.retry(exc=exc)

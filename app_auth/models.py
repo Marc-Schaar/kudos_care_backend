@@ -21,7 +21,9 @@ class StravaProfile(models.Model):
     refresh_token = models.CharField(max_length=255)
     expires_at = models.IntegerField()
 
-    sync_status = models.CharField(max_length=10, choices=SYNC_STATUS_CHOICES, default="idle")
+    sync_status = models.CharField(
+        max_length=10, choices=SYNC_STATUS_CHOICES, default="idle"
+    )
     sync_started_at = models.DateTimeField(null=True, blank=True)
     sync_finished_at = models.DateTimeField(null=True, blank=True)
     sync_error = models.CharField(max_length=255, blank=True, default="")

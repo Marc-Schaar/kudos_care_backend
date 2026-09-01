@@ -32,7 +32,9 @@ GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 # E-Mail-Versand (Benachrichtigungen, siehe app_notifications). Default = Brevo SMTP-Relay,
 # aber vollstaendig env-gesteuert: ein spaeterer Wechsel auf einen eigenen Mailserver aendert
 # nur .env-Werte, keinen Code.
-EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
+EMAIL_BACKEND = os.environ.get(
+    "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
+)
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp-relay.brevo.com")
 EMAIL_PORT = int(os.environ.get("EMAIL_PORT", 587))
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
@@ -225,24 +227,24 @@ STRAVA_SYNC_PAGE_SIZE = int(os.getenv("STRAVA_SYNC_PAGE_SIZE", 50))
 
 
 LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'handlers': {
-        'file': {
-            'level': 'DEBUG',
-            'class': 'logging.FileHandler',
-            'filename': os.path.join(BASE_DIR, 'debug.log'), 
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "file": {
+            "level": "DEBUG",
+            "class": "logging.FileHandler",
+            "filename": os.path.join(BASE_DIR, "debug.log"),
         },
     },
-    'loggers': {
-            'my_app_debug': {
-            'handlers': ['file'],
-            'level': 'DEBUG',
-            'propagate': False,
+    "loggers": {
+        "my_app_debug": {
+            "handlers": ["file"],
+            "level": "DEBUG",
+            "propagate": False,
         },
-        'django.db.backends': {
-            'level': 'INFO',
-            'handlers': ['file'],
+        "django.db.backends": {
+            "level": "INFO",
+            "handlers": ["file"],
         },
     },
 }

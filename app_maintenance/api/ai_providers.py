@@ -35,7 +35,9 @@ def _parse_json_response(raw: str | None, provider_name: str) -> dict | None:
         logger.error("%s lieferte kein gueltiges JSON: %s", provider_name, e)
         return None
     if not isinstance(parsed, dict):
-        logger.error("%s lieferte JSON, aber kein Objekt (%s).", provider_name, type(parsed))
+        logger.error(
+            "%s lieferte JSON, aber kein Objekt (%s).", provider_name, type(parsed)
+        )
         return None
     return parsed
 
@@ -49,7 +51,9 @@ class BaseAIProvider(ABC):
         darf niemals ungefangen in den Request/Response-Zyklus werfen."""
         raise NotImplementedError
 
-    def generate_text_with_source(self, system_prompt: str, user_prompt: str) -> tuple[str | None, str | None]:
+    def generate_text_with_source(
+        self, system_prompt: str, user_prompt: str
+    ) -> tuple[str | None, str | None]:
         """Wie generate_text(), gibt zusätzlich zurück, welcher konkrete Provider
         (self.name) die Antwort erzeugt hat — genutzt von generate_reviewed_text(),
         um das Gegenstück (Gemini<->Groq) für die Zweit-Prüfung zu bestimmen."""
@@ -71,7 +75,9 @@ class BaseAIProvider(ABC):
 class GeminiProvider(BaseAIProvider):
     name = "gemini"
 
-    def _request(self, system_prompt: str, user_prompt: str, generation_config: dict) -> str | None:
+    def _request(
+        self, system_prompt: str, user_prompt: str, generation_config: dict
+    ) -> str | None:
         api_key = settings.GEMINI_API_KEY
         if not api_key:
             logger.warning("GEMINI_API_KEY fehlt, keine KI-Erklaerung moeglich.")
@@ -121,7 +127,9 @@ class GeminiProvider(BaseAIProvider):
 class GroqProvider(BaseAIProvider):
     name = "groq"
 
-    def _request(self, system_prompt: str, user_prompt: str, extra_payload: dict) -> str | None:
+    def _request(
+        self, system_prompt: str, user_prompt: str, extra_payload: dict
+    ) -> str | None:
         api_key = settings.GROQ_API_KEY
         if not api_key:
             logger.warning("GROQ_API_KEY fehlt, keine KI-Erklaerung moeglich.")
@@ -138,7 +146,9 @@ class GroqProvider(BaseAIProvider):
             **extra_payload,
         }
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=AI_REQUEST_TIMEOUT)
+            resp = requests.post(
+                url, json=payload, headers=headers, timeout=AI_REQUEST_TIMEOUT
+            )
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"].strip()
@@ -194,7 +204,9 @@ class FallbackAIProvider(BaseAIProvider):
         text, _ = self.generate_text_with_source(system_prompt, user_prompt)
         return text
 
-    def generate_text_with_source(self, system_prompt: str, user_prompt: str) -> tuple[str | None, str | None]:
+    def generate_text_with_source(
+        self, system_prompt: str, user_prompt: str
+    ) -> tuple[str | None, str | None]:
         for provider in self._providers:
             result = provider.generate_text(system_prompt, user_prompt)
             if result is not None:
@@ -219,7 +231,9 @@ def get_ai_provider() -> BaseAIProvider:
         return FallbackAIProvider([GeminiProvider(), GroqProvider()])
     if provider == "groq":
         return GroqProvider()
-    logger.warning("Unbekannter/fehlender AI_PROVIDER=%r, KI-Erklaerungen deaktiviert.", provider)
+    logger.warning(
+        "Unbekannter/fehlender AI_PROVIDER=%r, KI-Erklaerungen deaktiviert.", provider
+    )
     return NullAIProvider()
 
 
@@ -248,7 +262,9 @@ def _review_passes(reviewer: BaseAIProvider, user_prompt: str, answer: str) -> b
         "Ausgangsdaten stehen? Antworte ausschliesslich mit 'OK', wenn der Text beide "
         "Kriterien erfuellt, sonst mit 'FEHLER: <kurzer Grund>'."
     )
-    review_user_prompt = f"Ausgangsdaten:\n{user_prompt}\n\nZu pruefender Text:\n{answer}"
+    review_user_prompt = (
+        f"Ausgangsdaten:\n{user_prompt}\n\nZu pruefender Text:\n{answer}"
+    )
 
     verdict = reviewer.generate_text(review_system_prompt, review_user_prompt)
     if verdict is None:
@@ -281,6 +297,8 @@ def generate_reviewed_text(system_prompt: str, user_prompt: str) -> str | None:
     if _review_passes(reviewer, user_prompt, text):
         return text
 
-    logger.warning("KI-Antwort von %s bestand Zweit-Pruefung nicht, generiere einmal neu.", source)
+    logger.warning(
+        "KI-Antwort von %s bestand Zweit-Pruefung nicht, generiere einmal neu.", source
+    )
     retry_text, _ = provider.generate_text_with_source(system_prompt, user_prompt)
     return retry_text if retry_text is not None else text

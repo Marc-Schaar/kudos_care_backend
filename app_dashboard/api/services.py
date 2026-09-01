@@ -37,17 +37,21 @@ class StravaSyncService:
         """Holt die Bikes vom /athlete Endpunkt und synchronisiert sie."""
         try:
             resp = strava_get(
-                profile, "https://www.strava.com/api/v3/athlete", timeout=REQUEST_TIMEOUT
+                profile,
+                "https://www.strava.com/api/v3/athlete",
+                timeout=REQUEST_TIMEOUT,
             )
             resp.raise_for_status()
             data = resp.json()
-            
+
             for bike_info in data.get("bikes", []):
                 Bike.objects.update_or_create(
                     strava_bike_id=bike_info["id"],
-                    defaults={"name": bike_info.get("name"), "athlete": profile}
+                    defaults={"name": bike_info.get("name"), "athlete": profile},
                 )
-            logger.info(f"Bikes für {profile.strava_athlete_id} erfolgreich synchronisiert.")
+            logger.info(
+                f"Bikes für {profile.strava_athlete_id} erfolgreich synchronisiert."
+            )
         except Exception as e:
             logger.error(f"Fehler beim Bike-Sync für {profile.strava_athlete_id}: {e}")
             raise
@@ -108,7 +112,9 @@ class StravaSyncService:
 
                 for activity in activities:
                     try:
-                        ride = StravaImportService.sync_activity_to_db(activity, profile)
+                        ride = StravaImportService.sync_activity_to_db(
+                            activity, profile
+                        )
                         if ride is not None:
                             # Nur tatsächlich neu importierte Aktivitäten zählen für
                             # den Fortschritt – bereits synchronisierte werden von
@@ -158,7 +164,7 @@ class StravaImportService:
         strava_id = activity_data["id"]
         if Ride.objects.filter(strava_id=strava_id).exists():
             return None
-        
+
         polyline_str = activity_data.get("map", {}).get("summary_polyline")
         start_date_local = activity_data.get("start_date_local") or ""
         start_date = start_date_local.split("T")[0] if start_date_local else None

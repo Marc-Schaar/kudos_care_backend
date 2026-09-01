@@ -36,7 +36,9 @@ MAX_MODEL_SUGGESTIONS = 8
 VALID_CONFIDENCE = {"high", "medium", "low"}
 
 
-def suggest_models(manufacturer: str, year: int | None, bike_type: str) -> list[dict] | None:
+def suggest_models(
+    manufacturer: str, year: int | None, bike_type: str
+) -> list[dict] | None:
     """
     Schritt 1: plausible Modelle eines Herstellers fuer Bike-Typ und Baujahr.
 
@@ -104,7 +106,9 @@ def _catalog_prompt_block(groups: list[ComponentGroup], bike_type: str) -> str:
                 if template.maintenance_kind == MaintenanceKind.PART
                 else "Verbrauchsmaterial"
             )
-            lifetime = f"{template.warn_km or '?'} km / {template.warn_days or '?'} Tage"
+            lifetime = (
+                f"{template.warn_km or '?'} km / {template.warn_days or '?'} Tage"
+            )
             lines.append(
                 f"  - Template {template.id}: {template.name} [{kind}, "
                 f"Standard-Lebensdauer {lifetime}]"
@@ -112,7 +116,9 @@ def _catalog_prompt_block(groups: list[ComponentGroup], bike_type: str) -> str:
     return "\n".join(lines)
 
 
-def _allowed_template_ids(groups: list[ComponentGroup], bike_type: str) -> dict[int, dict]:
+def _allowed_template_ids(
+    groups: list[ComponentGroup], bike_type: str
+) -> dict[int, dict]:
     """Erlaubte Template-IDs -> Gruppen-/Art-Zuordnung, für die Validierung der Antwort."""
     allowed: dict[int, dict] = {}
     for group in groups:
@@ -130,7 +136,9 @@ def _coerce_confidence(value) -> str:
     return text if text in VALID_CONFIDENCE else "medium"
 
 
-def _clean_row(entry: dict, allowed: dict[int, dict], group_id: int, kind: str) -> dict | None:
+def _clean_row(
+    entry: dict, allowed: dict[int, dict], group_id: int, kind: str
+) -> dict | None:
     """
     Prueft eine einzelne KI-Zeile gegen den Katalog. Verwirft alles, was nicht zu dieser
     Gruppe und dieser Art gehoert — das ist die Stelle, an der halluzinierte oder
@@ -232,7 +240,9 @@ def suggest_setup(bike, manufacturer: str, model: str, year: int | None) -> dict
     }
 
 
-def _filter_to_catalog(data: dict, groups: list[ComponentGroup], allowed: dict) -> list[dict]:
+def _filter_to_catalog(
+    data: dict, groups: list[ComponentGroup], allowed: dict
+) -> list[dict]:
     """
     Bringt die KI-Antwort auf die Katalog-Struktur: nur bekannte Gruppen, nur erlaubte
     Templates, nur die richtige Art (Teil vs. Verbrauchsmaterial). Alles andere fliegt

@@ -106,7 +106,9 @@ class CurrentUserSettingsTests(APITestCase):
         Ohne Adresse lief die Willkommens-Mail bei der Erstanmeldung ins Leere —
         sobald eine da ist, wird sie nachgeholt.
         """
-        self.client.patch("/api/strava/me/", {"email": "marc@example.de"}, format="json")
+        self.client.patch(
+            "/api/strava/me/", {"email": "marc@example.de"}, format="json"
+        )
         mock_delay.assert_called_once_with(self.profile.id)
 
     @patch("app_auth.api.views.send_welcome_email_task.delay")
@@ -122,7 +124,9 @@ class CurrentUserSettingsTests(APITestCase):
         self.profile.welcome_email_sent_at = timezone.now()
         self.profile.save()
 
-        self.client.patch("/api/strava/me/", {"email": "marc@example.de"}, format="json")
+        self.client.patch(
+            "/api/strava/me/", {"email": "marc@example.de"}, format="json"
+        )
         mock_delay.assert_not_called()
 
     def test_patch_toggles_notifications(self):

@@ -30,7 +30,9 @@ def load_fixture(apps, schema_editor):
     # auto-increment-Insert (z.B. eine neue eigene Vorlage) mit einer bereits
     # vergebenen ID kollidieren.
     with connection.cursor() as cursor:
-        for statement in connection.ops.sequence_reset_sql(no_style(), [ComponentTemplate]):
+        for statement in connection.ops.sequence_reset_sql(
+            no_style(), [ComponentTemplate]
+        ):
             cursor.execute(statement)
 
 

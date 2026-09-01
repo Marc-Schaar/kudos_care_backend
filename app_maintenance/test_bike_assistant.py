@@ -128,7 +128,9 @@ class KudoCatalogGuardTests(APITestCase):
         self.assertEqual(part["template_id"], self.chain.id)
         self.assertEqual(part["brand"], "Shimano")
         self.assertEqual(part["custom_warn_km"], 4500)
-        self.assertEqual(result["groups"][0]["intervals"][0]["template_id"], self.lube.id)
+        self.assertEqual(
+            result["groups"][0]["intervals"][0]["template_id"], self.lube.id
+        )
 
     @patch("app_maintenance.api.ai_providers.requests.post")
     def test_hallucinated_template_id_is_dropped(self, mock_post):
@@ -139,7 +141,11 @@ class KudoCatalogGuardTests(APITestCase):
                     "group_id": self.group.id,
                     "parts": [
                         {"template_id": 999999, "include": True, "brand": "Erfunden"},
-                        {"template_id": self.chain.id, "include": True, "brand": "Shimano"},
+                        {
+                            "template_id": self.chain.id,
+                            "include": True,
+                            "brand": "Shimano",
+                        },
                     ],
                     "intervals": [],
                 }
@@ -186,7 +192,13 @@ class KudoCatalogGuardTests(APITestCase):
     @patch("app_maintenance.api.ai_providers.requests.post")
     def test_unknown_group_is_dropped(self, mock_post):
         mock_post.return_value = self._setup_response(
-            [{"group_id": 424242, "parts": [{"template_id": self.chain.id}], "intervals": []}]
+            [
+                {
+                    "group_id": 424242,
+                    "parts": [{"template_id": self.chain.id}],
+                    "intervals": [],
+                }
+            ]
         )
 
         result = suggest_setup(self.bike, "Canyon", "Grail", 2022)
@@ -211,7 +223,9 @@ class KudoCatalogGuardTests(APITestCase):
             ]
         )
 
-        part = suggest_setup(self.bike, "Canyon", "Grail", 2022)["groups"][0]["parts"][0]
+        part = suggest_setup(self.bike, "Canyon", "Grail", 2022)["groups"][0]["parts"][
+            0
+        ]
         self.assertIsNone(part["custom_warn_km"])
         self.assertIsNone(part["custom_warn_days"])
 
@@ -221,29 +235,39 @@ class KudoCatalogGuardTests(APITestCase):
             [
                 {
                     "group_id": self.group.id,
-                    "parts": [{"template_id": self.chain.id, "confidence": "absolut sicher"}],
+                    "parts": [
+                        {"template_id": self.chain.id, "confidence": "absolut sicher"}
+                    ],
                     "intervals": [],
                 }
             ]
         )
 
-        part = suggest_setup(self.bike, "Canyon", "Grail", 2022)["groups"][0]["parts"][0]
+        part = suggest_setup(self.bike, "Canyon", "Grail", 2022)["groups"][0]["parts"][
+            0
+        ]
         self.assertEqual(part["confidence"], "medium")
 
     @patch("app_maintenance.api.ai_providers.requests.post")
     def test_json_wrapped_in_markdown_fence_is_parsed(self, mock_post):
         """LLMs verpacken JSON gern in ```json trotz gegenteiliger Anweisung."""
-        fenced = "```json\n" + json.dumps(
-            {
-                "groups": [
-                    {
-                        "group_id": self.group.id,
-                        "parts": [{"template_id": self.chain.id, "brand": "Shimano"}],
-                        "intervals": [],
-                    }
-                ]
-            }
-        ) + "\n```"
+        fenced = (
+            "```json\n"
+            + json.dumps(
+                {
+                    "groups": [
+                        {
+                            "group_id": self.group.id,
+                            "parts": [
+                                {"template_id": self.chain.id, "brand": "Shimano"}
+                            ],
+                            "intervals": [],
+                        }
+                    ]
+                }
+            )
+            + "\n```"
+        )
         mock_post.return_value = _gemini_json(fenced)
 
         result = suggest_setup(self.bike, "Canyon", "Grail", 2022)
@@ -268,7 +292,11 @@ class KudoModelSuggestionTests(APITestCase):
             {
                 "models": [
                     {"model": "Grail", "year_range": "2018-2024", "note": "Gravel"},
-                    {"model": "Endurace", "year_range": "2015-2024", "note": "Endurance"},
+                    {
+                        "model": "Endurace",
+                        "year_range": "2015-2024",
+                        "note": "Endurance",
+                    },
                 ]
             }
         )
@@ -288,7 +316,9 @@ class KudoModelSuggestionTests(APITestCase):
         mock_post.return_value = _gemini_json(
             {"models": [{"note": "ohne Namen"}, {"model": "Grail"}]}
         )
-        self.assertEqual([m["model"] for m in suggest_models("Canyon", None, "gravel")], ["Grail"])
+        self.assertEqual(
+            [m["model"] for m in suggest_models("Canyon", None, "gravel")], ["Grail"]
+        )
 
     @patch("app_maintenance.api.ai_providers.requests.post")
     def test_unknown_manufacturer_yields_empty_list_not_none(self, mock_post):

@@ -17,22 +17,25 @@ NON_ESTIMATABLE_TEMPLATE_NAMES = [
 
 def set_supports_condition_estimate(apps, schema_editor):
     ComponentTemplate = apps.get_model("app_maintenance", "ComponentTemplate")
-    ComponentTemplate.objects.filter(
-        name__in=NON_ESTIMATABLE_TEMPLATE_NAMES
-    ).update(supports_condition_estimate=False)
+    ComponentTemplate.objects.filter(name__in=NON_ESTIMATABLE_TEMPLATE_NAMES).update(
+        supports_condition_estimate=False
+    )
 
 
 def reverse_supports_condition_estimate(apps, schema_editor):
     ComponentTemplate = apps.get_model("app_maintenance", "ComponentTemplate")
-    ComponentTemplate.objects.filter(
-        name__in=NON_ESTIMATABLE_TEMPLATE_NAMES
-    ).update(supports_condition_estimate=True)
+    ComponentTemplate.objects.filter(name__in=NON_ESTIMATABLE_TEMPLATE_NAMES).update(
+        supports_condition_estimate=True
+    )
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("app_maintenance", "0003_component_custom_warn_days_component_custom_warn_km_and_more"),
+        (
+            "app_maintenance",
+            "0003_component_custom_warn_days_component_custom_warn_km_and_more",
+        ),
     ]
 
     operations = [

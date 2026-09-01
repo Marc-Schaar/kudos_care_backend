@@ -38,7 +38,9 @@ class Command(BaseCommand):
             old_value = component.weather_wear_km
             try:
                 if dry_run:
-                    new_value, ride_count = WeatherWearService.calculate_weather_wear_km(component)
+                    new_value, ride_count = (
+                        WeatherWearService.calculate_weather_wear_km(component)
+                    )
                     self.stdout.write(
                         f"[dry-run] Komponente {component.id} ({component}): "
                         f"weather_wear_km {old_value} -> {new_value} ({ride_count} Fahrten)"
@@ -59,5 +61,7 @@ class Command(BaseCommand):
                 )
 
         self.stdout.write(
-            self.style.SUCCESS(f"{updated} Komponenten aktualisiert, {skipped} uebersprungen.")
+            self.style.SUCCESS(
+                f"{updated} Komponenten aktualisiert, {skipped} uebersprungen."
+            )
         )

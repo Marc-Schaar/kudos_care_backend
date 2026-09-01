@@ -227,7 +227,9 @@ class ActivityWearImpactViewTests(RideWearBreakdownTests):
 
     @patch("app_maintenance.api.ai_providers.requests.post")
     def test_returns_breakdown_and_caches_summary(self, mock_post):
-        mock_post.return_value = self._gemini_response("Diese Fahrt kostete etwas mehr.")
+        mock_post.return_value = self._gemini_response(
+            "Diese Fahrt kostete etwas mehr."
+        )
         ride = self._ride(RAINY, strava_id=20)
 
         response = self.client.get(f"/api/activities/{ride.id}/wear-impact/")

@@ -29,8 +29,7 @@ from app_maintenance.api.services import (
     ride_wear_impact_is_stale,
 )
 
-logger = logging.getLogger('my_app_debug')
-
+logger = logging.getLogger("my_app_debug")
 
 
 class StravaSyncView(APIView):
@@ -57,7 +56,9 @@ class StravaSyncView(APIView):
 
         if updated:
             async_result = run_strava_sync.delay(profile.pk)
-            StravaProfile.objects.filter(pk=profile.pk).update(sync_task_id=async_result.id)
+            StravaProfile.objects.filter(pk=profile.pk).update(
+                sync_task_id=async_result.id
+            )
 
         return Response({"status": "running"}, status=status.HTTP_202_ACCEPTED)
 
@@ -129,7 +130,9 @@ class ActivityDetailView(APIView):
         return Response(
             {
                 "name": ride.name,
-                "distance_km": round(ride.distance / 1000, 1) if ride.distance else None,
+                "distance_km": (
+                    round(ride.distance / 1000, 1) if ride.distance else None
+                ),
                 "elapsed_time": ride.elapsed_time,
                 "start_date": ride.start_date,
                 "bike_name": ride.bike.name if ride.bike else None,

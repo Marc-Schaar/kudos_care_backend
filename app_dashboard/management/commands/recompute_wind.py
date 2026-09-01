@@ -49,7 +49,9 @@ class Command(BaseCommand):
             weather_info = WeatherService.get_historical_weather(lat, lon, start_date)
             if not weather_info:
                 skipped += 1
-                self.stdout.write(f"Ride {ride.id}: keine Wetterdaten erhalten, uebersprungen.")
+                self.stdout.write(
+                    f"Ride {ride.id}: keine Wetterdaten erhalten, uebersprungen."
+                )
                 continue
 
             stream_data = {
@@ -87,5 +89,7 @@ class Command(BaseCommand):
             updated += 1
 
         self.stdout.write(
-            self.style.SUCCESS(f"{updated} Fahrten aktualisiert, {skipped} uebersprungen.")
+            self.style.SUCCESS(
+                f"{updated} Fahrten aktualisiert, {skipped} uebersprungen."
+            )
         )

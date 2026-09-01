@@ -13,7 +13,9 @@ logger = logging.getLogger("my_app_debug")
 
 # strip_tags() entfernt nur die Tags, nicht deren Inhalt — ohne diese Vorabreinigung
 # landet das komplette Stylesheet im Plaintext-Teil der Mail.
-_HEAD_BLOCK_RE = re.compile(r"<(style|script|head)\b.*?</\1>", re.IGNORECASE | re.DOTALL)
+_HEAD_BLOCK_RE = re.compile(
+    r"<(style|script|head)\b.*?</\1>", re.IGNORECASE | re.DOTALL
+)
 _BLANK_LINES_RE = re.compile(r"\n\s*\n\s*\n+")
 
 

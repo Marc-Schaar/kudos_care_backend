@@ -31,7 +31,11 @@ class StravaProfileAdmin(admin.ModelAdmin):
         (
             "Tokens",
             {
-                "fields": ["access_token_preview", "refresh_token_preview", "expires_at"],
+                "fields": [
+                    "access_token_preview",
+                    "refresh_token_preview",
+                    "expires_at",
+                ],
                 "description": "Volle Token-Werte werden aus Sicherheitsgründen nicht angezeigt.",
             },
         ),
