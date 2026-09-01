@@ -1,0 +1,87 @@
+name: Wind Backfill
+
+# Manuell ausloesbarer Lauf von `recompute_wind` auf dem Server.
+#
+# Warum ueberhaupt ein Workflow: der Backfill braucht SSH auf die Prod-Maschine, und
+# der dafuer noetige Key liegt ausschliesslich im Secret SSH_PRIVATE_KEY — nicht auf
+# einer Entwickler-Maschine. Statt den Key zu verteilen, laeuft der Befehl hier mit
+# demselben Zugang wie der Deploy, nachvollziehbar im Actions-Log.
+#
+# Der Backfill ist noetig, weil `weather_data` erst seit der Wind-Umstellung
+# `wind_direction_10m` enthaelt. Fahrten davor zeigen ihre Strecke neutral
+# (wind_source="none"), bis dieser Lauf ihre Wetterdaten neu holt.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run zeigt nur alt -> neu; apply schreibt in die DB"
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    # Der Befehl holt fuer JEDE Fahrt das historische Wetter neu von Open-Meteo
+    # (ein HTTP-Request pro Ride) — bei langer Historie entsprechend langsam.
+    timeout-minutes: 120
+    steps:
+      - name: Setup SSH key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          HOST: ${{ secrets.SERVER_IP }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run recompute_wind
+        env:
+          HOST: ${{ secrets.SERVER_IP }}
+          DEPLOY_USER: ${{ secrets.SERVER_USER }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -uo pipefail
+
+          # Das Flag wird lokal bestimmt und als Argument uebergeben, damit im
+          # Remote-Skript nichts interpoliert werden muss.
+          if [ "$MODE" = "apply" ]; then FLAG=""; else FLAG="--dry-run"; fi
+          echo "Modus: $MODE (Flag: '${FLAG:-<keins>}')"
+
+          cat > /tmp/remote_backfill.sh <<'REMOTE'
+          set -e
+          FLAG="${1:-}"
+
+          cd /home/marc/projects/kudo_care/kudos_care_backend
+          set -a && source .env && set +a
+          source venv/bin/activate
+
+          echo "=== recompute_wind $FLAG ==="
+          # Ohne Argument-Splitting: leeres FLAG darf kein leeres Argument erzeugen.
+          if [ -n "$FLAG" ]; then
+            python manage.py recompute_wind "$FLAG"
+          else
+            python manage.py recompute_wind
+          fi
+          REMOTE
+
+          # Einmaliger Retry analog zum Deploy: sshd weist per PerSourcePenalties
+          # kurzzeitig ab ("Not allowed at this time"), eine Penalty haelt ~15s.
+          for attempt in 1 2 3; do
+            if ssh -i "$HOME/.ssh/id_deploy" -o ConnectTimeout=15 -o BatchMode=yes \
+                 -o ServerAliveInterval=30 -o ServerAliveCountMax=240 \
+                 "$DEPLOY_USER@$HOST" "bash -s -- '$FLAG'" < /tmp/remote_backfill.sh; then
+              echo "Backfill erfolgreich (Versuch $attempt)"
+              exit 0
+            fi
+            echo "Versuch $attempt fehlgeschlagen, warte 30s"
+            sleep 30
+          done
+          echo "Backfill nach 3 Versuchen fehlgeschlagen"
+          exit 1
