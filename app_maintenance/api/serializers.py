@@ -375,21 +375,6 @@ class ComponentMountSerializer(serializers.Serializer):
     component_id = serializers.IntegerField(required=False)
 
 
-class QuickChangeItemSerializer(serializers.Serializer):
-    """Ein einzelnes Item im Body von POST /slots/{id}/quick-change/."""
-
-    slot_id = serializers.IntegerField()
-    include = serializers.BooleanField(default=True)
-    brand = serializers.CharField(required=False, allow_blank=True, default="")
-    model_name = serializers.CharField(required=False, allow_blank=True, default="")
-
-
-class QuickChangeRequestSerializer(serializers.Serializer):
-    """Body von POST /slots/{id}/quick-change/."""
-
-    installed_at = serializers.DateField(required=False)
-    items = QuickChangeItemSerializer(many=True)
-
 
 class ComponentSlotSerializer(serializers.ModelSerializer[ComponentSlot]):
     display_name = serializers.CharField(read_only=True)

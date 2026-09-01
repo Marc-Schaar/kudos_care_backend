@@ -156,8 +156,8 @@ class ComponentGroup(models.Model):
     Baugruppe im Katalog, die mehrere ComponentTemplates verbindet, die
     physisch typischerweise zusammen gewechselt werden (z.B. "Laufrad vorne"
     umfasst Reifen/Felge/Nabenlager/Speichen/Felgenband vorne). Grundlage für
-    den Quick-Change-Flow (siehe app_maintenance/api/views.py::SlotQuickChangeView).
-    Bewusst generisch gehalten — weitere Gruppen (z.B. "Bremse vorne") lassen
+    den Baugruppen-Flow (siehe app_maintenance/api/views.py::BikeAssemblyListView
+    und AssemblySwapView). Bewusst generisch gehalten — weitere Gruppen (z.B. "Bremse vorne") lassen
     sich rein über den Admin anlegen, ohne Codeänderung.
 
     Dient als Blueprint: pro Bike wird daraus eine `BikeAssembly`-Instanz
@@ -606,18 +606,6 @@ class ComponentSlot(models.Model):
     @property
     def mounted_component(self):
         return self.components.filter(is_mounted=True).first()
-
-    @property
-    def wear_km(self) -> float | None:
-        """Gefahrene km seit Einbau der montierten Komponente."""
-        comp = self.mounted_component
-        if comp is None or comp.distance_at_install is None:
-            return None
-        total_km = self.bike.athlete.stravaprofile_set  # wird unten überschrieben
-        # Gesamtkilometer des Bikes aus Strava — hier als Property auf Bike ergänzt
-        if self.bike.total_distance_km is None:
-            return None
-        return self.bike.total_distance_km - comp.distance_at_install
 
 
 class Component(models.Model):

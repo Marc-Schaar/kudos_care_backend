@@ -39,7 +39,6 @@ from .serializers import (
     MaintenanceIntervalSerializer,
     MaintenanceIntervalCreateSerializer,
     MaintenanceIntervalLogRequestSerializer,
-    QuickChangeRequestSerializer,
     AssistantModelsRequestSerializer,
     AssistantSetupRequestSerializer,
     compute_wear,
@@ -79,28 +78,12 @@ class BikeListView(AthleteMixin, generics.ListCreateAPIView):
     """
 
     def get_queryset(self):
-        profile = self.get_athlete()
-        logger.debug(
-            f"DEBUG: Suche Fahrräder für Profile ID: {profile.id} (Strava-ID: {profile.strava_athlete_id})"
-        )
-
-        all_bikes = Bike.objects.all()
-        for b in all_bikes:
-            logger.debug(
-                f"DEBUG: Bike gefunden: {b.name}, verknüpft mit Profile ID: {getattr(b, 'athlete_id', 'None')}"
-            )
-
-        return Bike.objects.filter(athlete=profile).prefetch_related(
+        return Bike.objects.filter(athlete=self.get_athlete()).prefetch_related(
             "slots__template",
             "slots__components",
             "slots__assembly__periods",
             "rides",
         )
-        # logging.debug(f"Fetching bikes for athlete: {self.get_athlete()}")
-        # logger.debug(f" Bikes: {Bike.objects.filter(athlete=self.get_athlete())}")
-        # return Bike.objects.filter(athlete=self.get_athlete()).prefetch_related(
-        #     "slots__template", "slots__components", "rides"
-        # )
 
     def get_serializer_class(self):
         return BikeSerializer if self.request.method == "POST" else BikeListSerializer
@@ -316,137 +299,7 @@ class SlotUnmountView(AthleteMixin, APIView):
         return Response(ComponentSerializer(comp).data)
 
 
-class SlotQuickChangeView(AthleteMixin, APIView):
-    """
-    GET  /api/maintenance/slots/{pk}/quick-change/
-    POST /api/maintenance/slots/{pk}/quick-change/
-    Body (POST): {
-        "installed_at"?: "YYYY-MM-DD",
-        "items": [{"slot_id": 12, "include": true, "brand"?: str, "model_name"?: str}, ...]
-    }
-
-    Baugruppen-Wechsel (z.B. "Laufrad vorne" wechseln → Reifen/Felge/Nabenlager/
-    Speichen/Felgenband vorne gleich mit). `pk` ist einer der Slots der Gruppe
-    (typischerweise der, den der User angeklickt hat) — GET liefert alle
-    Geschwister-Slots derselben Baugruppe auf demselben Bike zur Vorschau, POST
-    führt den Wechsel für die als `include=true` markierten Slots atomar aus,
-    nach demselben Unmount/Mount-Muster wie SlotMountView. Welche Slots
-    erlaubt sind, wird serverseitig aus slot.template.group hergeleitet, nicht
-    aus dem Request übernommen.
-    """
-
-    def _sibling_slots(self, slot: ComponentSlot):
-        group = slot.template.group
-        if group is None:
-            return None, None
-        siblings = (
-            ComponentSlot.objects.filter(bike=slot.bike, template__group=group)
-            .select_related("template")
-            .prefetch_related("components")
-        )
-        return group, siblings
-
-    def get(self, request, pk):
-        slot = get_object_or_404(
-            ComponentSlot.objects.select_related("template", "bike"),
-            pk=pk,
-            bike__athlete=self.get_athlete(),
-        )
-        group, siblings = self._sibling_slots(slot)
-        if group is None:
-            return Response(
-                {
-                    "error": "Diese Komponente gehört zu keiner Baugruppe.",
-                    "code": "no_group",
-                },
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        items = []
-        for sibling in siblings:
-            comp = sibling.mounted_component
-            items.append(
-                {
-                    "slot_id": sibling.id,
-                    "display_name": sibling.display_name,
-                    "preselected": True,
-                    "mounted_component": (
-                        {
-                            "brand": comp.brand,
-                            "model_name": comp.model_name,
-                            "installed_at": comp.installed_at,
-                        }
-                        if comp is not None
-                        else None
-                    ),
-                }
-            )
-
-        return Response({"group": {"id": group.id, "name": group.name}, "items": items})
-
-    def post(self, request, pk):
-        slot = get_object_or_404(
-            ComponentSlot.objects.select_related("template", "bike"),
-            pk=pk,
-            bike__athlete=self.get_athlete(),
-        )
-        group, siblings = self._sibling_slots(slot)
-        if group is None:
-            return Response(
-                {
-                    "error": "Diese Komponente gehört zu keiner Baugruppe.",
-                    "code": "no_group",
-                },
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        allowed_slots = {s.id: s for s in siblings}
-
-        body_serializer = QuickChangeRequestSerializer(data=request.data)
-        body_serializer.is_valid(raise_exception=True)
-        installed_at = (
-            body_serializer.validated_data.get("installed_at") or datetime.date.today()
-        )
-
-        target_slots = []
-        for item in body_serializer.validated_data["items"]:
-            if not item["include"]:
-                continue
-            target_slot = allowed_slots.get(item["slot_id"])
-            if target_slot is None:
-                return Response(
-                    {
-                        "error": f"slot_id {item['slot_id']} gehört nicht zur Baugruppe dieses Bikes."
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            target_slots.append((target_slot, item))
-
-        with transaction.atomic():
-            bike_total_km = slot.bike.total_distance_km
-            for target_slot, item in target_slots:
-                Component.objects.filter(slot=target_slot, is_mounted=True).update(
-                    is_mounted=False,
-                    retired_at=datetime.date.today(),
-                )
-                new_comp = Component(
-                    slot=target_slot,
-                    brand=item["brand"],
-                    model_name=item["model_name"],
-                    installed_at=installed_at,
-                    distance_at_install=bike_total_km,
-                    is_mounted=True,
-                )
-                new_comp.save()
-
-        changed_slots = (
-            ComponentSlot.objects.filter(pk__in=[ts.id for ts, _ in target_slots])
-            .select_related("template", "bike")
-            .prefetch_related("components")
-        )
-        return Response(ComponentSlotSerializer(changed_slots, many=True).data)
-
-
-# ── Components ────────────────────────────────────────────────────────────────
+# ── Components ───────────────────────────────────────────────────────────────────
 
 
 class ComponentListView(AthleteMixin, generics.ListCreateAPIView):
@@ -876,7 +729,7 @@ def _build_assembly_from_request(
     Legt eine BikeAssembly + ihre Slots/Components + MaintenanceIntervals atomar an.
     Erwartet bereits validierte Daten (AssemblyCreateRequestSerializer) und
     vorab-geprüfte Template-Zugehörigkeit zur Gruppe. Wiederverwendet das
-    Unmount-dann-Mount-Muster aus SlotMountView/SlotQuickChangeView.
+    Unmount-dann-Mount-Muster aus SlotMountView.
 
     `activate=False` legt die Instanz geparkt an (zweiter Laufradsatz, der erst
     später aufgezogen wird) — dann gibt es auch noch keine Nutzungsperiode.

@@ -15,7 +15,6 @@ from .views import (
     ComponentSlotDetailView,
     SlotMountView,
     SlotUnmountView,
-    SlotQuickChangeView,
     ComponentListView,
     ComponentDetailView,
     ComponentCheckView,
@@ -111,11 +110,6 @@ urlpatterns = [
         "maintenance/slots/<int:pk>/unmount/",
         SlotUnmountView.as_view(),
         name="slot-unmount",
-    ),
-    path(
-        "maintenance/slots/<int:pk>/quick-change/",
-        SlotQuickChangeView.as_view(),
-        name="slot-quick-change",
     ),
     path(
         "maintenance/slots/<int:slot_id>/components/",

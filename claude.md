@@ -273,8 +273,6 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `retired_at`/`distance_at_retire` gesetzt), und `POST assemblies/<id>/swap/` **erneuert die
   Teile** (alte Instanz ausgemustert, neue aktive mit frischen Teilen — der alte
   „Baugruppe tauschen"-Pfad). `POST intervals/<id>/log/` = "Erledigt".
-  Der alte `slots/<id>/quick-change/` (`SlotQuickChangeView`, `template__group`-basiert)
-  besteht als Übergangs-Endpoint weiter, ist aber durch `assemblies/<id>/swap/` abgelöst.
   `POST bikes/<id>/slots/` (freies Einzel-Slot-Anlegen) entfällt für den Client — Slots
   entstehen nur über den Baugruppen-Create; `GET` bleibt. Katalog + Zuordnung aller
   System-Templates zu Gruppen in Migration `0016`, Backfill bestehender Slots →
@@ -290,7 +288,7 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `assemblies/<id>/activate/`, `assemblies/<id>/retire/`,
   `assemblies/<id>/swap/`, `bikes/<id>/intervals/`, `intervals/<id>/` (PATCH/DELETE),
   `intervals/<id>/log/`, `bikes/<id>/slots/` (nur GET), `slots/<id>/mount|unmount`,
-  `slots/<id>/quick-change/` (Legacy), `slots/<id>/components/`, `components/<id>/check/`,
+  `slots/<id>/components/`, `components/<id>/check/`,
   `components/<id>/weather-explanation/`, `components/<id>/check-instructions/`, `templates/`.
 - **`app_notifications`** — E-Mail-Versand, kein eigenes Domain-Model (keine Endpoints, kein
   `urls.py`). Dedupe-/Status-Felder für Benachrichtigungen liegen stattdessen direkt an den
@@ -387,8 +385,6 @@ die DB-Engine.
   `GET /api/v3/push_subscriptions` aktuell `403 Application Status: Inactive` — die
   Strava-App selbst ist auf strava.com/settings/api als inaktiv markiert, unabhängig vom
   Server. Muss dort reaktiviert werden, bevor die Subscription per API angelegt werden kann.
-- `ComponentSlot.wear_km` (models.py) enthält toten Code (`stravaprofile_set`-Zeile).
-- `BikeListView.get_queryset` hat auskommentierten Debug-Code.
 - `debug.log` ist aktuell in Git getrackt (siehe `git status`) — sollte vermutlich in
   `.gitignore`, prüfen bevor weitere Commits den Log-Diff aufblähen.
 - `core/celery.py` ruft `app.autodiscover_tasks()` ohne Argumente auf — das sucht bei
@@ -470,10 +466,6 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   Kernfälle: Parklücke fällt aus den km- und Datums-Fenstern, Fallback ohne Baugruppe/ohne
   Perioden entspricht exakt dem früheren Verhalten, `since_km`-Baseline nach einer Freigabe,
   frisch montiertes Teil = 0 km (nicht `unknown`).
-- `app_maintenance/test_quick_change.py`: `SlotQuickChangeViewTests` (Legacy-Endpoint:
-  Geschwister-Slots derselben `ComponentGroup` per GET, 404 bei Slot ohne Gruppe, POST
-  wechselt nur `include: true`-Items mit gemeinsamem `installed_at`/individueller Marke,
-  Ablehnung von `slot_id`s außerhalb der Gruppe, Auth-Required, Ein-Montiert-Invariante).
 - `app_maintenance/test_assemblies.py`: `AssemblyCreateTests` (atomar Slots+Components+
   Intervalle, überspringt `include:false`, lehnt template-fremd/Consumable-in-Parts ab,
   Bike-Typ-Mismatch → 400, zweite Instanz derselben Gruppe entsteht geparkt bzw. verdrängt
