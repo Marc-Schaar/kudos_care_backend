@@ -1,11 +1,18 @@
 import logging
 
-from django.db.models import Max
+from django.db.models import Max, Q
 from django.utils import timezone
 
 from app_auth.models import StravaProfile
-from app_maintenance.models import Bike, Component, ComponentCheck, WeatherSensitivityCoefficient
+from app_maintenance.models import (
+    Bike,
+    Component,
+    ComponentCheck,
+    ComponentSlot,
+    WeatherSensitivityCoefficient,
+)
 from .serializers import WarnStatus, compute_wear
+from .usage import component_date_windows, date_in_windows
 
 logger = logging.getLogger("my_app_debug")
 
@@ -68,7 +75,11 @@ class WeatherWearCalculator:
             "multiplier": 1.0,
             "contributions": {"rain": 0.0, "heat": 0.0, "cold": 0.0, "wind": 0.0},
             "dominant_driver": None,
-            "conditions": {"precipitation": precip, "temperature": temp, "wind_speed": wind},
+            "conditions": {
+                "precipitation": precip,
+                "temperature": temp,
+                "wind_speed": wind,
+            },
             "capped": False,
         }
         if precip is None or temp is None or wind is None:
@@ -86,7 +97,9 @@ class WeatherWearCalculator:
             else 0.0
         )
         wind_factor = (
-            _clamp((wind - WIND_THRESHOLD_KMH) / WIND_REF_DELTA_KMH, 0.0, WIND_FACTOR_CAP)
+            _clamp(
+                (wind - WIND_THRESHOLD_KMH) / WIND_REF_DELTA_KMH, 0.0, WIND_FACTOR_CAP
+            )
             if wind > WIND_THRESHOLD_KMH
             else 0.0
         )
@@ -104,19 +117,27 @@ class WeatherWearCalculator:
             "multiplier": _clamp(raw, 1.0, MAX_MULTIPLIER),
             "contributions": contributions,
             "dominant_driver": dominant if contributions[dominant] > 0 else None,
-            "conditions": {"precipitation": precip, "temperature": temp, "wind_speed": wind},
+            "conditions": {
+                "precipitation": precip,
+                "temperature": temp,
+                "wind_speed": wind,
+            },
             "capped": raw > MAX_MULTIPLIER,
         }
 
     @staticmethod
-    def ride_multiplier(weather_data: dict | None, coeff: WeatherSensitivityCoefficient) -> float:
+    def ride_multiplier(
+        weather_data: dict | None, coeff: WeatherSensitivityCoefficient
+    ) -> float:
         """
         Multiplikator auf die gefahrene Distanz einer einzelnen Fahrt, basierend
         auf den stündlichen Regen-/Temperatur-/Wind-Werten aus Ride.weather_data.
         Fehlen/leeren eines der drei Arrays -> neutral (1.0x), kein Teilergebnis
         aus nur einem Teil der Daten.
         """
-        return WeatherWearCalculator.ride_multiplier_detail(weather_data, coeff)["multiplier"]
+        return WeatherWearCalculator.ride_multiplier_detail(weather_data, coeff)[
+            "multiplier"
+        ]
 
 
 class WeatherWearService:
@@ -130,6 +151,8 @@ class WeatherWearService:
 
     Voller Recompute, kein Delta/Watermark — jede Neuberechnung geht die
     komplette Ride-Historie seit Einbau durch (analog recompute_wind.py).
+    Zeiträume, in denen die Baugruppe abgezogen war (z.B. Sommer-LRS im Keller),
+    fallen dabei aus dem Ride-Filter — siehe api/usage.py.
     """
 
     @staticmethod
@@ -151,9 +174,22 @@ class WeatherWearService:
             )
             return 0.0, 0
 
+        windows = component_date_windows(component)
+        if not windows:
+            return 0.0, 0
+
+        # Ein Q-Zweig je Nutzungsfenster — nur Fahrten, bei denen das Teil auch
+        # wirklich am Rad war.
+        window_filter = Q()
+        for start, end in windows:
+            branch = Q(start_date__date__gte=start)
+            if end is not None:
+                branch &= Q(start_date__date__lte=end)
+            window_filter |= branch
+
         rides = Ride.objects.filter(
+            window_filter,
             bike_id=component.slot.bike_id,
-            start_date__date__gte=component.installed_at,
             distance__isnull=False,
         ).only("distance", "weather_data")
 
@@ -173,7 +209,9 @@ class WeatherWearService:
 
     @staticmethod
     def recompute_component(component: Component) -> Component:
-        weather_wear_km, ride_count = WeatherWearService.calculate_weather_wear_km(component)
+        weather_wear_km, ride_count = WeatherWearService.calculate_weather_wear_km(
+            component
+        )
         component.weather_wear_km = weather_wear_km
         component.weather_wear_ride_count = ride_count
         component.weather_wear_computed_at = timezone.now()
@@ -187,11 +225,19 @@ class WeatherWearService:
         return component
 
     @staticmethod
-    def recompute_bike(bike: Bike) -> int:
-        """Rechnet ALLE aktuell montierten Komponenten des Bikes neu."""
-        components = Component.objects.filter(slot__bike=bike, is_mounted=True).select_related(
-            "slot__template"
-        )
+    def recompute_bike(bike: Bike, include_parked: bool = False) -> int:
+        """
+        Rechnet die montierten Komponenten des Bikes neu — standardmäßig nur die
+        der aktiven Baugruppen. Geparkte Sätze sammeln nichts dazu, ihr Wert
+        wird beim Abziehen einmal final berechnet (`include_parked=True`).
+        """
+        components = Component.objects.filter(
+            slot__bike=bike, is_mounted=True
+        ).select_related("slot__template", "slot__assembly")
+        if not include_parked:
+            components = components.filter(
+                Q(slot__assembly__isnull=True) | Q(slot__assembly__is_active=True)
+            )
         count = 0
         for component in components:
             try:
@@ -216,19 +262,19 @@ def ride_wear_breakdown(ride) -> dict:
     alle Bremsen-Teile teilen sich denselben Prozentsatz, nur der Anteil an der jeweils
     empfohlenen Lebensdauer unterscheidet sich je Komponente.
 
-    Berücksichtigt werden Komponenten, die **zum Zeitpunkt der Fahrt** montiert waren
-    (`installed_at <= Fahrtdatum` und noch nicht ausgebaut) — nicht nur die heute
-    montierten wie in `WeatherWearService`. Nie montierte Ersatzteile bleiben draußen.
+    Berücksichtigt werden Komponenten, die **zum Zeitpunkt der Fahrt** am Rad waren —
+    nicht nur die heute montierten wie in `WeatherWearService`. Maßgeblich sind die
+    Nutzungsfenster aus `api/usage.py`: eine damals geparkte Baugruppe (Winter-LRS)
+    hat diese Fahrt nicht mitgemacht, auch wenn ihre Teile weiter `is_mounted` sind.
+    Nie montierte Ersatzteile bleiben draußen.
     """
-    from django.db.models import Q
-
     if ride.bike_id is None or ride.start_date is None or not ride.distance:
         return {"distance_km": None, "categories": [], "component_count": 0}
 
     ride_date = ride.start_date.date()
     distance_km = ride.distance / 1000
 
-    components = (
+    candidates = (
         Component.objects.filter(
             slot__bike_id=ride.bike_id,
             installed_at__isnull=False,
@@ -236,8 +282,12 @@ def ride_wear_breakdown(ride) -> dict:
         )
         .filter(Q(retired_at__isnull=True) | Q(retired_at__gte=ride_date))
         .filter(Q(is_mounted=True) | Q(retired_at__isnull=False))
-        .select_related("slot__template")
+        .select_related("slot__template", "slot__assembly")
+        .prefetch_related("slot__assembly__periods")
     )
+    components = [
+        c for c in candidates if date_in_windows(component_date_windows(c), ride_date)
+    ]
 
     coefficients = {
         coeff.category: coeff for coeff in WeatherSensitivityCoefficient.objects.all()
@@ -299,9 +349,15 @@ def ride_wear_breakdown(ride) -> dict:
     return {
         "distance_km": round(distance_km, 1),
         "conditions": {
-            "precipitation": _round(_mean((ride.weather_data or {}).get("precipitation"))),
-            "temperature": _round(_mean((ride.weather_data or {}).get("temperature_2m"))),
-            "wind_speed": _round(_mean((ride.weather_data or {}).get("wind_speed_10m"))),
+            "precipitation": _round(
+                _mean((ride.weather_data or {}).get("precipitation"))
+            ),
+            "temperature": _round(
+                _mean((ride.weather_data or {}).get("temperature_2m"))
+            ),
+            "wind_speed": _round(
+                _mean((ride.weather_data or {}).get("wind_speed_10m"))
+            ),
         },
         "categories": categories,
         "total_extra_km": round(total_extra_km, 2),
@@ -351,7 +407,9 @@ def build_ride_wear_impact_prompt(ride, breakdown: dict) -> tuple[str, str]:
         for component in category["components"]:
             share = component["share_of_life_pct"]
             share_text = (
-                f"{share}% der empfohlenen Lebensdauer" if share is not None else "unbekannt"
+                f"{share}% der empfohlenen Lebensdauer"
+                if share is not None
+                else "unbekannt"
             )
             lines.append(f"    - {component['name']}: diese Fahrt = {share_text}")
 
@@ -378,11 +436,17 @@ def ride_wear_impact_is_stale(ride) -> bool:
     return bool(latest_change and latest_change > generated_at)
 
 
-def build_weather_explanation_prompt(component: Component, wear: dict) -> tuple[str, str]:
+def build_weather_explanation_prompt(
+    component: Component, wear: dict
+) -> tuple[str, str]:
     """Baut (system_prompt, user_prompt) fuer die KI-Erklaerung."""
     template = component.slot.template
     multiplier_pct = None
-    if wear.get("wear_km") and wear["wear_km"] > 0 and component.weather_wear_km is not None:
+    if (
+        wear.get("wear_km")
+        and wear["wear_km"] > 0
+        and component.weather_wear_km is not None
+    ):
         multiplier_pct = round((component.weather_wear_km / wear["wear_km"] - 1) * 100)
 
     system_prompt = (
@@ -408,7 +472,9 @@ def build_weather_explanation_prompt(component: Component, wear: dict) -> tuple[
     return system_prompt, user_prompt
 
 
-def build_check_instructions_prompt(component: Component, wear: dict) -> tuple[str, str]:
+def build_check_instructions_prompt(
+    component: Component, wear: dict
+) -> tuple[str, str]:
     """
     Baut (system_prompt, user_prompt) fuer eine KI-Anleitung, WIE der Nutzer die
     Komponente selbst am besten prueft. Anders als build_weather_explanation_prompt
@@ -458,7 +524,9 @@ def bike_condition_report_is_stale(bike: Bike) -> bool:
     if latest_ride and latest_ride > generated_at:
         return True
 
-    mounted = Component.objects.filter(slot__bike=bike, is_mounted=True)
+    mounted = Component.objects.filter(
+        slot__in=ComponentSlot.objects.on_bike(bike), is_mounted=True
+    )
     latest_weather = mounted.aggregate(latest=Max("weather_wear_computed_at"))["latest"]
     if latest_weather and latest_weather > generated_at:
         return True
@@ -472,7 +540,9 @@ def bike_condition_report_is_stale(bike: Bike) -> bool:
     return False
 
 
-def build_bike_condition_report_prompt(bike: Bike, component_summaries: list[dict]) -> tuple[str, str]:
+def build_bike_condition_report_prompt(
+    bike: Bike, component_summaries: list[dict]
+) -> tuple[str, str]:
     """
     Baut (system_prompt, user_prompt) fuer den Gesamt-Zustandsbericht eines Bikes.
     `component_summaries` enthält je montierter Komponente Name/Kategorie plus das
@@ -511,7 +581,9 @@ def build_bike_condition_report_prompt(bike: Bike, component_summaries: list[dic
 # diese Funktionen auf und kuemmert sich nur um Versand/Scheduling/Dedupe-Persistierung.
 
 
-def get_new_component_warnings(profile: StravaProfile, bike: Bike | None = None) -> list[dict]:
+def get_new_component_warnings(
+    profile: StravaProfile, bike: Bike | None = None
+) -> list[dict]:
     """
     Ermittelt montierte Komponenten des Profils (optional auf ein einzelnes Bike
     eingeschraenkt), deren warn_status_overall aktuell warn/critical ist UND sich seit der
@@ -522,18 +594,27 @@ def get_new_component_warnings(profile: StravaProfile, bike: Bike | None = None)
     bikes = Bike.objects.filter(athlete=profile, retired=False)
     if bike is not None:
         bikes = bikes.filter(pk=bike.pk)
-    bikes = bikes.prefetch_related("slots__components", "slots__template")
 
     results = []
     for b in bikes:
-        for slot in b.slots.all():
+        slots = (
+            ComponentSlot.objects.on_bike(b)
+            .select_related("template")
+            .prefetch_related("components", "assembly__periods")
+        )
+        for slot in slots:
             comp = slot.mounted_component
             if comp is None:
                 continue
             wear = compute_wear(comp, b.total_distance_km)
             status = wear["warn_status_overall"]
-            if status in (WarnStatus.WARN, WarnStatus.CRITICAL) and status != comp.last_warn_notified_status:
-                results.append({"bike": b, "slot": slot, "component": comp, "wear": wear})
+            if (
+                status in (WarnStatus.WARN, WarnStatus.CRITICAL)
+                and status != comp.last_warn_notified_status
+            ):
+                results.append(
+                    {"bike": b, "slot": slot, "component": comp, "wear": wear}
+                )
     return results
 
 
@@ -545,12 +626,12 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
     compute_wear(..., as_of=...)). Bikes die bereits heute kritisch sind werden ausgeschlossen
     — das deckt bereits get_new_component_warnings() ab, keine Doppel-Meldung.
     """
-    from app_dashboard.api.services import predict_next_ride_date  # inline: Cross-App, siehe Architektur-Notiz
+    from app_dashboard.api.services import (
+        predict_next_ride_date,
+    )  # inline: Cross-App, siehe Architektur-Notiz
 
     results = []
-    bikes = Bike.objects.filter(athlete=profile, retired=False).prefetch_related(
-        "slots__components", "slots__template"
-    )
+    bikes = Bike.objects.filter(athlete=profile, retired=False)
     for bike in bikes:
         predicted_date = predict_next_ride_date(bike)
         if predicted_date is None:
@@ -558,7 +639,12 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
         if bike.predicted_unsafe_notified_for_date == predicted_date:
             continue
 
-        mounted = [(slot, slot.mounted_component) for slot in bike.slots.all()]
+        slots = (
+            ComponentSlot.objects.on_bike(bike)
+            .select_related("template")
+            .prefetch_related("components", "assembly__periods")
+        )
+        mounted = [(slot, slot.mounted_component) for slot in slots]
         mounted = [(slot, comp) for slot, comp in mounted if comp is not None]
         if not mounted:
             continue
@@ -572,7 +658,9 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
                 today_worst = WarnStatus.CRITICAL
             projected_wear = compute_wear(comp, bike_total_km, as_of=predicted_date)
             if projected_wear["warn_status_overall"] == WarnStatus.CRITICAL:
-                projected_components.append({"slot": slot, "component": comp, "wear": projected_wear})
+                projected_components.append(
+                    {"slot": slot, "component": comp, "wear": projected_wear}
+                )
 
         if today_worst == WarnStatus.CRITICAL:
             continue  # schon heute kritisch -> deckt get_new_component_warnings() ab

@@ -214,6 +214,10 @@ class Command(BaseCommand):
                     assembly.installed_at = min(installs)
                     assembly.save(update_fields=["installed_at"])
 
+            # Laufender Nutzungszeitraum, damit ein spaeterer Wechsel auf einen
+            # zweiten Satz korrekt abgerechnet wird (siehe api/usage.py).
+            assembly.ensure_open_period()
+
         self.stdout.write(
             f"{mounted} Komponenten montiert, {intervals_created} Wartungs-Intervalle angelegt."
         )
@@ -276,8 +280,10 @@ class Command(BaseCommand):
                 for h in range(4)
             ]
             hourly_times = [
-                (start_date.replace(minute=0, second=0, microsecond=0) + timedelta(hours=h))
-                .strftime("%Y-%m-%dT%H:00")
+                (
+                    start_date.replace(minute=0, second=0, microsecond=0)
+                    + timedelta(hours=h)
+                ).strftime("%Y-%m-%dT%H:00")
                 for h in range(4)
             ]
 

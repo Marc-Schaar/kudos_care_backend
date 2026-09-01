@@ -8,6 +8,7 @@ from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
 from app_dashboard.models import Ride
+from app_maintenance.api.serializers import compute_wear
 from app_maintenance.models import (
     Bike,
     BikeAssembly,
@@ -180,8 +181,12 @@ class AssemblyCreateTests(AssemblyTestBase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(res.data["code"], "bike_type_mismatch")
 
-    def test_create_conflicts_when_active_assembly_exists(self):
-        self.client.post(
+    def test_second_instance_of_same_group_is_created_parked(self):
+        """
+        Zweiter Laufradsatz: erlaubt, aber standardmäßig geparkt — die
+        aufgezogene Instanz soll nicht ungefragt verdrängt werden.
+        """
+        first = self.client.post(
             f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
             self._create_payload(),
             format="json",
@@ -191,8 +196,37 @@ class AssemblyCreateTests(AssemblyTestBase):
             self._create_payload(),
             format="json",
         )
-        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(res.data["code"], "already_active")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(res.data["is_active"])
+        self.assertTrue(res.data["is_parked"])
+        self.assertTrue(
+            BikeAssembly.objects.get(pk=first.data["id"]).is_active,
+            "Die bestehende Baugruppe muss aufgezogen bleiben.",
+        )
+
+    def test_create_with_activate_parks_the_previous_instance(self):
+        first = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
+            self._create_payload(),
+            format="json",
+        )
+        payload = self._create_payload()
+        payload["activate"] = True
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
+            payload,
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(res.data["is_active"])
+
+        old = BikeAssembly.objects.get(pk=first.data["id"])
+        self.assertFalse(old.is_active)
+        self.assertIsNone(old.retired_at, "Parken darf nicht ausmustern.")
+        self.assertTrue(
+            Component.objects.filter(slot__assembly=old, is_mounted=True).exists(),
+            "Die Teile bleiben auf dem geparkten Satz montiert.",
+        )
 
     def test_auth_required(self):
         self.client.logout()
@@ -234,21 +268,38 @@ class AssemblyListTests(AssemblyTestBase):
         self.assertNotIn(self.wheel_group.id, available_ids)  # bereits aktiv
         self.assertNotIn(self.susp_group.id, available_ids)  # falscher Bike-Typ
 
-    def test_assembly_km_uses_oldest_mounted_component(self):
+    def test_assembly_km_counts_only_time_on_the_bike(self):
+        """
+        `assembly_km` misst die Nutzung der Baugruppe selbst (Nutzungsperioden),
+        nicht mehr den Einbau-km-Stand des ältesten Teils — sonst würde ein
+        einzelner Reifenwechsel die Laufleistung des Laufradsatzes zurücksetzen.
+        """
         res = self.client.post(
             f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
             self._create_payload(installed_at=str(date.today() - timedelta(days=5))),
             format="json",
         )
         assembly_id = res.data["id"]
-        # Baseline = 100 km (aktueller Stand beim Einbau) → assembly_km == 0.
+        # Baseline = 100 km (Stand beim Einbau) → assembly_km == 0.
         detail = self.client.get(f"/api/maintenance/assemblies/{assembly_id}/")
         self.assertEqual(detail.data["assembly_km"], 0.0)
 
-        # Ein älteres Teil "vorziehen": distance_at_install kleiner setzen.
+        # Ein einzelnes Teil "vorziehen" ändert die Laufleistung der Baugruppe nicht.
         comp = Component.objects.filter(slot__assembly_id=assembly_id).first()
         comp.distance_at_install = 40.0
         comp.save()
+        detail = self.client.get(f"/api/maintenance/assemblies/{assembly_id}/")
+        self.assertEqual(detail.data["assembly_km"], 0.0)
+
+        # Weitere 60 km fahren → die Baugruppe zählt sie mit.
+        Ride.objects.create(
+            strava_id=5002,
+            name="Ausfahrt",
+            distance=60_000,
+            start_date=timezone.now(),
+            athlete=self.profile,
+            bike=self.bike,
+        )
         detail = self.client.get(f"/api/maintenance/assemblies/{assembly_id}/")
         self.assertEqual(detail.data["assembly_km"], 60.0)
 
@@ -334,4 +385,297 @@ class AssemblySwapTests(AssemblyTestBase):
                 bike=self.bike, group=self.wheel_group, is_active=False
             ).count(),
             1,
+        )
+
+
+class AssemblyActivateTests(AssemblyTestBase):
+    """
+    Wechsel zwischen zwei Baugruppen-Instanzen derselben Gruppe
+    (Sommer-/Winter-Laufradsatz).
+    """
+
+    def _create(self, name="", activate=None):
+        payload = self._create_payload(name=name)
+        if activate is not None:
+            payload["activate"] = activate
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
+            payload,
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        return res.data["id"]
+
+    def test_activate_parks_the_other_instance_without_retiring_it(self):
+        summer_id = self._create(name="Sommer-LRS")
+        winter_id = self._create(name="Winter-LRS")  # geparkt angelegt
+
+        res = self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+
+        summer = BikeAssembly.objects.get(pk=summer_id)
+        winter = BikeAssembly.objects.get(pk=winter_id)
+        self.assertFalse(summer.is_active)
+        self.assertIsNone(summer.retired_at)
+        self.assertTrue(summer.is_parked)
+        self.assertTrue(winter.is_active)
+
+        # Die Teile des geparkten Satzes bleiben auf ihm montiert.
+        self.assertEqual(
+            Component.objects.filter(slot__assembly=summer, is_mounted=True).count(), 2
+        )
+        # Geparkt = abgeschlossene Periode, aufgezogen = offene Periode.
+        self.assertIsNone(summer.open_period())
+        self.assertIsNotNone(winter.open_period())
+
+    def test_switching_back_and_forth_keeps_one_active(self):
+        summer_id = self._create(name="Sommer-LRS")
+        winter_id = self._create(name="Winter-LRS")
+
+        self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
+        self.client.post(f"/api/maintenance/assemblies/{summer_id}/activate/")
+
+        self.assertEqual(
+            BikeAssembly.objects.filter(
+                bike=self.bike, group=self.wheel_group, is_active=True
+            ).count(),
+            1,
+        )
+        self.assertTrue(BikeAssembly.objects.get(pk=summer_id).is_active)
+        self.assertEqual(
+            BikeAssembly.objects.get(pk=summer_id).periods.count(),
+            2,
+            "Zweites Aufziehen eroeffnet einen zweiten Nutzungszeitraum.",
+        )
+
+    def test_activate_rejects_retired_assembly(self):
+        summer_id = self._create(name="Sommer-LRS")
+        self.client.post(f"/api/maintenance/assemblies/{summer_id}/retire/")
+
+        res = self.client.post(f"/api/maintenance/assemblies/{summer_id}/activate/")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data["code"], "retired")
+
+    def test_retire_unmounts_components_and_records_odometer(self):
+        summer_id = self._create(name="Sommer-LRS")
+        res = self.client.post(f"/api/maintenance/assemblies/{summer_id}/retire/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+
+        summer = BikeAssembly.objects.get(pk=summer_id)
+        self.assertIsNotNone(summer.retired_at)
+        self.assertFalse(summer.is_parked)
+        for comp in Component.objects.filter(slot__assembly=summer):
+            self.assertFalse(comp.is_mounted)
+            self.assertEqual(comp.distance_at_retire, 100.0)
+
+    def test_list_separates_active_and_parked(self):
+        self._create(name="Sommer-LRS")
+        self._create(name="Winter-LRS")
+
+        res = self.client.get(f"/api/maintenance/bikes/{self.bike.id}/assemblies/")
+        self.assertEqual(len(res.data["assemblies"]), 1)
+        self.assertEqual(len(res.data["parked_assemblies"]), 1)
+        self.assertEqual(res.data["parked_assemblies"][0]["display_name"], "Winter-LRS")
+
+    def test_retired_assembly_is_not_offered_as_alternative(self):
+        self._create(name="Sommer-LRS")
+        winter_id = self._create(name="Winter-LRS")
+        self.client.post(f"/api/maintenance/assemblies/{winter_id}/retire/")
+
+        res = self.client.get(f"/api/maintenance/bikes/{self.bike.id}/assemblies/")
+        self.assertEqual(res.data["parked_assemblies"], [])
+
+    def test_activate_requires_own_athlete(self):
+        winter_id = self._create(name="Winter-LRS", activate=False)
+        other_user = get_user_model().objects.create_user(
+            username="other", password="pw"
+        )
+        _make_profile(other_user, strava_athlete_id=99999)
+        self.client.force_login(other_user)
+        session = self.client.session
+        session["strava_athlete_id"] = 99999
+        session.save()
+
+        res = self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_auth_required(self):
+        winter_id = self._create(name="Winter-LRS", activate=False)
+        self.client.logout()
+        res = self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
+        self.assertIn(
+            res.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
+        )
+
+
+class ParkedAssemblyWearTests(AssemblyTestBase):
+    """
+    Der Kernfall der Funktion: ein abgezogener Laufradsatz darf keine km und
+    keinen Wetter-Verschleiss sammeln, waehrend das Bike auf dem anderen Satz
+    weiterfaehrt. Die Tage-Achse laeuft dagegen bewusst weiter.
+    """
+
+    def _ride(self, strava_id, km, days_ago=0):
+        return Ride.objects.create(
+            strava_id=strava_id,
+            name=f"Fahrt {strava_id}",
+            distance=km * 1000,
+            start_date=timezone.now() - timedelta(days=days_ago),
+            athlete=self.profile,
+            bike=self.bike,
+        )
+
+    def _create(self, name):
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
+            self._create_payload(name=name),
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        return res.data["id"]
+
+    def test_parked_assembly_stops_collecting_km(self):
+        summer_id = self._create("Sommer-LRS")
+        self._ride(6001, 50)  # 50 km auf dem Sommer-LRS
+
+        summer_comp = Component.objects.filter(slot__assembly_id=summer_id).first()
+        self.assertEqual(
+            compute_wear(summer_comp, self.bike.total_distance_km)["wear_km"], 50.0
+        )
+
+        # Winter-LRS aufziehen -> Sommer-LRS wird geparkt.
+        winter_id = self._create("Winter-LRS")
+        self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
+
+        # 30 km auf dem Winter-LRS.
+        self._ride(6002, 30)
+
+        summer_comp.refresh_from_db()
+        winter_comp = Component.objects.filter(slot__assembly_id=winter_id).first()
+        bike_km = self.bike.total_distance_km
+
+        self.assertEqual(bike_km, 180.0)  # 100 Grundfahrt + 50 + 30
+        self.assertEqual(compute_wear(summer_comp, bike_km)["wear_km"], 50.0)
+        self.assertEqual(compute_wear(winter_comp, bike_km)["wear_km"], 30.0)
+
+    def test_parked_assembly_still_ages_in_days(self):
+        summer_id = self._create("Sommer-LRS")
+        summer_comp = Component.objects.filter(slot__assembly_id=summer_id).first()
+        summer_comp.installed_at = date.today() - timedelta(days=40)
+        summer_comp.save()
+
+        winter_id = self._create("Winter-LRS")
+        self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
+
+        wear = compute_wear(summer_comp, self.bike.total_distance_km)
+        self.assertEqual(
+            wear["wear_days"],
+            40,
+            "Gummi altert auch im Keller â€” die Tage-Achse friert nicht ein.",
+        )
+
+    def test_parked_assembly_is_excluded_from_bike_overview(self):
+        self._create("Sommer-LRS")
+        winter_id = self._create("Winter-LRS")
+        self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
+
+        res = self.client.get(f"/api/maintenance/bikes/{self.bike.id}/")
+        slot_ids = {s["id"] for s in res.data["slots"]}
+        parked_slot_ids = set(
+            ComponentSlot.objects.filter(
+                assembly__bike=self.bike, assembly__is_active=False
+            ).values_list("id", flat=True)
+        )
+        self.assertTrue(parked_slot_ids)
+        self.assertFalse(
+            slot_ids & parked_slot_ids,
+            "Slots geparkter Baugruppen duerfen nicht in der Bike-Uebersicht auftauchen.",
+        )
+
+
+class LegacyAssemblyWithoutPeriodsTests(AssemblyTestBase):
+    """
+    Baugruppen aus der Zeit vor den Nutzungszeitraeumen â€” oder ausserhalb der API
+    angelegt (Admin, seed_dev_data, Datenmigration) â€” haben keine Perioden. Ohne
+    Nachziehen beim Abziehen griffe der Alt-Fallback und der geparkte Satz wuerde
+    im Keller weiter km sammeln.
+    """
+
+    def _legacy_assembly(self, name):
+        assembly = BikeAssembly.objects.create(
+            bike=self.bike,
+            group=self.wheel_group,
+            name=name,
+            installed_at=date.today() - timedelta(days=30),
+        )
+        slot = ComponentSlot.objects.create(
+            bike=self.bike, assembly=assembly, template=self.tire
+        )
+        Component.objects.create(
+            slot=slot,
+            installed_at=date.today() - timedelta(days=30),
+            distance_at_install=0.0,
+            is_mounted=True,
+        )
+        return assembly
+
+    def test_parking_a_period_less_assembly_freezes_its_km(self):
+        legacy = self._legacy_assembly("Alt-LRS")
+        self.assertEqual(legacy.periods.count(), 0)
+        self.assertEqual(legacy.compute_km(self.bike.total_distance_km), 100.0)
+
+        # Zweiten Satz anlegen und aufziehen -> der alte wird geparkt.
+        payload = self._create_payload(name="Neu-LRS")
+        payload["activate"] = True
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+
+        legacy.refresh_from_db()
+        self.assertTrue(legacy.is_parked)
+        self.assertEqual(
+            legacy.periods.count(),
+            1,
+            "Beim Abziehen muss rueckwirkend ein Nutzungszeitraum entstehen.",
+        )
+
+        # Weitere 60 km auf dem neuen Satz.
+        Ride.objects.create(
+            strava_id=7001,
+            name="Nach dem Wechsel",
+            distance=60_000,
+            start_date=timezone.now(),
+            athlete=self.profile,
+            bike=self.bike,
+        )
+        legacy.refresh_from_db()
+        self.assertEqual(
+            legacy.compute_km(self.bike.total_distance_km),
+            100.0,
+            "Der geparkte Alt-Satz darf keine km mehr sammeln.",
+        )
+
+    def test_component_wear_of_a_parked_legacy_assembly_freezes_too(self):
+        legacy = self._legacy_assembly("Alt-LRS")
+        comp = Component.objects.get(slot__assembly=legacy)
+
+        payload = self._create_payload(name="Neu-LRS")
+        payload["activate"] = True
+        self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        Ride.objects.create(
+            strava_id=7002,
+            name="Nach dem Wechsel",
+            distance=60_000,
+            start_date=timezone.now(),
+            athlete=self.profile,
+            bike=self.bike,
+        )
+
+        comp.refresh_from_db()
+        self.assertEqual(
+            compute_wear(comp, self.bike.total_distance_km)["wear_km"], 100.0
         )

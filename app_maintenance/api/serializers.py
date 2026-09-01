@@ -15,6 +15,7 @@ from app_maintenance.models import (
     MaintenanceLog,
     warn_status_from_ratio,
 )
+from .usage import component_active_km
 
 
 class WarnStatus:
@@ -33,6 +34,23 @@ class WarnStatus:
         return warn_status_from_ratio(ratio)
 
 
+def slots_on_bike(bike: Bike) -> list[ComponentSlot]:
+    """
+    Die Slots, die aktuell wirklich am Rad sind: die aktiver Baugruppen plus die
+    ungruppierten Alt-Slots. Geparkte Baugruppen (z.B. der Winter-LRS im Keller)
+    dürfen weder in die Bike-Ampel noch ins Diagramm einfließen.
+
+    Filtert bewusst in Python statt per Query, damit das `prefetch_related` der
+    Views (`slots__assembly`) greift und keine N+1 entsteht — das DB-Pendant ist
+    `ComponentSlot.objects.on_bike()`.
+    """
+    return [
+        slot
+        for slot in bike.slots.all()
+        if slot.assembly_id is None or slot.assembly.is_active
+    ]
+
+
 def compute_wear(
     component: Component, bike_total_km: float | None, as_of: date | None = None
 ) -> dict:
@@ -45,6 +63,11 @@ def compute_wear(
     ab dem Zeitpunkt der letzten Prüfung neu berechnet ("Freigeben"), mit dem
     dabei angegebenen Snooze-Intervall (falls keins angegeben wurde, gilt ab
     der Prüfung wieder die normale empfohlene/individuelle Lebensdauer).
+
+    Die km-Achse rechnet über `api/usage.py` nur die Abschnitte, in denen die
+    Baugruppe tatsächlich am Rad war — ein abgezogener Laufradsatz sammelt keine
+    km, während das Bike auf dem anderen Satz weiterfährt. Die Tage-Achse zählt
+    bewusst durchgehend weiter (Gummi/Dichtmilch altern auch im Keller).
 
     `as_of` erlaubt eine Projektion auf ein zukünftiges Datum (siehe
     app_notifications — "voraussichtlich unsafe bei nächster Fahrt"): nur die
@@ -65,9 +88,8 @@ def compute_wear(
         "warn_status_overall": WarnStatus.UNKNOWN,
     }
 
-    # ── km-Verschleiß (informativ, seit Einbau) ───────────────────────────────
-    if bike_total_km is not None and component.distance_at_install is not None:
-        result["wear_km"] = round(bike_total_km - component.distance_at_install, 1)
+    # ── km-Verschleiß (informativ, seit Einbau, ohne Parkzeiten) ──────────────
+    result["wear_km"] = component_active_km(component, bike_total_km)
 
     # ── Tage-Verschleiß (informativ, seit Einbau) ─────────────────────────────
     if component.installed_at:
@@ -77,11 +99,16 @@ def compute_wear(
     latest_check = component.checks.first()
 
     if latest_check is not None:
-        if (
-            bike_total_km is not None
-            and latest_check.checked_at_distance_km is not None
-        ):
-            km_since_check = bike_total_km - latest_check.checked_at_distance_km
+        km_since_check = (
+            component_active_km(
+                component,
+                bike_total_km,
+                since_km=latest_check.checked_at_distance_km,
+            )
+            if latest_check.checked_at_distance_km is not None
+            else None
+        )
+        if km_since_check is not None:
             threshold_km = latest_check.snooze_km or warn_km
             if threshold_km:
                 result["warn_status_km"] = WarnStatus.from_ratio(
@@ -461,7 +488,7 @@ class BikeSerializer(serializers.ModelSerializer[Bike]):
         source="get_bike_type_display", read_only=True
     )
     total_distance_km = serializers.SerializerMethodField()
-    slots = ComponentSlotListSerializer(many=True, read_only=True)
+    slots = serializers.SerializerMethodField()
 
     warn_status = serializers.SerializerMethodField()
 
@@ -485,6 +512,11 @@ class BikeSerializer(serializers.ModelSerializer[Bike]):
     def get_total_distance_km(self, obj: Bike) -> float | None:
         return obj.total_distance_km
 
+    def get_slots(self, obj: Bike):
+        return ComponentSlotListSerializer(
+            slots_on_bike(obj), many=True, context=self.context
+        ).data
+
     def get_warn_status(self, obj: Bike) -> str:
         priority = [
             WarnStatus.CRITICAL,
@@ -494,7 +526,7 @@ class BikeSerializer(serializers.ModelSerializer[Bike]):
         ]
         slot_statuses = []
 
-        for slot in obj.slots.all():
+        for slot in slots_on_bike(obj):
             comp = slot.mounted_component
             if comp is None:
                 slot_statuses.append(WarnStatus.UNKNOWN)
@@ -545,7 +577,7 @@ class BikeListSerializer(serializers.ModelSerializer[Bike]):
             WarnStatus.UNKNOWN,
         ]
         slot_statuses = []
-        for slot in obj.slots.all():
+        for slot in slots_on_bike(obj):
             comp = slot.mounted_component
             if comp is None:
                 continue
@@ -672,10 +704,12 @@ class ComponentGroupSerializer(serializers.ModelSerializer[ComponentGroup]):
 class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
     group_detail = ComponentGroupSerializer(source="group", read_only=True)
     display_name = serializers.CharField(read_only=True)
+    is_parked = serializers.BooleanField(read_only=True)
     slots = serializers.SerializerMethodField()
     intervals = serializers.SerializerMethodField()
     assembly_km = serializers.SerializerMethodField()
     worst_status = serializers.SerializerMethodField()
+    last_used_at = serializers.SerializerMethodField()
 
     class Meta:
         model = BikeAssembly
@@ -689,6 +723,8 @@ class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
             "installed_at",
             "retired_at",
             "is_active",
+            "is_parked",
+            "last_used_at",
             "slots",
             "intervals",
             "assembly_km",
@@ -717,6 +753,16 @@ class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
 
     def get_assembly_km(self, obj: BikeAssembly) -> float | None:
         return obj.compute_km(self._bike_total_km(obj))
+
+    def get_last_used_at(self, obj: BikeAssembly) -> date | None:
+        """
+        Wann die Baugruppe zuletzt am Rad war — bei geparkten Sätzen das Datum
+        des Abziehens, damit die Wechsel-Auswahl "zuletzt gefahren" anzeigen kann.
+        """
+        if obj.is_active:
+            return date.today()
+        ends = [p.ended_at for p in obj.periods.all() if p.ended_at is not None]
+        return max(ends) if ends else obj.retired_at
 
     def get_worst_status(self, obj: BikeAssembly) -> str:
         return obj.worst_status(self._bike_total_km(obj))
@@ -780,6 +826,10 @@ class AssemblyCreateRequestSerializer(serializers.Serializer):
     installed_at = serializers.DateField(required=False)
     parts = AssemblyPartItemSerializer(many=True, required=False, default=list)
     intervals = AssemblyIntervalItemSerializer(many=True, required=False, default=list)
+    # Neue Instanz direkt aufziehen? Ohne Angabe: ja, falls die Gruppe frei ist —
+    # ist bereits eine Instanz aufgezogen (zweiter Laufradsatz), wird die neue
+    # standardmäßig geparkt angelegt statt die bestehende zu verdrängen.
+    activate = serializers.BooleanField(required=False, allow_null=True, default=None)
 
 
 class AssistantModelsRequestSerializer(serializers.Serializer):
@@ -789,7 +839,9 @@ class AssistantModelsRequestSerializer(serializers.Serializer):
     bike_type = serializers.CharField(max_length=20, required=False, allow_blank=True)
     # Untergrenze etwa beim ersten Serienfahrrad; Obergrenze grosszuegig fuer
     # Modelljahre, die dem Kalenderjahr vorauslaufen.
-    year = serializers.IntegerField(required=False, allow_null=True, min_value=1850, max_value=2100)
+    year = serializers.IntegerField(
+        required=False, allow_null=True, min_value=1850, max_value=2100
+    )
 
 
 class AssistantSetupRequestSerializer(serializers.Serializer):
@@ -797,4 +849,6 @@ class AssistantSetupRequestSerializer(serializers.Serializer):
 
     manufacturer = serializers.CharField(max_length=100)
     model = serializers.CharField(max_length=100)
-    year = serializers.IntegerField(required=False, allow_null=True, min_value=1850, max_value=2100)
+    year = serializers.IntegerField(
+        required=False, allow_null=True, min_value=1850, max_value=2100
+    )

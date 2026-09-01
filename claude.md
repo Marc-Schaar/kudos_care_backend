@@ -98,8 +98,19 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `recommended` steuern UI-Filter + den Neu-Bike-Stepper; bewusst generisch, weitere
   Gruppen rein über Admin/Migration anlegbar; voller Satz in Migration `0016` geseedet),
   `BikeAssembly` (per-Bike-Instanz einer `ComponentGroup`: eigener `name`, `installed_at`,
-  `is_active` — max. 1 aktive Instanz je `(bike, group)` via `clean()` erzwungen, inaktive
-  = Wechsel-Historie; `compute_km()`/`worst_status()` als Fat-Model-Methoden),
+  `is_active` — **mehrere Instanzen je `(bike, group)` sind erlaubt** (Sommer-/Winter-LRS),
+  aber max. eine *aktive*, via `clean()` erzwungen. Drei Zustände aus zwei Feldern:
+  `is_active=True` = am Rad; `is_active=False, retired_at=None` = **geparkt** (abgezogen,
+  Komponenten bleiben `is_mounted=True`, weil sie ja weiter auf dem Laufradsatz sitzen);
+  `retired_at` gesetzt = ausgemustert (Komponenten ausgebaut). `compute_km()`/
+  `worst_status()`/`is_parked`/`open_period()`/`ensure_open_period()` als Fat-Model-Methoden),
+  `AssemblyUsagePeriod` (Zeitraum, in dem eine Baugruppe tatsächlich am Rad war:
+  `started_at`/`started_distance_km` + `ended_at`/`ended_distance_km`, offene Periode =
+  aktuell montiert, max. eine je Baugruppe. **Ohne dieses Model würde ein abgezogener
+  Laufradsatz im Keller weiter km sammeln**, da `wear_km` am Bike-Odometer hängt.
+  Angelegt/geschlossen von den `_mount_assembly`/`_park_assembly`/`_retire_assembly`-Helfern
+  in `api/views.py`; `ensure_open_period()` zieht sie für Altbestände nach, die außerhalb der
+  API entstanden sind — Schema in Migration `0018`, Backfill in `0019`),
   `ComponentTemplate` (Katalog, Fixture `fixtures/component_templates.json`,
   optionales FK `group`; `maintenance_kind` `part`|`consumable` — `consumable` wird als
   `MaintenanceInterval` statt als `Component` instanziiert; `default_in_group` = Vorauswahl
@@ -108,6 +119,8 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   bedingte Unique-Constraints `(assembly, template)` bzw. `(bike, template)` statt des
   früheren `unique_together`), `Component` (physisches Teil,
   `is_mounted` via `clean()`/`save()`-Override erzwungen: nur 1 montiertes Teil je Slot;
+  `distance_at_retire` = km-Stand beim Ausbau, damit ein mitten in einer Nutzungsperiode
+  getauschtes Teil sauber abgeschnitten wird;
   zusätzlich `weather_wear_km`/`weather_wear_ride_count`/`weather_wear_computed_at` — async
   von `WeatherWearService` befüllt, nie live berechnet),
   `MaintenanceInterval` (Verbrauchsmaterial/Pflege: `interval_km`/`interval_days` +
@@ -125,10 +138,25 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `as_of`-Parameter (Default: heute) projiziert nur die Tage-Achse auf ein zukünftiges Datum —
   genutzt von `app_notifications` für die Fahrt-Vorhersage-Warnung, km-/Wetter-Achse bleiben
   auf dem aktuellen Stand, da zukünftige Distanz unbekannt ist.
+  **`api/usage.py` ist die einzige Quelle dafür, wann ein Teil tatsächlich am Rad war**
+  (analog zu `app_dashboard/api/wind.py` für alles Windbezogene): `component_km_windows()`
+  schneidet die `AssemblyUsagePeriod`s gegen die Einbau-/Ausbau-Spanne der Komponente,
+  `component_active_km(..., since_km=...)` summiert daraus die km (auch für die
+  `ComponentCheck`-Baseline nach einer Freigabe), `component_date_windows()` liefert das
+  Datums-Pendant für den Ride-Filter. Die **Tage-Achse bleibt bewusst außen vor** — Gummi
+  und Dichtmilch altern auch im Keller, `wear_days` läuft über Parkzeiten hinweg weiter.
+  Ohne Baugruppe (ungruppierte Alt-Slots) oder ohne Perioden greift ein Fallback auf genau
+  ein Fenster ab Einbau, also das Verhalten von vor der Umstellung.
+  `ComponentSlot.objects.on_bike(bike)` (bzw. `serializers.slots_on_bike()` für bereits
+  geprefetchte Querysets) hält geparkte Baugruppen aus Bike-Ampel, Diagramm,
+  Zustandsbericht und Warn-E-Mails heraus — sonst zählte ein Satz im Keller doppelt mit.
   `api/services.py`: `WeatherWearCalculator` (reine Formel: Wetter → Verschleiß-Multiplikator
   pro Ride; `ride_multiplier_detail()` gibt zusätzlich die Einzelbeiträge zurück,
-  `ride_multiplier()` ist der dünne Wrapper darauf) + `WeatherWearService` (voller Recompute über die Ride-Historie seit Einbau, nur
-  aktuell montierte Komponenten); außerdem `get_new_component_warnings()`/
+  `ride_multiplier()` ist der dünne Wrapper darauf) + `WeatherWearService` (voller Recompute
+  über die Ride-Historie seit Einbau, nur aktuell montierte Komponenten — der Ride-Filter
+  läuft über `usage.component_date_windows()`, Fahrten aus einer Parkphase fallen also
+  heraus; `recompute_bike(include_parked=False)` überspringt geparkte Sätze, deren Endwert
+  einmalig beim Abziehen final berechnet wird); außerdem `get_new_component_warnings()`/
   `get_predicted_unsafe_bikes()` als fachliche Grundlage für `app_notifications` (siehe dort).
   Celery-Task `recompute_weather_wear_for_bike` in
   `api/tasks.py`, getriggert nach jedem Ride-Import (Hook in
@@ -188,15 +216,24 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   **Baugruppen-Flow** (`api/views.py`): `GET groups/?bike_type=` liefert den
   `ComponentGroup`-Katalog mit genesteten Templates (getrennt `parts`/`consumables`).
   `GET bikes/<id>/assemblies/` liefert die aktiven `BikeAssembly`s (Slots inkl. Wear +
-  Intervalle inkl. Status), die noch nicht zugeordneten Alt-Slots (`ungrouped_slots`) und
+  Intervalle inkl. Status), die geparkten Alternativen (`parked_assemblies` — inaktiv, aber
+  nicht ausgemustert), die noch nicht zugeordneten Alt-Slots (`ungrouped_slots`) und
   die noch verfügbaren Katalog-Gruppen (`available_groups`). `POST bikes/<id>/assemblies/`
   legt eine Baugruppe komplett an (ein Dialog = eine Baugruppe): `BikeAssembly` +
   `ComponentSlot`s (+ montierte `Component`s) für die inkludierten `parts` +
   `MaintenanceInterval`s für die inkludierten `intervals`, atomar, nach demselben
   Unmount-dann-Mount-Muster wie `SlotMountView`; Templates werden serverseitig gegen
-  `group.templates` geprüft, Bike-Typ-Mismatch → 400, bereits aktive Gruppe → 409.
-  `POST assemblies/<id>/swap/` ersetzt die aktive Instanz (alte deaktiviert + Komponenten
-  ausgebaut, neue aktive mit frischen Teilen). `POST intervals/<id>/log/` = "Erledigt".
+  `group.templates` geprüft, Bike-Typ-Mismatch → 400. Ist für die Gruppe **bereits eine
+  Instanz aufgezogen, entsteht die neue geparkt** (kein 409 mehr) — die bestehende soll nicht
+  ungefragt verdrängt werden; das optionale Body-Feld `activate: true` erzwingt den direkten
+  Wechsel.
+  Drei getrennte Aktionen auf einer Instanz, die man nicht verwechseln darf:
+  `POST assemblies/<id>/activate/` **wechselt** zwischen zwei vorhandenen Sätzen (der bisher
+  aufgezogene wird geparkt, seine Teile bleiben montiert),
+  `POST assemblies/<id>/retire/` **mustert aus** (Komponenten ausgebaut,
+  `retired_at`/`distance_at_retire` gesetzt), und `POST assemblies/<id>/swap/` **erneuert die
+  Teile** (alte Instanz ausgemustert, neue aktive mit frischen Teilen — der alte
+  „Baugruppe tauschen"-Pfad). `POST intervals/<id>/log/` = "Erledigt".
   Der alte `slots/<id>/quick-change/` (`SlotQuickChangeView`, `template__group`-basiert)
   besteht als Übergangs-Endpoint weiter, ist aber durch `assemblies/<id>/swap/` abgelöst.
   `POST bikes/<id>/slots/` (freies Einzel-Slot-Anlegen) entfällt für den Client — Slots
@@ -206,6 +243,7 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   Endpoints unter `/api/maintenance/`: `assistant/models/`,
   `bikes/<id>/assistant/setup/`, `bikes/`, `bikes/<id>/condition-report/`,
   `groups/`, `bikes/<id>/assemblies/` (GET/POST), `assemblies/<id>/` (PATCH/DELETE),
+  `assemblies/<id>/activate/`, `assemblies/<id>/retire/`,
   `assemblies/<id>/swap/`, `bikes/<id>/intervals/`, `intervals/<id>/` (PATCH/DELETE),
   `intervals/<id>/log/`, `bikes/<id>/slots/` (nur GET), `slots/<id>/mount|unmount`,
   `slots/<id>/quick-change/` (Legacy), `slots/<id>/components/`, `components/<id>/check/`,
@@ -368,18 +406,34 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   Invalidierung durch Status-Änderung nach Freigabe), `BikeConditionReportViewTests`
   (KI-Zustandsbericht, Caching, Invalidierung durch neuen Ride-Import),
   `RecomputeWeatherWearForBikeTaskTests` (löst nach erfolgreicher Neuberechnung
-  `app_notifications.tasks.check_component_warnings_for_bike` aus, aber nicht bei Fehlschlag).
+  `app_notifications.tasks.check_component_warnings_for_bike` aus, aber nicht bei Fehlschlag),
+  `WeatherWearParkedAssemblyTests` (Fahrten aus einer Parkphase zählen nicht mit, Altbestand
+  ohne Perioden rechnet unverändert weiter, `recompute_bike` überspringt geparkte Sätze).
+- `app_maintenance/test_usage_periods.py`: reine Fenster-Arithmetik aus `api/usage.py`
+  (`SimpleTestCase`, keine DB, Modelle als Stubs — im Stil von `app_dashboard/test_wind.py`).
+  Kernfälle: Parklücke fällt aus den km- und Datums-Fenstern, Fallback ohne Baugruppe/ohne
+  Perioden entspricht exakt dem früheren Verhalten, `since_km`-Baseline nach einer Freigabe,
+  frisch montiertes Teil = 0 km (nicht `unknown`).
 - `app_maintenance/test_quick_change.py`: `SlotQuickChangeViewTests` (Legacy-Endpoint:
   Geschwister-Slots derselben `ComponentGroup` per GET, 404 bei Slot ohne Gruppe, POST
   wechselt nur `include: true`-Items mit gemeinsamem `installed_at`/individueller Marke,
   Ablehnung von `slot_id`s außerhalb der Gruppe, Auth-Required, Ein-Montiert-Invariante).
 - `app_maintenance/test_assemblies.py`: `AssemblyCreateTests` (atomar Slots+Components+
   Intervalle, überspringt `include:false`, lehnt template-fremd/Consumable-in-Parts ab,
-  Bike-Typ-Mismatch → 400, bereits aktive Gruppe → 409, `BikeAssembly.clean()`-Invariante,
-  Auth), `AssemblyListTests` (`assemblies`/`ungrouped_slots`/`available_groups`,
-  `assembly_km` = ältestes montiertes `distance_at_install`, `worst_status` bezieht
+  Bike-Typ-Mismatch → 400, zweite Instanz derselben Gruppe entsteht geparkt bzw. verdrängt
+  mit `activate:true`, `BikeAssembly.clean()`-Invariante,
+  Auth), `AssemblyListTests` (`assemblies`/`parked_assemblies`/`ungrouped_slots`/
+  `available_groups`, `assembly_km` = Summe der Nutzungszeiträume (nicht mehr der
+  Einbau-km-Stand des ältesten Teils — ein einzelner Reifenwechsel darf die Laufleistung
+  des Satzes nicht zurücksetzen), `worst_status` bezieht
   überfällige Intervalle ein), `AssemblySwapTests` (alte Instanz inaktiv + Komponenten
-  ausgebaut, neue aktiv, Historie abfragbar).
+  ausgebaut, neue aktiv, Historie abfragbar), `AssemblyActivateTests` (Wechsel parkt die
+  andere Instanz ohne sie auszumustern, Hin- und Zurückwechseln, ausgemusterte lassen sich
+  nicht wieder aufziehen, Athleten-Scoping, Auth), `ParkedAssemblyWearTests` (**der Kernfall**:
+  geparkter Satz sammelt keine km, altert aber weiter in Tagen; seine Slots verschwinden aus
+  der Bike-Übersicht), `LegacyAssemblyWithoutPeriodsTests` (Baugruppen ohne Nutzungszeitraum
+  — Altbestand, Admin, `seed_dev_data` — bekommen beim Abziehen rückwirkend einen, sonst
+  liefe der Alt-Fallback weiter).
 - `app_maintenance/test_intervals.py`: `MaintenanceIntervalStatusTests` (km-/Tage-Ratio,
   `as_of`-Projektion der Tage-Achse, `unknown` ohne Grenzen), `MaintenanceIntervalLogViewTests`
   (`/log/` setzt Baseline zurück + hängt `MaintenanceLog` an, explizite Werte,

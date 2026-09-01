@@ -5,6 +5,8 @@ from .views import (
     BikeDistanceAtDateView,
     BikeAssemblyListView,
     BikeAssemblyDetailView,
+    AssemblyActivateView,
+    AssemblyRetireView,
     AssemblySwapView,
     ComponentGroupListView,
     ComponentTemplateListView,
@@ -56,6 +58,16 @@ urlpatterns = [
         "maintenance/assemblies/<int:pk>/",
         BikeAssemblyDetailView.as_view(),
         name="assembly-detail",
+    ),
+    path(
+        "maintenance/assemblies/<int:pk>/activate/",
+        AssemblyActivateView.as_view(),
+        name="assembly-activate",
+    ),
+    path(
+        "maintenance/assemblies/<int:pk>/retire/",
+        AssemblyRetireView.as_view(),
+        name="assembly-retire",
     ),
     path(
         "maintenance/assemblies/<int:pk>/swap/",

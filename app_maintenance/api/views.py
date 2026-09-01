@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 
 from app_auth.models import StravaProfile
 from app_maintenance.models import (
+    AssemblyUsagePeriod,
     Bike,
     BikeAssembly,
     ComponentGroup,
@@ -88,7 +89,10 @@ class BikeListView(AthleteMixin, generics.ListCreateAPIView):
             )
 
         return Bike.objects.filter(athlete=profile).prefetch_related(
-            "slots__template", "slots__components", "rides"
+            "slots__template",
+            "slots__components",
+            "slots__assembly__periods",
+            "rides",
         )
         # logging.debug(f"Fetching bikes for athlete: {self.get_athlete()}")
         # logger.debug(f" Bikes: {Bike.objects.filter(athlete=self.get_athlete())}")
@@ -120,7 +124,11 @@ class BikeDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         return Bike.objects.filter(athlete=self.get_athlete()).prefetch_related(
-            "slots__template", "slots__components", "rides", "intervals__logs"
+            "slots__template",
+            "slots__components",
+            "slots__assembly__periods",
+            "rides",
+            "intervals__logs",
         )
 
 
@@ -664,7 +672,11 @@ class BikeConditionReportView(AthleteMixin, APIView):
     def get(self, request, pk):
         bike = get_object_or_404(Bike, pk=pk, athlete=self.get_athlete())
 
-        slots = bike.slots.select_related("template").prefetch_related("components")
+        slots = (
+            ComponentSlot.objects.on_bike(bike)
+            .select_related("template")
+            .prefetch_related("components", "assembly__periods")
+        )
         component_summaries = []
         for slot in slots:
             comp = slot.mounted_component
@@ -750,17 +762,99 @@ def _interval_kind_for_template(template: ComponentTemplate) -> str:
     return MaintenanceIntervalKind.CUSTOM
 
 
+def _odometer_at(bike: Bike, day: datetime.date) -> float | None:
+    """
+    Km-Stand des Bikes an einem Tag — Baseline für eine Nutzungsperiode. Bei
+    rückdatiertem Einbau ("den Satz fahre ich seit letztem Monat") wird der
+    damalige Stand aus der Ride-Historie genommen, sonst zählte die Zeit davor
+    nicht mit. Gleiche Quelle wie `total_distance_km` (Summe der Ride-Distanzen),
+    die beiden Werte sind daher direkt vergleichbar.
+    """
+    total = bike.total_distance_km
+    if total is None:
+        return None
+    if day >= datetime.date.today():
+        return total
+    return min(bike.distance_km_up_to(day), total)
+
+
+def _park_assembly(assembly: BikeAssembly, on: datetime.date | None = None) -> None:
+    """
+    Baugruppe abziehen, ohne sie auszumustern: laufende Nutzungsperiode schließen,
+    `is_active=False`, `retired_at` bleibt None. Die Komponenten bleiben
+    `is_mounted=True` — sie sitzen ja weiter auf dem Laufradsatz, nur der Satz ist
+    nicht mehr am Rad. Vor dem Parken wird der Wetter-Verschleiß ein letztes Mal
+    final berechnet, danach ändert er sich nicht mehr.
+    """
+    from .services import WeatherWearService
+
+    on = on or datetime.date.today()
+    # Baugruppen aus der Zeit vor den Nutzungsperioden (bzw. aus seed_dev_data/
+    # Admin) haben noch keine — die wird hier rückwirkend angelegt, sonst liesse
+    # sich das Abziehen gar nicht festhalten und der Satz sammelte weiter km.
+    period = assembly.ensure_open_period()
+    if period is not None:
+        period.close(on, assembly.bike.total_distance_km)
+
+    assembly.is_active = False
+    assembly.save(update_fields=["is_active", "updated_at"])
+
+    for component in Component.objects.filter(
+        slot__assembly=assembly, is_mounted=True
+    ).select_related("slot__template", "slot__assembly"):
+        try:
+            WeatherWearService.recompute_component(component)
+        except Exception:
+            logger.exception(
+                "Finale Wetter-Verschleiss-Berechnung fuer Komponente %s fehlgeschlagen.",
+                component.pk,
+            )
+
+
+def _mount_assembly(assembly: BikeAssembly, on: datetime.date | None = None) -> None:
+    """
+    Baugruppe aufziehen: aktiv setzen und eine neue Nutzungsperiode öffnen. Der
+    Aufrufer muss vorher sicherstellen, dass keine andere Instanz derselben
+    `(bike, group)` mehr aktiv ist (siehe `BikeAssembly.clean()`).
+    """
+    on = on or datetime.date.today()
+    assembly.is_active = True
+    assembly.retired_at = None
+    assembly.save(update_fields=["is_active", "retired_at", "updated_at"])
+
+    if assembly.open_period() is None:
+        AssemblyUsagePeriod.objects.create(
+            assembly=assembly,
+            started_at=on,
+            started_distance_km=_odometer_at(assembly.bike, on),
+        )
+
+
+def _active_sibling(bike: Bike, group: ComponentGroup) -> BikeAssembly | None:
+    """Die aktuell aufgezogene Instanz derselben Baugruppe an diesem Bike."""
+    return (
+        BikeAssembly.objects.filter(bike=bike, group=group, is_active=True)
+        .select_related("bike", "group")
+        .first()
+    )
+
+
 def _build_assembly_from_request(
-    bike: Bike, group: ComponentGroup, data: dict
+    bike: Bike, group: ComponentGroup, data: dict, activate: bool = True
 ) -> BikeAssembly:
     """
     Legt eine BikeAssembly + ihre Slots/Components + MaintenanceIntervals atomar an.
     Erwartet bereits validierte Daten (AssemblyCreateRequestSerializer) und
     vorab-geprüfte Template-Zugehörigkeit zur Gruppe. Wiederverwendet das
     Unmount-dann-Mount-Muster aus SlotMountView/SlotQuickChangeView.
+
+    `activate=False` legt die Instanz geparkt an (zweiter Laufradsatz, der erst
+    später aufgezogen wird) — dann gibt es auch noch keine Nutzungsperiode.
     """
     installed_at = data.get("installed_at") or datetime.date.today()
-    bike_total_km = bike.total_distance_km
+    # Bei rückdatiertem Einbau der damalige km-Stand, damit Baugruppen-Periode und
+    # Komponenten-Baseline dieselbe Zahl benutzen und nicht auseinanderlaufen.
+    bike_total_km = _odometer_at(bike, installed_at)
 
     with transaction.atomic():
         assembly = BikeAssembly(
@@ -768,9 +862,16 @@ def _build_assembly_from_request(
             group=group,
             name=data.get("name", "") or "",
             installed_at=installed_at,
-            is_active=True,
+            is_active=activate,
         )
         assembly.save()
+
+        if activate:
+            AssemblyUsagePeriod.objects.create(
+                assembly=assembly,
+                started_at=installed_at,
+                started_distance_km=bike_total_km,
+            )
 
         allowed_parts = {
             t.id: t
@@ -868,10 +969,20 @@ class BikeAssemblyListView(AthleteMixin, APIView):
     POST /api/maintenance/bikes/{bike_id}/assemblies/
 
     GET liefert die aktiven Baugruppen des Bikes (inkl. Slots mit Wear +
-    Intervall-Status), die noch nicht zugeordneten Alt-Slots (`ungrouped_slots`,
-    nach Kategorie) und die noch verfügbaren Katalog-Gruppen (`available_groups`).
+    Intervall-Status), die geparkten Alternativen (`parked_assemblies` — z.B. der
+    Winter-LRS im Keller), die noch nicht zugeordneten Alt-Slots
+    (`ungrouped_slots`, nach Kategorie) und die noch verfügbaren Katalog-Gruppen
+    (`available_groups`).
     POST legt eine neue Baugruppe komplett an (ein Dialog = eine Baugruppe).
     """
+
+    ASSEMBLY_PREFETCH = (
+        "group__templates",
+        "slots__template",
+        "slots__components__checks",
+        "intervals__logs",
+        "periods",
+    )
 
     def get_bike(self) -> Bike:
         return get_object_or_404(
@@ -885,15 +996,23 @@ class BikeAssemblyListView(AthleteMixin, APIView):
         assemblies = (
             BikeAssembly.objects.filter(bike=bike, is_active=True)
             .select_related("group")
-            .prefetch_related(
-                "group__templates",
-                "slots__template",
-                "slots__components__checks",
-                "intervals__logs",
-            )
+            .prefetch_related(*self.ASSEMBLY_PREFETCH)
         )
         assembly_data = BikeAssemblySerializer(
             assemblies, many=True, context=context
+        ).data
+
+        # Abgezogen, aber nicht entsorgt — die Alternativen, zwischen denen der
+        # Wechsel-Dialog auswählen lässt.
+        parked = (
+            BikeAssembly.objects.filter(
+                bike=bike, is_active=False, retired_at__isnull=True
+            )
+            .select_related("group")
+            .prefetch_related(*self.ASSEMBLY_PREFETCH)
+        )
+        parked_data = BikeAssemblySerializer(
+            parked, many=True, context=dict(context)
         ).data
 
         ungrouped = (
@@ -918,6 +1037,7 @@ class BikeAssemblyListView(AthleteMixin, APIView):
         return Response(
             {
                 "assemblies": assembly_data,
+                "parked_assemblies": parked_data,
                 "ungrouped_slots": ungrouped_data,
                 "available_groups": available_data,
             }
@@ -945,21 +1065,25 @@ class BikeAssemblyListView(AthleteMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if BikeAssembly.objects.filter(bike=bike, group=group, is_active=True).exists():
-            return Response(
-                {
-                    "error": f"Für '{group.name}' ist bereits eine Baugruppe aktiv. "
-                    "Bitte 'Baugruppe tauschen' nutzen.",
-                    "code": "already_active",
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
         err = _validate_assembly_items(group, data)
         if err:
             return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
 
-        assembly = _build_assembly_from_request(bike, group, data)
+        # Mehrere Instanzen derselben Gruppe sind erlaubt (Sommer-/Winter-LRS),
+        # aber immer nur eine ist aufgezogen. Ohne explizites `activate` wird die
+        # neue Instanz geparkt angelegt, solange die Gruppe belegt ist — die
+        # bestehende soll nicht ungefragt verdrängt werden.
+        current = _active_sibling(bike, group)
+        requested = data.get("activate")
+        activate = (current is None) if requested is None else bool(requested)
+
+        with transaction.atomic():
+            if activate and current is not None:
+                _park_assembly(current)
+            assembly = _build_assembly_from_request(
+                bike, group, data, activate=activate
+            )
+
         return Response(
             BikeAssemblySerializer(
                 assembly, context={"bike_total_km": bike.total_distance_km}
@@ -987,7 +1111,109 @@ class BikeAssemblyDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView
                 "slots__template",
                 "slots__components__checks",
                 "intervals__logs",
+                "periods",
             )
+        )
+
+
+def _retire_assembly(assembly: BikeAssembly, on: datetime.date | None = None) -> None:
+    """
+    Baugruppe endgültig ausmustern (verkauft/entsorgt) — im Unterschied zum
+    Parken werden hier auch die Komponenten ausgebaut. `distance_at_retire` hält
+    den km-Stand fest, damit ein später erneuter Blick auf die Historie das Teil
+    korrekt abschneiden kann (siehe api/usage.py).
+    """
+    on = on or datetime.date.today()
+    period = assembly.ensure_open_period()
+    if period is not None:
+        period.close(on, assembly.bike.total_distance_km)
+
+    Component.objects.filter(slot__assembly=assembly, is_mounted=True).update(
+        is_mounted=False,
+        retired_at=on,
+        distance_at_retire=assembly.bike.total_distance_km,
+    )
+    assembly.is_active = False
+    assembly.retired_at = on
+    assembly.save(update_fields=["is_active", "retired_at", "updated_at"])
+
+
+class AssemblyActivateView(AthleteMixin, APIView):
+    """
+    POST /api/maintenance/assemblies/{pk}/activate/
+
+    Zieht eine geparkte Baugruppe auf (Winter-LRS montieren). Die bislang aktive
+    Instanz derselben `(bike, group)` wird dabei geparkt — nicht ausgemustert:
+    ihre Komponenten bleiben montiert, sie sammelt ab jetzt nur keine km und
+    keinen Wetter-Verschleiß mehr (siehe AssemblyUsagePeriod).
+    """
+
+    def post(self, request, pk):
+        assembly = get_object_or_404(
+            BikeAssembly.objects.select_related("group", "bike"),
+            pk=pk,
+            bike__athlete=self.get_athlete(),
+        )
+        bike = assembly.bike
+
+        if assembly.retired_at is not None:
+            return Response(
+                {
+                    "error": f"'{assembly.display_name}' ist ausgemustert und kann "
+                    "nicht wieder aufgezogen werden.",
+                    "code": "retired",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if assembly.is_active:
+            return Response(
+                BikeAssemblySerializer(
+                    assembly, context={"bike_total_km": bike.total_distance_km}
+                ).data
+            )
+
+        with transaction.atomic():
+            current = _active_sibling(bike, assembly.group)
+            if current is not None:
+                _park_assembly(current)
+            _mount_assembly(assembly)
+
+        # Bewusst kein Celery-Recompute: der abgezogene Satz wurde in
+        # `_park_assembly()` final durchgerechnet, und der neu aufgezogene hat
+        # seit seinem letzten Abziehen keine Fahrt mitgemacht — seine Zahlen
+        # stehen also schon richtig. Der nächste Ride-Import rechnet ohnehin neu.
+        return Response(
+            BikeAssemblySerializer(
+                assembly, context={"bike_total_km": bike.total_distance_km}
+            ).data
+        )
+
+
+class AssemblyRetireView(AthleteMixin, APIView):
+    """
+    POST /api/maintenance/assemblies/{pk}/retire/
+
+    Mustert eine Baugruppe endgültig aus (verkauft/entsorgt). Anders als beim
+    Parken werden die Komponenten ausgebaut; die Instanz bleibt als Historie
+    erhalten, taucht aber nicht mehr in der Wechsel-Auswahl auf.
+    """
+
+    def post(self, request, pk):
+        assembly = get_object_or_404(
+            BikeAssembly.objects.select_related("group", "bike"),
+            pk=pk,
+            bike__athlete=self.get_athlete(),
+        )
+        bike = assembly.bike
+
+        with transaction.atomic():
+            _retire_assembly(assembly)
+
+        return Response(
+            BikeAssemblySerializer(
+                assembly, context={"bike_total_km": bike.total_distance_km}
+            ).data
         )
 
 
@@ -995,11 +1221,13 @@ class AssemblySwapView(AthleteMixin, APIView):
     """
     POST /api/maintenance/assemblies/{pk}/swap/
 
-    Ersetzt die aktive Baugruppe: die alte Instanz wird deaktiviert (ihre
-    Komponenten ausgebaut), eine neue aktive Instanz derselben `group` wird mit
-    frischen Komponenten/Intervallen angelegt. Body identisch zu POST
-    /bikes/{id}/assemblies/ (group_id optional, wird aus der alten Instanz
-    übernommen).
+    "Teile erneuern": die alte Instanz wird ausgemustert (Komponenten ausgebaut),
+    eine neue aktive Instanz derselben `group` wird mit frischen Komponenten/
+    Intervallen angelegt. Body identisch zu POST /bikes/{id}/assemblies/
+    (group_id optional, wird aus der alten Instanz übernommen).
+
+    Nicht zu verwechseln mit `activate/`: dort wird zwischen zwei *bestehenden*
+    Sätzen gewechselt, hier wird der alte Satz durch neue Teile ersetzt.
     """
 
     def post(self, request, pk):
@@ -1020,13 +1248,7 @@ class AssemblySwapView(AthleteMixin, APIView):
             return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
-            Component.objects.filter(slot__assembly=old, is_mounted=True).update(
-                is_mounted=False, retired_at=datetime.date.today()
-            )
-            old.is_active = False
-            old.retired_at = datetime.date.today()
-            old.save()
-
+            _retire_assembly(old)
             new_assembly = _build_assembly_from_request(bike, group, data)
 
         return Response(
