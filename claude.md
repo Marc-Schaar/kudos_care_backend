@@ -256,11 +256,14 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   nicht bei 0. Die Tage-Achse altert ohnehin unverändert seit dem ursprünglichen `installed_at`
   weiter — exakt wie bei einer geparkten statt ausgebauten Baugruppe.
   `SpareComponentSerializer.prior_wear_km` zeigt den (voraussichtlichen) Carry-over-Wert schon
-  im Vorschlag an, bevor er tatsächlich übernommen wird. `_spare_components_by_template` wählt
-  je Template den zuletzt ausgebauten Kandidaten, bei gleichem Ausbau-Datum den mit der längeren
-  tatsächlichen Standzeit (nicht schlicht "zuletzt eingebaut") — sonst gewinnt ein am selben Tag
-  angelegtes und gleich wieder ausgebautes Teil gegen eins, das wochenlang gefahren wurde.
-  `_validate_assembly_items`
+  im Vorschlag an, bevor er tatsächlich übernommen wird. `_spare_components_for_bike` liefert
+  bewusst **alle** ausgebauten Kandidaten je Template, ohne auf einen zu reduzieren — ein Slot
+  kann mehrere frühere Teile gleichzeitig ausgebaut haben (z.B. mehrere historische Felgen auf
+  einem seit Jahren bestehenden, inzwischen ausgemusterten Slot), und keine Datums-Heuristik
+  ("zuletzt ausgebaut"/"zuletzt eingebaut"/"am längsten montiert") erriet zuverlässig "die eine
+  richtige" — mal gewann ein am selben Tag angelegtes Test-Artefakt, mal ein uralter
+  Platzhalter-Eintrag. Der Client (`AssemblyChecklistComponent`) zeigt bei mehr als einem
+  Kandidaten je Template ein Auswahlfeld statt zu raten. `_validate_assembly_items`
   prüft entsprechend, dass der referenzierte Slot/die referenzierte Component zum Bike und zum
   Template der Zeile gehört (und bei `existing_slot_id` zusätzlich ein montiertes Teil hat).
   Drei getrennte Aktionen auf einer Instanz, die man nicht verwechseln darf:
@@ -499,10 +502,12 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   `carried_over_wear_km` erhalten (macht bei Wiedermontage am eingefrorenen Stand weiter,
   nicht bei 0) während die Tage-Achse seit dem ursprünglichen Einbau ohnehin weiterzählt,
   Ablehnung bei noch montierter/fremder Bike-Component/Template-Mismatch, gegenseitiger
-  Ausschluss mit `existing_slot_id`, `_spare_components_by_template` bevorzugt bei gleichem
-  Ausbau-Datum die längere tatsächliche Standzeit statt "zuletzt eingebaut" —
-  Regressionstest für den Prod-Bug, bei dem ein ausgemustertes Teil (Mavic-Felge) nirgends
-  mehr als Übernahme-Vorschlag auftauchte), `CassetteBelongsToRearWheelGroupTests`
+  Ausschluss mit `existing_slot_id`) — Regressionstest für den Prod-Bug, bei dem ein
+  ausgemustertes Teil (Mavic-Felge) nirgends mehr als Übernahme-Vorschlag auftauchte,
+  `test_spare_components_lists_every_candidate_for_a_template` (mehrere ausgebaute Teile
+  desselben Templates fallen in `spare_components` nicht auf einen Kandidaten zusammen —
+  Regressionstest dafür, dass eine Datums-Heuristik dort regelmäßig danebenlag),
+  `CassetteBelongsToRearWheelGroupTests`
   (Regressionstest gegen die echten Migrations-Daten: Kassette gehört zu "Laufrad hinten",
   nicht mehr zu "Antrieb").
 - `app_maintenance/test_intervals.py`: `MaintenanceIntervalStatusTests` (km-/Tage-Ratio,

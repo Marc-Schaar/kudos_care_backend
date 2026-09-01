@@ -295,25 +295,26 @@ class AssemblyListTests(AssemblyTestBase):
         self.assertIn(self.rim.id, spares)
         self.assertEqual(spares[self.rim.id]["id"], rim.id)
 
-    def test_spare_components_prefers_actually_used_part_over_same_day_artifact(self):
+    def test_spare_components_lists_every_candidate_for_a_template(self):
         """
-        Regressionstest: bei zwei am selben Tag ausgebauten Teilen desselben
-        Templates darf nicht schlicht "zuletzt eingebaut" gewinnen — sonst
-        schlägt ein am selben Tag angelegtes und gleich wieder ausgebautes Teil
-        (z.B. ein Tippfehler-Fix) das eigentlich wochenlang gefahrene vor.
+        Regressionstest: mit mehreren ausgebauten Teilen desselben Templates
+        darf `spare_components` nicht auf einen einzigen Kandidaten
+        zusammenfallen (raten, welcher "der richtige" ist, schlägt bei
+        mehrdeutigen Altdaten regelmäßig fehl) — der Client soll stattdessen
+        aus allen wählen können.
         """
         # Zwei getrennte (ausgemusterte) Baugruppen-Instanzen, damit beide
         # Kandidaten je einen eigenen Slot fürs Template bekommen können
         # (uniq_assembly_template erlaubt nur einen Slot je Baugruppe+Template).
-        assembly_real = BikeAssembly.objects.create(
+        assembly_a = BikeAssembly.objects.create(
             bike=self.bike, group=self.wheel_group, is_active=False, retired_at=date.today()
         )
-        assembly_artifact = BikeAssembly.objects.create(
+        assembly_b = BikeAssembly.objects.create(
             bike=self.bike, group=self.wheel_group, is_active=False, retired_at=date.today()
         )
-        real_part = Component.objects.create(
+        mavic = Component.objects.create(
             slot=ComponentSlot.objects.create(
-                bike=self.bike, assembly=assembly_real, template=self.rim
+                bike=self.bike, assembly=assembly_a, template=self.rim
             ),
             brand="Mavic",
             model_name="Cosmic CX80",
@@ -323,22 +324,24 @@ class AssemblyListTests(AssemblyTestBase):
             retired_at=date.today(),
             distance_at_retire=90.0,
         )
-        Component.objects.create(
+        original = Component.objects.create(
             slot=ComponentSlot.objects.create(
-                bike=self.bike, assembly=assembly_artifact, template=self.rim
+                bike=self.bike, assembly=assembly_b, template=self.rim
             ),
-            brand="Tippfehler-Artefakt",
-            model_name="",
-            installed_at=date.today(),
-            distance_at_install=90.0,
+            brand="Devox",
+            model_name="Semi Aero",
+            installed_at=date(2013, 8, 31),
+            distance_at_install=0.0,
             is_mounted=False,
             retired_at=date.today(),
             distance_at_retire=90.0,
         )
 
         res = self.client.get(f"/api/maintenance/bikes/{self.bike.id}/assemblies/")
-        spares = {s["template"]: s for s in res.data["spare_components"]}
-        self.assertEqual(spares[self.rim.id]["id"], real_part.id)
+        rim_spare_ids = {
+            s["id"] for s in res.data["spare_components"] if s["template"] == self.rim.id
+        }
+        self.assertEqual(rim_spare_ids, {mavic.id, original.id})
 
     def test_assembly_km_counts_only_time_on_the_bike(self):
         """

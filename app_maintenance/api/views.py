@@ -841,43 +841,32 @@ def _active_sibling(bike: Bike, group: ComponentGroup) -> BikeAssembly | None:
     )
 
 
-def _spare_components_by_template(bike: Bike) -> dict[int, Component]:
+def _spare_components_for_bike(bike: Bike) -> list[Component]:
     """
-    Je Template die zuletzt ausgebaute, noch nicht wiederverwendete Component
-    dieses Bikes — Grundlage für den "vorhandene Komponente übernehmen"-
-    Vorschlag bei ausgebauten Teilen (im Unterschied zu `ungrouped_slots`, die
-    noch *montierte*, nur noch nicht gruppierte Alt-Teile abdecken). Ein Teil
-    bleibt beim Ausbau immer an seinem alten Slot hängen (`is_mounted=False`),
+    Alle ausgebauten, noch nicht wiederverwendeten Components dieses Bikes —
+    Grundlage für den "vorhandene Komponente übernehmen"-Vorschlag bei
+    ausgebauten Teilen (im Unterschied zu `ungrouped_slots`, die noch
+    *montierte*, nur noch nicht gruppierte Alt-Teile abdecken). Ein Teil bleibt
+    beim Ausbau immer an seinem alten Slot hängen (`is_mounted=False`),
     unabhängig davon, ob dessen Baugruppe noch aktiv/geparkt/ausgemustert ist —
     ein zurückgelegter Laufradsatz-Teil ist genauso ein Kandidat wie einer aus
     einer längst ausgemusterten Baugruppe.
 
-    Sortierung je Template: zuletzt ausgebaut zuerst, bei gleichem Ausbau-Datum
-    entscheidet die tatsächliche Standzeit (`retired_at - installed_at`) statt
-    schlicht "zuletzt eingebaut" — sonst gewinnt ein am selben Tag angelegtes
-    und gleich wieder ausgebautes Teil gegen eins, das wochenlang gefahren wurde.
+    Bewusst **keine** Reduktion auf einen Kandidaten je Template mehr: bei
+    einem länger genutzten Slot können mehrere frühere Teile gleichzeitig
+    ausgebaut sein (z.B. drei historische Felgen auf einem seit Jahren
+    bestehenden, inzwischen ausgemusterten Slot), und keine Datums-Heuristik
+    errät zuverlässig "die eine richtige" — das führte zu falschen
+    Vorschlägen (mal gewann ein am selben Tag angelegtes Test-Artefakt, mal
+    ein uralter Platzhalter-Eintrag). Der Client zeigt bei mehreren Treffern
+    je Template eine Auswahl an, sortiert hier nur als sinnvoller Default
+    (zuletzt ausgebaut zuerst).
     """
-    spares = Component.objects.filter(
-        slot__bike=bike, is_mounted=False
-    ).select_related("slot__template")
-
-    def sort_key(comp: Component):
-        mounted_days = (
-            (comp.retired_at - comp.installed_at).days
-            if comp.retired_at and comp.installed_at
-            else 0
-        )
-        return (
-            comp.retired_at or datetime.date.min,
-            mounted_days,
-            comp.installed_at or datetime.date.min,
-            comp.id,
-        )
-
-    by_template: dict[int, Component] = {}
-    for comp in sorted(spares, key=sort_key, reverse=True):
-        by_template.setdefault(comp.slot.template_id, comp)
-    return by_template
+    return list(
+        Component.objects.filter(slot__bike=bike, is_mounted=False)
+        .select_related("slot__template")
+        .order_by("-retired_at", "-id")
+    )
 
 
 def _build_assembly_from_request(
@@ -1210,7 +1199,7 @@ class BikeAssemblyListView(AthleteMixin, APIView):
         ).data
 
         spare_data = SpareComponentSerializer(
-            list(_spare_components_by_template(bike).values()), many=True
+            _spare_components_for_bike(bike), many=True
         ).data
 
         used_group_ids = set(assemblies.values_list("group_id", flat=True))
