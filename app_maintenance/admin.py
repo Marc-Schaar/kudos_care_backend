@@ -33,11 +33,11 @@ class BikeAssemblyAdmin(admin.ModelAdmin):
         "bike",
         "display_name",
         "group",
-        "is_active",
+        "status",
         "installed_at",
         "retired_at",
     ]
-    list_filter = ["is_active", "group", "bike__bike_type"]
+    list_filter = ["status", "group", "bike__bike_type"]
     search_fields = ["name", "bike__name", "group__name"]
     raw_id_fields = ["bike"]
     inlines = [AssemblySlotInline]

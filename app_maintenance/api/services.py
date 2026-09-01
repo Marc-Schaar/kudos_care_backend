@@ -11,7 +11,7 @@ from app_maintenance.models import (
     ComponentSlot,
     WeatherSensitivityCoefficient,
 )
-from ..models import WarnLevel
+from ..models import AssemblyStatus, WarnLevel
 from .serializers import compute_wear
 from .usage import component_date_windows, date_in_windows
 
@@ -243,7 +243,8 @@ class WeatherWearService:
         ).select_related("slot__template", "slot__assembly")
         if not include_parked:
             components = components.filter(
-                Q(slot__assembly__isnull=True) | Q(slot__assembly__is_active=True)
+                Q(slot__assembly__isnull=True)
+                | Q(slot__assembly__status=AssemblyStatus.ACTIVE)
             )
         count = 0
         for component in components:

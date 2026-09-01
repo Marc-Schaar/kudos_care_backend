@@ -98,11 +98,22 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `recommended` steuern UI-Filter + den Neu-Bike-Stepper; bewusst generisch, weitere
   Gruppen rein über Admin/Migration anlegbar; voller Satz in Migration `0016` geseedet),
   `BikeAssembly` (per-Bike-Instanz einer `ComponentGroup`: eigener `name`, `installed_at`,
-  `is_active` — **mehrere Instanzen je `(bike, group)` sind erlaubt** (Sommer-/Winter-LRS),
-  aber max. eine *aktive*, via `clean()` erzwungen. Drei Zustände aus zwei Feldern:
-  `is_active=True` = am Rad; `is_active=False, retired_at=None` = **geparkt** (abgezogen,
-  Komponenten bleiben `is_mounted=True`, weil sie ja weiter auf dem Laufradsatz sitzen);
-  `retired_at` gesetzt = ausgemustert (Komponenten ausgebaut). `compute_km()`/
+  `status` — **mehrere Instanzen je `(bike, group)` sind erlaubt** (Sommer-/Winter-LRS),
+  aber max. eine *aktive*. Der Zustand steckt in **einem** Feld
+  (`AssemblyStatus`: `active` = am Rad; `parked` = abgezogen, aber nicht entsorgt —
+  Komponenten bleiben `is_mounted=True`, weil sie ja weiter auf dem Laufradsatz sitzen;
+  `retired` = ausgemustert, Komponenten ausgebaut, `retired_at` hält das Datum). Bis
+  Migration `0022` war das eine Kodierung über zwei Felder (`is_active` + `retired_at`),
+  die jede Lesestelle kennen musste. `is_active`/`is_parked`/`is_retired` sind seither
+  abgeleitete Properties — im API-Response bleiben `is_active`/`is_parked` erhalten, weil
+  das Frontend-Model sie voraussetzt. Die Invariante hängt jetzt an einem **partiellen
+  Unique-Constraint** (`uniq_active_assembly_per_bike_group`, `condition=status=active`);
+  `clean()` liefert nur noch die verständlichere Meldung, garantiert aber nichts — es lief
+  nie gegen eine Race zwischen zwei Requests. `status`/`retired_at` sind über
+  `PATCH assemblies/<id>/` bewusst **read-only**: ein Wechsel muss über
+  `activate`/`retire`/`swap` laufen, sonst bliebe die `AssemblyUsagePeriod` offen und der
+  abgezogene Satz sammelte weiter km. `BikeAssembly.objects.active()`/`.parked()` als
+  Queryset-Helfer; `compute_km()`/
   `worst_status()`/`is_parked`/`open_period()`/`ensure_open_period()` als Fat-Model-Methoden),
   `AssemblyUsagePeriod` (Zeitraum, in dem eine Baugruppe tatsächlich am Rad war:
   `started_at`/`started_distance_km` + `ended_at`/`ended_distance_km`, offene Periode =
@@ -488,6 +499,12 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   Kernfälle: Parklücke fällt aus den km- und Datums-Fenstern, Fallback ohne Baugruppe/ohne
   Perioden entspricht exakt dem früheren Verhalten, `since_km`-Baseline nach einer Freigabe,
   frisch montiertes Teil = 0 km (nicht `unknown`).
+- `app_maintenance/test_assemblies.py` (Auszug): `AssemblyStatusFieldTests` — die drei
+  Properties lesen aus `status`; der partielle Unique-Constraint greift auch dann, wenn
+  `clean()` gar nicht läuft (Test setzt per `.update()` eine zweite Instanz auf `active`
+  und erwartet `IntegrityError`); mehrere `parked`/`retired` je Gruppe bleiben erlaubt;
+  `status` ist per PATCH nicht schreibbar; `is_active`/`is_parked` stehen weiter im
+  Response.
 - `app_maintenance/test_query_counts.py`: `QueryScalingTests` — Regressionstests gegen
   N+1. Bewusst **keine** festen Query-Zahlen (die wären bei jeder Serializer-Änderung rot),
   sondern die Invariante: dieselbe Route mit 3 und mit 15 Slots muss gleich viele Queries

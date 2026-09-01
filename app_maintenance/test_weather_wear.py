@@ -17,6 +17,7 @@ from app_maintenance.api.services import (
 )
 from app_maintenance.api.tasks import recompute_weather_wear_for_bike
 from app_maintenance.models import (
+    AssemblyStatus,
     AssemblyUsagePeriod,
     Bike,
     BikeAssembly,
@@ -738,7 +739,7 @@ class WeatherWearParkedAssemblyTests(APITestCase):
             ended_at=date.today() - timedelta(days=60),
             ended_distance_km=40.0,
         )
-        self.assembly.is_active = False
+        self.assembly.status = AssemblyStatus.PARKED
         self.assembly.save()
 
         self.assertEqual(WeatherWearService.recompute_bike(self.bike), 0)

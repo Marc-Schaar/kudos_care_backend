@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 
 from app_auth.models import StravaProfile
 from app_maintenance.models import (
+    AssemblyStatus,
     AssemblyUsagePeriod,
     Bike,
     BikeAssembly,
@@ -648,7 +649,7 @@ def _odometer_at(bike: Bike, day: datetime.date) -> float | None:
 def _park_assembly(assembly: BikeAssembly, on: datetime.date | None = None) -> None:
     """
     Baugruppe abziehen, ohne sie auszumustern: laufende Nutzungsperiode schließen,
-    `is_active=False`, `retired_at` bleibt None. Die Komponenten bleiben
+    `status=PARKED`, `retired_at` bleibt None. Die Komponenten bleiben
     `is_mounted=True` — sie sitzen ja weiter auf dem Laufradsatz, nur der Satz ist
     nicht mehr am Rad. Vor dem Parken wird der Wetter-Verschleiß ein letztes Mal
     final berechnet, danach ändert er sich nicht mehr.
@@ -663,8 +664,8 @@ def _park_assembly(assembly: BikeAssembly, on: datetime.date | None = None) -> N
     if period is not None:
         period.close(on, assembly.bike.total_distance_km)
 
-    assembly.is_active = False
-    assembly.save(update_fields=["is_active", "updated_at"])
+    assembly.status = AssemblyStatus.PARKED
+    assembly.save(update_fields=["status", "updated_at"])
 
     for component in Component.objects.filter(
         slot__assembly=assembly, is_mounted=True
@@ -685,9 +686,9 @@ def _mount_assembly(assembly: BikeAssembly, on: datetime.date | None = None) -> 
     `(bike, group)` mehr aktiv ist (siehe `BikeAssembly.clean()`).
     """
     on = on or datetime.date.today()
-    assembly.is_active = True
+    assembly.status = AssemblyStatus.ACTIVE
     assembly.retired_at = None
-    assembly.save(update_fields=["is_active", "retired_at", "updated_at"])
+    assembly.save(update_fields=["status", "retired_at", "updated_at"])
 
     if assembly.open_period() is None:
         AssemblyUsagePeriod.objects.create(
@@ -700,7 +701,8 @@ def _mount_assembly(assembly: BikeAssembly, on: datetime.date | None = None) -> 
 def _active_sibling(bike: Bike, group: ComponentGroup) -> BikeAssembly | None:
     """Die aktuell aufgezogene Instanz derselben Baugruppe an diesem Bike."""
     return (
-        BikeAssembly.objects.filter(bike=bike, group=group, is_active=True)
+        BikeAssembly.objects.filter(bike=bike, group=group)
+        .active()
         .select_related("bike", "group")
         .first()
     )
@@ -784,7 +786,7 @@ def _build_assembly_from_request(
             group=group,
             name=data.get("name", "") or "",
             installed_at=installed_at,
-            is_active=activate,
+            status=(AssemblyStatus.ACTIVE if activate else AssemblyStatus.PARKED),
         )
         assembly.save()
 
@@ -1034,7 +1036,8 @@ class BikeAssemblyListView(AthleteMixin, APIView):
         context = {"bike_total_km": bike.total_distance_km}
 
         assemblies = (
-            BikeAssembly.objects.filter(bike=bike, is_active=True)
+            BikeAssembly.objects.filter(bike=bike)
+            .active()
             .select_related("group")
             .prefetch_related(*self.ASSEMBLY_PREFETCH)
         )
@@ -1045,9 +1048,8 @@ class BikeAssemblyListView(AthleteMixin, APIView):
         # Abgezogen, aber nicht entsorgt — die Alternativen, zwischen denen der
         # Wechsel-Dialog auswählen lässt.
         parked = (
-            BikeAssembly.objects.filter(
-                bike=bike, is_active=False, retired_at__isnull=True
-            )
+            BikeAssembly.objects.filter(bike=bike)
+            .parked()
             .select_related("group")
             .prefetch_related(*self.ASSEMBLY_PREFETCH)
         )
@@ -1142,7 +1144,12 @@ class BikeAssemblyListView(AthleteMixin, APIView):
 class BikeAssemblyDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
     """
     GET    /api/maintenance/assemblies/{pk}/
-    PATCH  /api/maintenance/assemblies/{pk}/   → name / installed_at / retired_at / is_active
+    PATCH  /api/maintenance/assemblies/{pk}/   → name / installed_at
+
+    Der Zustand (`status`) ist hier bewusst **nicht** schreibbar: ein Wechsel
+    muss über activate/retire/swap laufen, weil sonst die
+    `AssemblyUsagePeriod`-Buchführung ausbliebe und ein abgezogener Satz
+    weiter km sammeln würde.
     DELETE /api/maintenance/assemblies/{pk}/
     """
 
@@ -1181,9 +1188,9 @@ def _retire_assembly(assembly: BikeAssembly, on: datetime.date | None = None) ->
         retired_at=on,
         distance_at_retire=assembly.bike.total_distance_km,
     )
-    assembly.is_active = False
+    assembly.status = AssemblyStatus.RETIRED
     assembly.retired_at = on
-    assembly.save(update_fields=["is_active", "retired_at", "updated_at"])
+    assembly.save(update_fields=["status", "retired_at", "updated_at"])
 
 
 class AssemblyActivateView(AthleteMixin, APIView):
@@ -1204,7 +1211,7 @@ class AssemblyActivateView(AthleteMixin, APIView):
         )
         bike = assembly.bike
 
-        if assembly.retired_at is not None:
+        if assembly.is_retired:
             return Response(
                 {
                     "error": f"'{assembly.display_name}' ist ausgemustert und kann "

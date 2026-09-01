@@ -17,6 +17,7 @@ from app_dashboard.api.wind import (
 )
 from app_maintenance.api.services import WeatherWearService
 from app_maintenance.models import (
+    AssemblyStatus,
     Bike,
     BikeAssembly,
     BikeType,
@@ -165,7 +166,10 @@ class Command(BaseCommand):
                 continue
 
             assembly, created = BikeAssembly.objects.get_or_create(
-                bike=bike, group=group, is_active=True, defaults={"name": ""}
+                bike=bike,
+                group=group,
+                status=AssemblyStatus.ACTIVE,
+                defaults={"name": ""},
             )
             if not created:
                 continue

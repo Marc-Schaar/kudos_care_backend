@@ -732,6 +732,11 @@ class ComponentGroupSerializer(serializers.ModelSerializer[ComponentGroup]):
 class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
     group_detail = ComponentGroupSerializer(source="group", read_only=True)
     display_name = serializers.CharField(read_only=True)
+    # Seit `status` das einzige Zustandsfeld ist, sind beide abgeleitete
+    # Properties. Sie bleiben im Response, weil das Frontend-Model sie
+    # voraussetzt; schreibbar war ohnehin nur `status`-freier Kram (siehe
+    # BikeAssemblyDetailView).
+    is_active = serializers.BooleanField(read_only=True)
     is_parked = serializers.BooleanField(read_only=True)
     slots = serializers.SerializerMethodField()
     intervals = serializers.SerializerMethodField()
@@ -750,6 +755,7 @@ class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
             "display_name",
             "installed_at",
             "retired_at",
+            "status",
             "is_active",
             "is_parked",
             "last_used_at",
@@ -760,7 +766,17 @@ class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["bike", "group", "created_at", "updated_at"]
+        # `status`/`retired_at` bewusst read-only: ein Zustandswechsel muss über
+        # activate/retire/swap laufen. Per PATCH gesetzt bliebe die
+        # AssemblyUsagePeriod offen und der abgezogene Satz sammelte weiter km.
+        read_only_fields = [
+            "bike",
+            "group",
+            "status",
+            "retired_at",
+            "created_at",
+            "updated_at",
+        ]
 
     def _bike_total_km(self, obj: BikeAssembly) -> float | None:
         return bike_total_km(cast(dict, self.context), obj.bike)

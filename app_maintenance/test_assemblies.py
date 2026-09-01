@@ -2,6 +2,7 @@ from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
@@ -11,6 +12,7 @@ from app_auth.models import StravaProfile
 from app_dashboard.models import Ride
 from app_maintenance.api.serializers import compute_wear
 from app_maintenance.models import (
+    AssemblyStatus,
     Bike,
     BikeAssembly,
     BikeType,
@@ -243,10 +245,113 @@ class AssemblyCreateTests(AssemblyTestBase):
 
     def test_model_enforces_single_active_per_group(self):
         BikeAssembly.objects.create(
-            bike=self.bike, group=self.wheel_group, is_active=True
+            bike=self.bike, group=self.wheel_group, status=AssemblyStatus.ACTIVE
         )
         with self.assertRaises(ValidationError):
-            BikeAssembly(bike=self.bike, group=self.wheel_group, is_active=True).save()
+            BikeAssembly(
+                bike=self.bike,
+                group=self.wheel_group,
+                status=AssemblyStatus.ACTIVE,
+            ).save()
+
+
+class AssemblyStatusFieldTests(AssemblyTestBase):
+    """
+    Der Zustand steckt in einem Feld (`status`), nicht mehr in der Kombination
+    `is_active` + `retired_at`. Die drei Properties lesen daraus, und die
+    Invariante "höchstens eine aufgezogene Instanz je (bike, group)" hängt
+    nicht mehr allein an `clean()`, sondern an einem partiellen
+    Unique-Constraint in der DB.
+    """
+
+    def test_properties_derive_from_status(self):
+        assembly = BikeAssembly.objects.create(
+            bike=self.bike, group=self.wheel_group, status=AssemblyStatus.ACTIVE
+        )
+        self.assertEqual(
+            (assembly.is_active, assembly.is_parked, assembly.is_retired),
+            (True, False, False),
+        )
+
+        assembly.status = AssemblyStatus.PARKED
+        self.assertEqual(
+            (assembly.is_active, assembly.is_parked, assembly.is_retired),
+            (False, True, False),
+        )
+
+        assembly.status = AssemblyStatus.RETIRED
+        self.assertEqual(
+            (assembly.is_active, assembly.is_parked, assembly.is_retired),
+            (False, False, True),
+        )
+
+    def test_database_rejects_a_second_active_instance(self):
+        """
+        Der Constraint muss auch greifen, wenn `clean()` gar nicht läuft — genau
+        das konnte die alte reine `clean()`-Prüfung nicht (zwei parallele
+        Requests, Admin-Bulk-Update, Datenmigration).
+        """
+        BikeAssembly.objects.create(
+            bike=self.bike, group=self.wheel_group, status=AssemblyStatus.ACTIVE
+        )
+        parked = BikeAssembly.objects.create(
+            bike=self.bike, group=self.wheel_group, status=AssemblyStatus.PARKED
+        )
+        with self.assertRaises(IntegrityError):
+            # .update() umgeht save()/full_clean() vollständig.
+            BikeAssembly.objects.filter(pk=parked.pk).update(
+                status=AssemblyStatus.ACTIVE
+            )
+
+    def test_several_parked_and_retired_instances_are_allowed(self):
+        """Der Constraint ist partiell — nur `active` ist limitiert."""
+        BikeAssembly.objects.create(
+            bike=self.bike, group=self.wheel_group, status=AssemblyStatus.ACTIVE
+        )
+        for _ in range(2):
+            BikeAssembly.objects.create(
+                bike=self.bike, group=self.wheel_group, status=AssemblyStatus.PARKED
+            )
+            BikeAssembly.objects.create(
+                bike=self.bike,
+                group=self.wheel_group,
+                status=AssemblyStatus.RETIRED,
+                retired_at=date.today(),
+            )
+        self.assertEqual(
+            BikeAssembly.objects.filter(bike=self.bike, group=self.wheel_group).count(),
+            5,
+        )
+
+    def test_status_is_not_writable_through_patch(self):
+        """
+        Ein Zustandswechsel muss über activate/retire/swap laufen: per PATCH
+        gesetzt bliebe die AssemblyUsagePeriod offen und der abgezogene Satz
+        sammelte weiter km.
+        """
+        assembly = BikeAssembly.objects.create(
+            bike=self.bike, group=self.wheel_group, status=AssemblyStatus.ACTIVE
+        )
+        res = self.client.patch(
+            f"/api/maintenance/assemblies/{assembly.id}/",
+            {"status": AssemblyStatus.PARKED, "name": "Umbenannt"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        assembly.refresh_from_db()
+        self.assertEqual(assembly.status, AssemblyStatus.ACTIVE)
+        self.assertEqual(assembly.name, "Umbenannt")
+
+    def test_serializer_still_exposes_the_derived_flags(self):
+        """Das Frontend-Model setzt `is_active`/`is_parked` weiterhin voraus."""
+        assembly = BikeAssembly.objects.create(
+            bike=self.bike, group=self.wheel_group, status=AssemblyStatus.PARKED
+        )
+        res = self.client.get(f"/api/maintenance/assemblies/{assembly.id}/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["status"], AssemblyStatus.PARKED)
+        self.assertFalse(res.data["is_active"])
+        self.assertTrue(res.data["is_parked"])
 
 
 class AssemblyListTests(AssemblyTestBase):
@@ -307,10 +412,16 @@ class AssemblyListTests(AssemblyTestBase):
         # Kandidaten je einen eigenen Slot fürs Template bekommen können
         # (uniq_assembly_template erlaubt nur einen Slot je Baugruppe+Template).
         assembly_a = BikeAssembly.objects.create(
-            bike=self.bike, group=self.wheel_group, is_active=False, retired_at=date.today()
+            bike=self.bike,
+            group=self.wheel_group,
+            status=AssemblyStatus.RETIRED,
+            retired_at=date.today(),
         )
         assembly_b = BikeAssembly.objects.create(
-            bike=self.bike, group=self.wheel_group, is_active=False, retired_at=date.today()
+            bike=self.bike,
+            group=self.wheel_group,
+            status=AssemblyStatus.RETIRED,
+            retired_at=date.today(),
         )
         mavic = Component.objects.create(
             slot=ComponentSlot.objects.create(
@@ -339,7 +450,9 @@ class AssemblyListTests(AssemblyTestBase):
 
         res = self.client.get(f"/api/maintenance/bikes/{self.bike.id}/assemblies/")
         rim_spare_ids = {
-            s["id"] for s in res.data["spare_components"] if s["template"] == self.rim.id
+            s["id"]
+            for s in res.data["spare_components"]
+            if s["template"] == self.rim.id
         }
         self.assertEqual(rim_spare_ids, {mavic.id, original.id})
 
@@ -432,7 +545,7 @@ class AssemblySwapTests(AssemblyTestBase):
         self.assertNotEqual(new_id, old_id)
         self.assertEqual(
             BikeAssembly.objects.filter(
-                bike=self.bike, group=self.wheel_group, is_active=True
+                bike=self.bike, group=self.wheel_group, status=AssemblyStatus.ACTIVE
             ).count(),
             1,
         )
@@ -457,7 +570,7 @@ class AssemblySwapTests(AssemblyTestBase):
         )
         self.assertEqual(
             BikeAssembly.objects.filter(
-                bike=self.bike, group=self.wheel_group, is_active=False
+                bike=self.bike, group=self.wheel_group, status=AssemblyStatus.RETIRED
             ).count(),
             1,
         )
@@ -512,7 +625,7 @@ class AssemblyActivateTests(AssemblyTestBase):
 
         self.assertEqual(
             BikeAssembly.objects.filter(
-                bike=self.bike, group=self.wheel_group, is_active=True
+                bike=self.bike, group=self.wheel_group, status=AssemblyStatus.ACTIVE
             ).count(),
             1,
         )
@@ -659,7 +772,7 @@ class ParkedAssemblyWearTests(AssemblyTestBase):
         slot_ids = {s["id"] for s in res.data["slots"]}
         parked_slot_ids = set(
             ComponentSlot.objects.filter(
-                assembly__bike=self.bike, assembly__is_active=False
+                assembly__bike=self.bike, assembly__status=AssemblyStatus.PARKED
             ).values_list("id", flat=True)
         )
         self.assertTrue(parked_slot_ids)
@@ -973,7 +1086,7 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
         old_assembly = BikeAssembly.objects.create(
             bike=self.bike,
             group=self.wheel_group,
-            is_active=False,
+            status=AssemblyStatus.RETIRED,
             retired_at=date.today() - timedelta(days=1),
         )
         slot = ComponentSlot.objects.create(
@@ -991,9 +1104,7 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
         )
 
     def test_reuse_remounts_component_into_a_fresh_slot(self):
-        spare = self._spare_component(
-            self.rim, date.today() - timedelta(days=20), 10.0
-        )
+        spare = self._spare_component(self.rim, date.today() - timedelta(days=20), 10.0)
 
         payload = self._create_payload()
         payload["parts"][1] = {
@@ -1028,9 +1139,7 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
         draufaddiert — die km-Achse macht also bei 80 weiter, nicht bei 0. Die
         Tage-Achse altert ohnehin unverändert seit dem ursprünglichen Einbau.
         """
-        spare = self._spare_component(
-            self.rim, date.today() - timedelta(days=20), 10.0
-        )
+        spare = self._spare_component(self.rim, date.today() - timedelta(days=20), 10.0)
 
         payload = self._create_payload()
         payload["parts"][1] = {

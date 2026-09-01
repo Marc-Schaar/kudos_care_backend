@@ -329,14 +329,37 @@ class ComponentTemplate(models.Model):
         return bike_type in self.applicable_bike_types
 
 
+class AssemblyStatus(models.TextChoices):
+    """
+    Die drei Zustände einer Baugruppe. Stand früher als Kombination aus
+    `is_active` + `retired_at` in zwei Feldern, was jede Lesestelle gezwungen
+    hat, die Kodierung zu kennen (`is_active=False, retired_at=None` = geparkt).
+    """
+
+    ACTIVE = "active", "Aufgezogen"
+    PARKED = "parked", "Geparkt"
+    RETIRED = "retired", "Ausgemustert"
+
+
+class BikeAssemblyQuerySet(models.QuerySet):
+    def active(self) -> "BikeAssemblyQuerySet":
+        """Aktuell am Rad."""
+        return self.filter(status=AssemblyStatus.ACTIVE)
+
+    def parked(self) -> "BikeAssemblyQuerySet":
+        """Abgezogen, aber nicht ausgemustert — die Wechsel-Alternativen."""
+        return self.filter(status=AssemblyStatus.PARKED)
+
+
 class BikeAssembly(models.Model):
     """
     Instanz einer Baugruppe (ComponentGroup) an einem konkreten Bike, z.B.
     "Laufrad vorne" oder – vom User umbenannt – "Sommer-LRS". Bündelt die
     zugehörigen `ComponentSlot`s. Pro `(bike, group)` darf höchstens eine
-    Instanz aktiv sein (`is_active`, erzwungen in `clean()`); inaktive Instanzen
-    bleiben als Wechsel-Historie erhalten. Gleichzeitige Baugruppen
-    unterschiedlicher `group` sind natürlich erlaubt.
+    Instanz `status=ACTIVE` sein — erzwungen durch einen partiellen
+    Unique-Constraint in der DB, nicht nur durch `clean()`; die übrigen bleiben
+    als Wechsel-Historie erhalten. Gleichzeitige Baugruppen unterschiedlicher
+    `group` sind natürlich erlaubt.
     """
 
     bike = models.ForeignKey(
@@ -359,15 +382,36 @@ class BikeAssembly(models.Model):
         blank=True,
         help_text="Wann diese Baugruppe (zuletzt komplett) montiert wurde.",
     )
-    retired_at = models.DateField(null=True, blank=True)
-    is_active = models.BooleanField(default=True)
+    retired_at = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Tag des Ausmusterns. Nur bei status=retired gesetzt.",
+    )
+    status = models.CharField(
+        max_length=10,
+        choices=AssemblyStatus.choices,
+        default=AssemblyStatus.ACTIVE,
+        db_index=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = BikeAssemblyQuerySet.as_manager()
 
     class Meta:
         ordering = ["group__sort_order", "group__name", "-created_at"]
         verbose_name = "Baugruppe (Bike-Instanz)"
         verbose_name_plural = "Baugruppen (Bike-Instanzen)"
+        constraints = [
+            # Die eigentliche Garantie: höchstens eine aufgezogene Instanz je
+            # (bike, group). `clean()` liefert nur die freundlichere Meldung und
+            # kann eine Race zwischen zwei parallelen Requests nicht verhindern.
+            models.UniqueConstraint(
+                fields=["bike", "group"],
+                condition=models.Q(status=AssemblyStatus.ACTIVE),
+                name="uniq_active_assembly_per_bike_group",
+            ),
+        ]
 
     if TYPE_CHECKING:
         id: int
@@ -383,13 +427,23 @@ class BikeAssembly(models.Model):
         return self.name or self.group.name
 
     @property
+    def is_active(self) -> bool:
+        """Aktuell am Rad."""
+        return self.status == AssemblyStatus.ACTIVE
+
+    @property
     def is_parked(self) -> bool:
         """
         Abgezogen, aber nicht entsorgt — z.B. der Sommer-LRS im Keller. Die
         Komponenten bleiben `is_mounted=True` (sie sitzen ja weiter auf dem
         Laufrad), nur die Baugruppe ist gerade nicht am Rad.
         """
-        return not self.is_active and self.retired_at is None
+        return self.status == AssemblyStatus.PARKED
+
+    @property
+    def is_retired(self) -> bool:
+        """Verkauft/entsorgt — die Komponenten wurden ausgebaut."""
+        return self.status == AssemblyStatus.RETIRED
 
     def open_period(self) -> "AssemblyUsagePeriod | None":
         """Die laufende (noch nicht beendete) Nutzungsperiode, falls montiert."""
@@ -437,10 +491,14 @@ class BikeAssembly(models.Model):
         )
 
     def clean(self):
+        # Doppelt zum DB-Constraint (siehe Meta), aber mit verständlicher
+        # Meldung statt IntegrityError — die API gibt sie als 400 weiter.
         if self.is_active:
-            qs = BikeAssembly.objects.filter(
-                bike=self.bike, group=self.group, is_active=True
-            ).exclude(pk=self.pk)
+            qs = (
+                BikeAssembly.objects.filter(bike=self.bike, group=self.group)
+                .active()
+                .exclude(pk=self.pk)
+            )
             if qs.exists():
                 raise ValidationError(
                     f"Für '{self.group.name}' an diesem Bike ist bereits eine "
@@ -508,7 +566,7 @@ class AssemblyUsagePeriod(models.Model):
     Dichtmilch altern auch im Keller), Perioden gelten also nur für km/Wetter.
 
     Offene Periode (`ended_at is None`) = aktuell montiert. Es gibt höchstens
-    eine offene Periode je Baugruppe, und nur bei `is_active=True`.
+    eine offene Periode je Baugruppe, und nur bei `status=active`.
     """
 
     assembly = models.ForeignKey(
@@ -583,7 +641,8 @@ class ComponentSlotQuerySet(models.QuerySet):
         Zustandsbericht und Warn-E-Mails aus.
         """
         return self.filter(bike=bike).filter(
-            models.Q(assembly__isnull=True) | models.Q(assembly__is_active=True)
+            models.Q(assembly__isnull=True)
+            | models.Q(assembly__status=AssemblyStatus.ACTIVE)
         )
 
 
