@@ -226,7 +226,15 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `group.templates` geprüft, Bike-Typ-Mismatch → 400. Ist für die Gruppe **bereits eine
   Instanz aufgezogen, entsteht die neue geparkt** (kein 409 mehr) — die bestehende soll nicht
   ungefragt verdrängt werden; das optionale Body-Feld `activate: true` erzwingt den direkten
-  Wechsel.
+  Wechsel. Ein Part-Item kann statt `brand`/`model_name` ein `existing_slot_id` mitgeben —
+  eine bereits vorhandene, noch ungruppierte `ComponentSlot` (typischerweise ein Alt-Teil aus
+  `ungrouped_slots`) wird dann per Slot-Umhängen in die neue Baugruppe übernommen statt eine
+  neue `Component` anzulegen. Damit der Verlauf des übernommenen Teils dabei nicht durch die
+  neue `AssemblyUsagePeriod` abgeschnitten wird (siehe `api/usage.py`), zieht
+  `_build_assembly_from_request` den Periodenbeginn automatisch auf das früheste
+  Einbaudatum/km unter allen übernommenen Teilen zurück — neu angelegte Teile bleiben beim
+  gemeinsamen `installed_at`. `_validate_assembly_items` prüft dafür zusätzlich, dass der Slot
+  zum Bike, zum Template der Zeile gehört und ein montiertes Teil hat.
   Drei getrennte Aktionen auf einer Instanz, die man nicht verwechseln darf:
   `POST assemblies/<id>/activate/` **wechselt** zwischen zwei vorhandenen Sätzen (der bisher
   aufgezogene wird geparkt, seine Teile bleiben montiert),
@@ -239,7 +247,12 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `POST bikes/<id>/slots/` (freies Einzel-Slot-Anlegen) entfällt für den Client — Slots
   entstehen nur über den Baugruppen-Create; `GET` bleibt. Katalog + Zuordnung aller
   System-Templates zu Gruppen in Migration `0016`, Backfill bestehender Slots →
-  `BikeAssembly`/`MaintenanceInterval` (erzwungen) in `0017`.
+  `BikeAssembly`/`MaintenanceInterval` (erzwungen) in `0017`. Kassette gehört seit
+  Migration `0020` zur Gruppe "Laufrad hinten" (nicht mehr "Antrieb") — sie sitzt physisch
+  auf dem Freilaufkörper und wird beim Laufradwechsel typischerweise mitgetauscht, taucht
+  also jetzt bei `assemblies/<id>/activate|swap/` auf "Laufrad hinten" mit auf. `0020` hängt
+  dafür auch bestehende Kassette-Slots in den aktiven "Laufrad hinten"-Satz desselben Bikes
+  um; ohne aktiven Satz bleibt der Slot ungruppiert statt eine Baugruppe zu erzwingen.
   Endpoints unter `/api/maintenance/`: `assistant/models/`,
   `bikes/<id>/assistant/setup/`, `bikes/`, `bikes/<id>/condition-report/`,
   `groups/`, `bikes/<id>/assemblies/` (GET/POST), `assemblies/<id>/` (PATCH/DELETE),
@@ -433,7 +446,13 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   geparkter Satz sammelt keine km, altert aber weiter in Tagen; seine Slots verschwinden aus
   der Bike-Übersicht), `LegacyAssemblyWithoutPeriodsTests` (Baugruppen ohne Nutzungszeitraum
   — Altbestand, Admin, `seed_dev_data` — bekommen beim Abziehen rückwirkend einen, sonst
-  liefe der Alt-Fallback weiter).
+  liefe der Alt-Fallback weiter), `AssemblyReuseExistingComponentTests` ("vorhandene
+  Komponente übernehmen": Slot wird umgehängt statt eine zweite Component anzulegen, der
+  Verlauf des übernommenen Teils bleibt erhalten statt durch die neue Nutzungsperiode
+  abgeschnitten zu werden, Ablehnung bei fremdem Bike/bereits gruppiertem Slot/
+  Template-Mismatch/fehlendem montierten Teil, derselbe Mechanismus funktioniert auch über
+  `swap/`), `CassetteBelongsToRearWheelGroupTests` (Regressionstest gegen die echten
+  Migrations-Daten: Kassette gehört zu "Laufrad hinten", nicht mehr zu "Antrieb").
 - `app_maintenance/test_intervals.py`: `MaintenanceIntervalStatusTests` (km-/Tage-Ratio,
   `as_of`-Projektion der Tage-Achse, `unknown` ohne Grenzen), `MaintenanceIntervalLogViewTests`
   (`/log/` setzt Baseline zurück + hängt `MaintenanceLog` an, explizite Werte,

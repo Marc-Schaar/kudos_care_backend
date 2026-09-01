@@ -850,6 +850,14 @@ def _build_assembly_from_request(
 
     `activate=False` legt die Instanz geparkt an (zweiter Laufradsatz, der erst
     später aufgezogen wird) — dann gibt es auch noch keine Nutzungsperiode.
+
+    Ein Part-Item mit `existing_slot_id` übernimmt eine bereits vorhandene,
+    ungruppierte Component (samt Verlauf) statt eine neue anzulegen — dafür
+    wird nur der Slot umgehängt (`slot.assembly = assembly`), nicht kopiert.
+    Damit der Verlauf dabei nicht verloren geht (die Nutzungsperiode sonst erst
+    ab heute zählen würde, siehe api/usage.py), wird der Periodenbeginn auf das
+    früheste Einbaudatum/km unter allen übernommenen Teilen zurückdatiert —
+    neu angelegte Teile bleiben unangetastet beim gemeinsamen `installed_at`.
     """
     installed_at = data.get("installed_at") or datetime.date.today()
     # Bei rückdatiertem Einbau der damalige km-Stand, damit Baugruppen-Periode und
@@ -866,13 +874,6 @@ def _build_assembly_from_request(
         )
         assembly.save()
 
-        if activate:
-            AssemblyUsagePeriod.objects.create(
-                assembly=assembly,
-                started_at=installed_at,
-                started_distance_km=bike_total_km,
-            )
-
         allowed_parts = {
             t.id: t
             for t in group.templates.filter(maintenance_kind=MaintenanceKind.PART)
@@ -882,10 +883,38 @@ def _build_assembly_from_request(
             for t in group.templates.filter(maintenance_kind=MaintenanceKind.CONSUMABLE)
         }
 
+        # Frühestes Einbaudatum/km unter den übernommenen Bestandsteilen —
+        # bestimmt den Periodenbeginn (siehe Docstring oben).
+        period_started_at = installed_at
+        period_started_km = bike_total_km
+
         for item in data.get("parts", []):
             if not item["include"]:
                 continue
             template = allowed_parts[item["template_id"]]
+
+            existing_slot_id = item.get("existing_slot_id")
+            if existing_slot_id:
+                slot = ComponentSlot.objects.prefetch_related("components").get(
+                    pk=existing_slot_id,
+                    bike=bike,
+                    assembly__isnull=True,
+                    template=template,
+                )
+                slot.assembly = assembly
+                slot.save(update_fields=["assembly"])
+
+                mounted = slot.mounted_component
+                if mounted is not None and mounted.installed_at is not None:
+                    if mounted.installed_at < period_started_at:
+                        period_started_at = mounted.installed_at
+                    if mounted.distance_at_install is not None and (
+                        period_started_km is None
+                        or mounted.distance_at_install < period_started_km
+                    ):
+                        period_started_km = mounted.distance_at_install
+                continue
+
             slot, _ = ComponentSlot.objects.get_or_create(
                 assembly=assembly, template=template, defaults={"bike": bike}
             )
@@ -902,6 +931,13 @@ def _build_assembly_from_request(
                 custom_warn_days=item.get("custom_warn_days"),
                 is_mounted=True,
             ).save()
+
+        if activate:
+            AssemblyUsagePeriod.objects.create(
+                assembly=assembly,
+                started_at=period_started_at,
+                started_distance_km=period_started_km,
+            )
 
         for item in data.get("intervals", []):
             if not item["include"]:
@@ -922,8 +958,15 @@ def _build_assembly_from_request(
     return assembly
 
 
-def _validate_assembly_items(group: ComponentGroup, data: dict) -> str | None:
-    """Prüft, dass alle referenzierten Templates zur Gruppe + richtigen Art gehören."""
+def _validate_assembly_items(
+    bike: Bike, group: ComponentGroup, data: dict
+) -> str | None:
+    """
+    Prüft, dass alle referenzierten Templates zur Gruppe + richtigen Art gehören,
+    und dass jede referenzierte `existing_slot_id` (vorhandene Komponente
+    übernehmen) wirklich ein ungruppierter Slot dieses Bikes mit passendem
+    Template und montiertem Teil ist.
+    """
     part_ids = {
         t.id for t in group.templates.filter(maintenance_kind=MaintenanceKind.PART)
     }
@@ -934,6 +977,23 @@ def _validate_assembly_items(group: ComponentGroup, data: dict) -> str | None:
     for item in data.get("parts", []):
         if item["template_id"] not in part_ids:
             return f"Template {item['template_id']} gehört nicht als Verschleißteil zu '{group.name}'."
+
+        existing_slot_id = item.get("existing_slot_id")
+        if not existing_slot_id:
+            continue
+        slot = ComponentSlot.objects.filter(
+            pk=existing_slot_id,
+            bike=bike,
+            assembly__isnull=True,
+            template_id=item["template_id"],
+        ).first()
+        if slot is None:
+            return (
+                f"Vorhandene Komponente {existing_slot_id} wurde nicht gefunden — "
+                "entweder nicht mehr ungruppiert oder falsches Template."
+            )
+        if slot.mounted_component is None:
+            return f"Vorhandene Komponente {existing_slot_id} hat kein montiertes Teil."
     for item in data.get("intervals", []):
         if item["template_id"] not in consumable_ids:
             return f"Template {item['template_id']} gehört nicht als Verbrauchsmaterial zu '{group.name}'."
@@ -1065,7 +1125,7 @@ class BikeAssemblyListView(AthleteMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        err = _validate_assembly_items(group, data)
+        err = _validate_assembly_items(bike, group, data)
         if err:
             return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1243,7 +1303,7 @@ class AssemblySwapView(AthleteMixin, APIView):
         body.is_valid(raise_exception=True)
         data = body.validated_data
 
-        err = _validate_assembly_items(group, data)
+        err = _validate_assembly_items(bike, group, data)
         if err:
             return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
 

@@ -807,6 +807,12 @@ class AssemblyPartItemSerializer(serializers.Serializer):
     custom_warn_days = serializers.IntegerField(
         required=False, allow_null=True, min_value=0
     )
+    # Statt eine neue Component anzulegen: eine bereits vorhandene, noch
+    # ungruppierte ComponentSlot (samt montiertem Teil + Verlauf) in diese
+    # Baugruppe übernehmen. brand/model_name/custom_warn_* werden dann
+    # ignoriert — es ist ja dasselbe physische Teil. Siehe
+    # _build_assembly_from_request/_validate_assembly_items.
+    existing_slot_id = serializers.IntegerField(required=False, allow_null=True)
 
 
 class AssemblyIntervalItemSerializer(serializers.Serializer):

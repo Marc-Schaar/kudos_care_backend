@@ -2,6 +2,7 @@ from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -678,4 +679,228 @@ class LegacyAssemblyWithoutPeriodsTests(AssemblyTestBase):
         comp.refresh_from_db()
         self.assertEqual(
             compute_wear(comp, self.bike.total_distance_km)["wear_km"], 100.0
+        )
+
+
+class AssemblyReuseExistingComponentTests(AssemblyTestBase):
+    """
+    "Vorhandene Komponente übernehmen": beim Anlegen einer Baugruppe kann ein
+    Part-Item statt brand/model eine `existing_slot_id` mitgeben — den bislang
+    ungruppierten Slot samt montierter Komponente, der dann in die neue
+    Baugruppe umgehängt wird, statt eine neue Component anzulegen.
+    """
+
+    def _ungrouped_slot(
+        self, template, installed_at, distance_at_install, is_mounted=True
+    ):
+        slot = ComponentSlot.objects.create(bike=self.bike, template=template)
+        Component.objects.create(
+            slot=slot,
+            brand="Alt-Marke",
+            model_name="Alt-Modell",
+            installed_at=installed_at,
+            distance_at_install=distance_at_install,
+            is_mounted=is_mounted,
+        )
+        return slot
+
+    def test_reuse_moves_slot_instead_of_creating_new_component(self):
+        old_slot = self._ungrouped_slot(
+            self.tire, date.today() - timedelta(days=10), 50.0
+        )
+        old_component_id = old_slot.mounted_component.id
+
+        payload = self._create_payload()
+        payload["parts"][0] = {
+            "template_id": self.tire.id,
+            "include": True,
+            "existing_slot_id": old_slot.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+
+        old_slot.refresh_from_db()
+        self.assertEqual(old_slot.assembly_id, res.data["id"])
+        # Dieselbe Component wiederverwendet, keine zweite angelegt.
+        self.assertEqual(
+            list(Component.objects.filter(slot=old_slot).values_list("id", flat=True)),
+            [old_component_id],
+        )
+        # Die Felge (kein existing_slot_id) läuft normal weiter über eine neue Component.
+        rim_slot = ComponentSlot.objects.get(
+            assembly_id=res.data["id"], template=self.rim
+        )
+        self.assertEqual(rim_slot.mounted_component.brand, "DT Swiss")
+
+    def test_reuse_preserves_wear_history_instead_of_resetting_it(self):
+        # 100 km Grundfahrt (aus AssemblyTestBase) — Reifen seit 30 Tagen/20 km
+        # montiert, also bereits 80 km gefahren, bevor er einer Gruppe zugeordnet wird.
+        old_slot = self._ungrouped_slot(
+            self.tire, date.today() - timedelta(days=30), 20.0
+        )
+
+        payload = self._create_payload()
+        payload["parts"][0] = {
+            "template_id": self.tire.id,
+            "include": True,
+            "existing_slot_id": old_slot.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+
+        tire_component = old_slot.mounted_component
+        tire_component.refresh_from_db()
+        self.assertEqual(
+            compute_wear(tire_component, self.bike.total_distance_km)["wear_km"],
+            80.0,
+            "Die Nutzungsperiode darf den Verlauf des übernommenen Teils nicht abschneiden.",
+        )
+
+        assembly = BikeAssembly.objects.get(pk=res.data["id"])
+        period = assembly.open_period()
+        self.assertEqual(period.started_at, date.today() - timedelta(days=30))
+        self.assertEqual(period.started_distance_km, 20.0)
+
+        # Die neu angelegte Felge zählt dagegen erst ab heute/dem aktuellen km-Stand.
+        rim_component = ComponentSlot.objects.get(
+            assembly=assembly, template=self.rim
+        ).mounted_component
+        self.assertEqual(
+            compute_wear(rim_component, self.bike.total_distance_km)["wear_km"], 0.0
+        )
+
+    def test_reuse_rejects_slot_of_another_bike(self):
+        other_bike = Bike.objects.create(
+            athlete=self.profile,
+            strava_bike_id="asm2",
+            name="Zweitrad",
+            bike_type=BikeType.GRAVEL,
+        )
+        other_slot = ComponentSlot.objects.create(bike=other_bike, template=self.tire)
+        Component.objects.create(
+            slot=other_slot,
+            installed_at=date.today(),
+            distance_at_install=0.0,
+            is_mounted=True,
+        )
+
+        payload = self._create_payload()
+        payload["parts"][0] = {
+            "template_id": self.tire.id,
+            "include": True,
+            "existing_slot_id": other_slot.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reuse_rejects_already_grouped_slot(self):
+        first = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
+            self._create_payload(),
+            format="json",
+        )
+        grouped_tire_slot = ComponentSlot.objects.get(
+            assembly_id=first.data["id"], template=self.tire
+        )
+
+        payload = self._create_payload(name="Zweiter Satz")
+        payload["parts"][0] = {
+            "template_id": self.tire.id,
+            "include": True,
+            "existing_slot_id": grouped_tire_slot.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reuse_rejects_template_mismatch(self):
+        rim_slot = self._ungrouped_slot(self.rim, date.today(), 0.0)
+
+        payload = self._create_payload()
+        # existing_slot_id auf der TIRE-Zeile, aber der Slot ist für die Felge.
+        payload["parts"][0] = {
+            "template_id": self.tire.id,
+            "include": True,
+            "existing_slot_id": rim_slot.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reuse_rejects_slot_without_mounted_component(self):
+        empty_slot = self._ungrouped_slot(
+            self.tire, date.today(), 0.0, is_mounted=False
+        )
+
+        payload = self._create_payload()
+        payload["parts"][0] = {
+            "template_id": self.tire.id,
+            "include": True,
+            "existing_slot_id": empty_slot.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_swap_also_supports_reusing_an_existing_slot(self):
+        """Derselbe Code-Pfad (_build_assembly_from_request) trägt auch swap/."""
+        first = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
+            self._create_payload(),
+            format="json",
+        )
+        spare_slot = self._ungrouped_slot(
+            self.tire, date.today() - timedelta(days=5), 90.0
+        )
+
+        res = self.client.post(
+            f"/api/maintenance/assemblies/{first.data['id']}/swap/",
+            {
+                "parts": [
+                    {
+                        "template_id": self.tire.id,
+                        "include": True,
+                        "existing_slot_id": spare_slot.id,
+                    },
+                    {"template_id": self.rim.id, "include": True, "brand": "Newmen"},
+                ],
+                "intervals": [],
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        spare_slot.refresh_from_db()
+        self.assertEqual(spare_slot.assembly_id, res.data["id"])
+
+
+class CassetteBelongsToRearWheelGroupTests(TestCase):
+    """
+    Regressionstest für die Katalog-Migration 0020: Kassette soll mit dem
+    Hinterrad-Laufradsatz tauschbar sein statt (wie zuvor) unter "Antrieb" zu
+    hängen — ohne diese Zuordnung würde `assemblies/<id>/swap/` bzw.
+    `activate/` auf "Laufrad hinten" die Kassette nicht mit erfassen.
+    """
+
+    def test_kassette_template_is_in_laufrad_hinten_group(self):
+        group = ComponentGroup.objects.get(name="Laufrad hinten")
+        self.assertTrue(
+            group.templates.filter(name="Kassette").exists(),
+            "Kassette fehlt in der Baugruppe 'Laufrad hinten' — siehe Migration 0020.",
+        )
+        self.assertFalse(
+            ComponentGroup.objects.get(name="Antrieb")
+            .templates.filter(name="Kassette")
+            .exists()
+        )
+        self.assertEqual(
+            ComponentTemplate.objects.get(name="Kassette").maintenance_kind, "part"
         )
