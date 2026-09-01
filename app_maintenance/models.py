@@ -75,6 +75,18 @@ def warn_status_from_ratio(ratio: float | None) -> str:
     return WarnLevel.OK
 
 
+class BikeQuerySet(models.QuerySet):
+    def with_total_distance(self) -> "BikeQuerySet":
+        """
+        Annotiert die Gesamtdistanz (in Metern) aus der Ride-Historie, damit
+        `Bike.total_distance_km` ohne eigene Query auskommt. Ohne die
+        Annotation feuert das Property bei *jedem* Zugriff ein
+        `aggregate(Sum)` — in den Listen-Serializern also einmal je Slot und
+        je Intervall.
+        """
+        return self.annotate(_total_distance_m=models.Sum("rides__distance"))
+
+
 class Bike(models.Model):
     athlete = models.ForeignKey(
         StravaProfile,
@@ -114,6 +126,8 @@ class Bike(models.Model):
         help_text="Vorhergesagtes Next-Ride-Datum, fuer das zuletzt eine Vorhersage-Warn-E-Mail verschickt wurde.",
     )
 
+    objects = BikeQuerySet.as_manager()
+
     class Meta:
         ordering = ["name"]
 
@@ -121,6 +135,7 @@ class Bike(models.Model):
         id: int
         rides: RelatedManager["Ride"]
         slots: RelatedManager["ComponentSlot"]
+        intervals: RelatedManager["MaintenanceInterval"]
 
         def get_bike_type_display(self) -> str: ...
 
@@ -129,12 +144,24 @@ class Bike(models.Model):
 
     @property
     def total_distance_km(self) -> float | None:
+        """
+        Gesamtkilometer aus der Ride-Historie.
+
+        Nutzt die Annotation aus `Bike.objects.with_total_distance()`, falls
+        das Queryset sie mitbringt — sonst eine eigene Aggregat-Query. Wer den
+        Wert mehrfach braucht (Schleifen über Slots/Intervalle), zieht ihn in
+        eine lokale Variable bzw. über `api/serializers.py::bike_total_km` aus
+        dem Serializer-Context, statt ihn je Durchlauf erneut zu lesen.
+        """
         from django.db.models import Sum
 
-        result = self.rides.aggregate(total=Sum("distance"))["total"]
-        if result is None:
+        if hasattr(self, "_total_distance_m"):
+            total_m = self._total_distance_m
+        else:
+            total_m = self.rides.aggregate(total=Sum("distance"))["total"]
+        if total_m is None:
             return None
-        return result / 1000  # Strava liefert Meter
+        return total_m / 1000  # Strava liefert Meter
 
     def distance_km_up_to(self, as_of: date) -> float:
         """
@@ -605,7 +632,17 @@ class ComponentSlot(models.Model):
 
     @property
     def mounted_component(self):
-        return self.components.filter(is_mounted=True).first()
+        """
+        Bewusst `components.all()` statt `.filter(is_mounted=True)`: ein
+        `.filter()` auf einem prefetchten Related-Manager umgeht den
+        Prefetch-Cache und setzt je Slot eine eigene Query ab. Da je Slot
+        höchstens ein Teil montiert sein darf (siehe `Component.clean()`), ist
+        das Ergebnis identisch.
+        """
+        for component in self.components.all():
+            if component.is_mounted:
+                return component
+        return None
 
 
 class Component(models.Model):

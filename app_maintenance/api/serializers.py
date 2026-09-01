@@ -34,6 +34,28 @@ class WarnStatus:
         return warn_status_from_ratio(ratio)
 
 
+def bike_total_km(context: dict, bike: Bike) -> float | None:
+    """
+    Gesamtkilometer eines Bikes — einmal je Request bestimmt, nicht je Slot.
+
+    `Bike.total_distance_km` ist ein Property mit eigener Aggregat-Query. Ohne
+    diesen Cache liest jeder Slot und jedes Intervall es erneut; in der
+    Bike-Liste waren das gemessen 18 identische `SUM`-Queries pro Bike.
+
+    Views, die genau ein Bike serialisieren, legen den Wert vorab als
+    `context["bike_total_km"]` ab (siehe `BikeAssemblySerializer` und
+    `api/views.py`); dieser Schlüssel hat Vorrang. Sonst wird je Bike-PK
+    gecacht, damit ein Context über mehrere Bikes hinweg nicht die Zahl des
+    falschen Bikes zurückgibt.
+    """
+    if "bike_total_km" in context:
+        return context["bike_total_km"]
+    key = f"_bike_km_{bike.pk}"
+    if key not in context:
+        context[key] = bike.total_distance_km
+    return context[key]
+
+
 def slots_on_bike(bike: Bike) -> list[ComponentSlot]:
     """
     Die Slots, die aktuell wirklich am Rad sind: die aktiver Baugruppen plus die
@@ -296,7 +318,7 @@ class ComponentSerializer(serializers.ModelSerializer[Component]):
         cache_key = f"_wear_{obj.pk}"
         if cache_key not in context:
             bike = obj.slot.bike
-            context[cache_key] = compute_wear(obj, bike.total_distance_km)
+            context[cache_key] = compute_wear(obj, bike_total_km(context, bike))
         return context[cache_key]
 
     def get_wear_km(self, obj):
@@ -375,7 +397,6 @@ class ComponentMountSerializer(serializers.Serializer):
     component_id = serializers.IntegerField(required=False)
 
 
-
 class ComponentSlotSerializer(serializers.ModelSerializer[ComponentSlot]):
     display_name = serializers.CharField(read_only=True)
     template_detail = ComponentTemplateSerializer(source="template", read_only=True)
@@ -409,7 +430,7 @@ class ComponentSlotSerializer(serializers.ModelSerializer[ComponentSlot]):
         comp = obj.mounted_component
         if comp is None:
             return WarnStatus.UNKNOWN
-        wear = compute_wear(comp, obj.bike.total_distance_km)
+        wear = compute_wear(comp, bike_total_km(cast(dict, self.context), obj.bike))
         return wear["warn_status_overall"]
 
 
@@ -447,7 +468,7 @@ class ComponentSlotListSerializer(serializers.ModelSerializer[ComponentSlot]):
         context = cast(dict, self.context)
         cache_key = f"_wear_{comp.pk}"
         if cache_key not in context:
-            context[cache_key] = compute_wear(comp, obj.bike.total_distance_km)
+            context[cache_key] = compute_wear(comp, bike_total_km(context, obj.bike))
         return context[cache_key]
 
     def get_warn_status(self, obj: ComponentSlot) -> str:
@@ -542,7 +563,7 @@ class BikeSerializer(serializers.ModelSerializer[Bike]):
         read_only_fields = ["strava_bike_id", "created_at", "updated_at"]
 
     def get_total_distance_km(self, obj: Bike) -> float | None:
-        return obj.total_distance_km
+        return bike_total_km(cast(dict, self.context), obj)
 
     def get_slots(self, obj: Bike):
         return ComponentSlotListSerializer(
@@ -556,6 +577,7 @@ class BikeSerializer(serializers.ModelSerializer[Bike]):
             WarnStatus.OK,
             WarnStatus.UNKNOWN,
         ]
+        total_km = bike_total_km(cast(dict, self.context), obj)
         slot_statuses = []
 
         for slot in slots_on_bike(obj):
@@ -563,11 +585,11 @@ class BikeSerializer(serializers.ModelSerializer[Bike]):
             if comp is None:
                 slot_statuses.append(WarnStatus.UNKNOWN)
                 continue
-            wear = compute_wear(comp, obj.total_distance_km)
+            wear = compute_wear(comp, total_km)
             slot_statuses.append(wear["warn_status_overall"])
 
         for interval in obj.intervals.all():
-            slot_statuses.append(interval.status(obj.total_distance_km))
+            slot_statuses.append(interval.status(total_km))
 
         for status in priority:
             if status in slot_statuses:
@@ -599,7 +621,7 @@ class BikeListSerializer(serializers.ModelSerializer[Bike]):
         read_only_fields = ["strava_bike_id"]
 
     def get_total_distance_km(self, obj: Bike) -> float | None:
-        return obj.total_distance_km
+        return bike_total_km(cast(dict, self.context), obj)
 
     def get_warn_status(self, obj: Bike) -> str:
         priority = [
@@ -608,15 +630,16 @@ class BikeListSerializer(serializers.ModelSerializer[Bike]):
             WarnStatus.OK,
             WarnStatus.UNKNOWN,
         ]
+        total_km = bike_total_km(cast(dict, self.context), obj)
         slot_statuses = []
         for slot in slots_on_bike(obj):
             comp = slot.mounted_component
             if comp is None:
                 continue
-            wear = compute_wear(comp, obj.total_distance_km)
+            wear = compute_wear(comp, total_km)
             slot_statuses.append(wear["warn_status_overall"])
         for interval in obj.intervals.all():
-            slot_statuses.append(interval.status(obj.total_distance_km))
+            slot_statuses.append(interval.status(total_km))
         for status in priority:
             if status in slot_statuses:
                 return status
@@ -666,10 +689,7 @@ class MaintenanceIntervalSerializer(serializers.ModelSerializer[MaintenanceInter
         read_only_fields = ["bike", "assembly", "template"]
 
     def _bike_total_km(self, obj: MaintenanceInterval) -> float | None:
-        context = cast(dict, self.context)
-        if "bike_total_km" in context:
-            return context["bike_total_km"]
-        return obj.bike.total_distance_km
+        return bike_total_km(cast(dict, self.context), obj.bike)
 
     def get_status(self, obj: MaintenanceInterval) -> str:
         return obj.status(self._bike_total_km(obj))
@@ -780,10 +800,7 @@ class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
         read_only_fields = ["bike", "group", "created_at", "updated_at"]
 
     def _bike_total_km(self, obj: BikeAssembly) -> float | None:
-        context = cast(dict, self.context)
-        if "bike_total_km" not in context:
-            context["bike_total_km"] = obj.bike.total_distance_km
-        return context["bike_total_km"]
+        return bike_total_km(cast(dict, self.context), obj.bike)
 
     def get_slots(self, obj: BikeAssembly):
         slots = sorted(

@@ -78,11 +78,19 @@ class BikeListView(AthleteMixin, generics.ListCreateAPIView):
     """
 
     def get_queryset(self):
-        return Bike.objects.filter(athlete=self.get_athlete()).prefetch_related(
-            "slots__template",
-            "slots__components",
-            "slots__assembly__periods",
-            "rides",
+        # `rides` wird bewusst NICHT geprefetcht: die Gesamtdistanz kommt über
+        # `with_total_distance()` als Annotation: ein Prefetch würde jede Fahrt
+        # samt LineString-Geometrie und weather_data-JSON laden, ohne dass ein
+        # Serializer sie anfasst.
+        return (
+            Bike.objects.filter(athlete=self.get_athlete())
+            .with_total_distance()
+            .prefetch_related(
+                "slots__template__group",
+                "slots__components__checks",
+                "slots__assembly__periods",
+                "intervals",
+            )
         )
 
     def get_serializer_class(self):
@@ -108,12 +116,16 @@ class BikeDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
     http_method_names = ["get", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
-        return Bike.objects.filter(athlete=self.get_athlete()).prefetch_related(
-            "slots__template",
-            "slots__components",
-            "slots__assembly__periods",
-            "rides",
-            "intervals__logs",
+        # Siehe BikeListView: Gesamtdistanz als Annotation statt Ride-Prefetch.
+        return (
+            Bike.objects.filter(athlete=self.get_athlete())
+            .with_total_distance()
+            .prefetch_related(
+                "slots__template__group",
+                "slots__components__checks",
+                "slots__assembly__periods",
+                "intervals__logs",
+            )
         )
 
 
@@ -204,8 +216,8 @@ class ComponentSlotListView(AthleteMixin, generics.ListCreateAPIView):
     def get_queryset(self):
         qs = (
             ComponentSlot.objects.filter(bike=self.get_bike())
-            .select_related("template")
-            .prefetch_related("components")
+            .select_related("template__group", "bike")
+            .prefetch_related("components__checks")
         )
         category = self.request.query_params.get("category")
         if category:
@@ -717,7 +729,7 @@ def _spare_components_for_bike(bike: Bike) -> list[Component]:
     """
     return list(
         Component.objects.filter(slot__bike=bike, is_mounted=False)
-        .select_related("slot__template")
+        .select_related("slot__template__group", "slot__assembly", "slot__bike")
         .order_by("-retired_at", "-id")
     )
 
@@ -1005,7 +1017,8 @@ class BikeAssemblyListView(AthleteMixin, APIView):
 
     ASSEMBLY_PREFETCH = (
         "group__templates",
-        "slots__template",
+        "slots__template__group",
+        "slots__bike",
         "slots__components__checks",
         "intervals__logs",
         "periods",
@@ -1044,7 +1057,7 @@ class BikeAssemblyListView(AthleteMixin, APIView):
 
         ungrouped = (
             ComponentSlot.objects.filter(bike=bike, assembly__isnull=True)
-            .select_related("template")
+            .select_related("template__group", "bike")
             .prefetch_related("components__checks")
         )
         ungrouped_data = ComponentSlotListSerializer(
@@ -1142,7 +1155,8 @@ class BikeAssemblyDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView
             .select_related("group", "bike")
             .prefetch_related(
                 "group__templates",
-                "slots__template",
+                "slots__template__group",
+                "slots__bike",
                 "slots__components__checks",
                 "intervals__logs",
                 "periods",

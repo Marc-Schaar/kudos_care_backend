@@ -132,7 +132,23 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   Basis für eine spätere Kalibrierung aus `ComponentCheck.condition_pct`-Verlauf),
   `ComponentCheck` (Log eines Checks/Release, optional `condition_pct` + Snooze).
   `AthleteMixin` (`api/views.py`) scoped alle Querysets auf
-  `request.session["strava_athlete_id"]`. `WarnStatus` (`api/serializers.py`) berechnet
+  `request.session["strava_athlete_id"]`.
+  **Query-Konventionen** (abgesichert durch `test_query_counts.py`, siehe Testing): die
+  Bike-Endpoints dürfen nicht mit der Slot-Anzahl skalieren. Drei Regeln dahinter:
+  (1) `Bike.total_distance_km` ist ein Property mit eigener `aggregate(Sum)`-Query —
+  Querysets holen den Wert stattdessen per `Bike.objects.with_total_distance()` als
+  Annotation (`_total_distance_m`), Serializer über den Helper
+  `api/serializers.py::bike_total_km(context, bike)`, der ihn je Request cacht; nie
+  direkt in einer Schleife über Slots/Intervalle lesen. (2) Ein
+  `prefetch_related("rides")` auf `Bike` ist **falsch** — es lädt je Fahrt
+  LineString-Track und `weather_data`-JSON, die kein Serializer anfasst; die Distanz
+  kommt aus der Annotation. (3) `ComponentSlot.mounted_component` iteriert bewusst
+  `components.all()` statt `.filter(is_mounted=True)`, weil ein `.filter()` auf einem
+  prefetchten Related-Manager den Prefetch-Cache umgeht. Prefetch-Ketten brauchen
+  entsprechend `slots__template__group` (für `ComponentTemplateSerializer.group_name`)
+  und `slots__components__checks`; Baugruppen-Ketten zusätzlich `slots__bike`, da Django
+  bei diesem Pfad nur `slot.assembly` zurückcacht.
+  `WarnStatus` (`api/serializers.py`) berechnet
   `ok`/`warn`/`critical`/`unknown` aus einem Ratio (≥1.0 critical, ≥0.8 warn);
   `compute_wear()` kombiniert km-/Tage-/Wetter-Achse zum schlechtesten Einzelwert; optionaler
   `as_of`-Parameter (Default: heute) projiziert nur die Tage-Achse auf ein zukünftiges Datum —
@@ -466,6 +482,13 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   Kernfälle: Parklücke fällt aus den km- und Datums-Fenstern, Fallback ohne Baugruppe/ohne
   Perioden entspricht exakt dem früheren Verhalten, `since_km`-Baseline nach einer Freigabe,
   frisch montiertes Teil = 0 km (nicht `unknown`).
+- `app_maintenance/test_query_counts.py`: `QueryScalingTests` — Regressionstests gegen
+  N+1. Bewusst **keine** festen Query-Zahlen (die wären bei jeder Serializer-Änderung rot),
+  sondern die Invariante: dieselbe Route mit 3 und mit 15 Slots muss gleich viele Queries
+  brauchen (`/bikes/`, `/bikes/<id>/`, `/bikes/<id>/assemblies/`). Dazu: Ride-Geometrie
+  darf in der Bike-Liste nicht geladen werden, `with_total_distance()` macht
+  `total_distance_km` query-frei (ohne Annotation bleibt der Aggregat-Fallback), und
+  `mounted_component` muss den Prefetch-Cache nutzen.
 - `app_maintenance/test_assemblies.py`: `AssemblyCreateTests` (atomar Slots+Components+
   Intervalle, überspringt `include:false`, lehnt template-fremd/Consumable-in-Parts ab,
   Bike-Typ-Mismatch → 400, zweite Instanz derselben Gruppe entsteht geparkt bzw. verdrängt
