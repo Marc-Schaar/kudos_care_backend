@@ -33,6 +33,7 @@ from .serializers import (
     ComponentSlotSerializer,
     ComponentSlotListSerializer,
     ComponentSerializer,
+    SpareComponentSerializer,
     ComponentCheckCreateSerializer,
     AssemblyCreateRequestSerializer,
     MaintenanceIntervalSerializer,
@@ -839,6 +840,28 @@ def _active_sibling(bike: Bike, group: ComponentGroup) -> BikeAssembly | None:
     )
 
 
+def _spare_components_by_template(bike: Bike) -> dict[int, Component]:
+    """
+    Je Template die zuletzt ausgebaute, noch nicht wiederverwendete Component
+    dieses Bikes — Grundlage für den "vorhandene Komponente übernehmen"-
+    Vorschlag bei ausgebauten Teilen (im Unterschied zu `ungrouped_slots`, die
+    noch *montierte*, nur noch nicht gruppierte Alt-Teile abdecken). Ein Teil
+    bleibt beim Ausbau immer an seinem alten Slot hängen (`is_mounted=False`),
+    unabhängig davon, ob dessen Baugruppe noch aktiv/geparkt/ausgemustert ist —
+    ein zurückgelegter Laufradsatz-Teil ist genauso ein Kandidat wie einer aus
+    einer längst ausgemusterten Baugruppe.
+    """
+    spares = (
+        Component.objects.filter(slot__bike=bike, is_mounted=False)
+        .select_related("slot__template")
+        .order_by("slot__template_id", "-retired_at", "-installed_at", "-id")
+    )
+    by_template: dict[int, Component] = {}
+    for comp in spares:
+        by_template.setdefault(comp.slot.template_id, comp)
+    return by_template
+
+
 def _build_assembly_from_request(
     bike: Bike, group: ComponentGroup, data: dict, activate: bool = True
 ) -> BikeAssembly:
@@ -854,10 +877,24 @@ def _build_assembly_from_request(
     Ein Part-Item mit `existing_slot_id` übernimmt eine bereits vorhandene,
     ungruppierte Component (samt Verlauf) statt eine neue anzulegen — dafür
     wird nur der Slot umgehängt (`slot.assembly = assembly`), nicht kopiert.
-    Damit der Verlauf dabei nicht verloren geht (die Nutzungsperiode sonst erst
-    ab heute zählen würde, siehe api/usage.py), wird der Periodenbeginn auf das
-    früheste Einbaudatum/km unter allen übernommenen Teilen zurückdatiert —
-    neu angelegte Teile bleiben unangetastet beim gemeinsamen `installed_at`.
+    `reuse_component_id` deckt den verwandten Fall eines bereits *ausgebauten*
+    Teils ab (z.B. der zurückgelegte Laufradsatz aus dem Keller): die Component
+    zieht in einen frisch angelegten Slot dieser Baugruppe um und wird wieder
+    montiert (`is_mounted=True`, `retired_at`/`distance_at_retire`
+    zurückgesetzt). Anders als bei `existing_slot_id` (durchgehend derselbe
+    physische Einbau, nie ausgebaut) bleibt hier `installed_at`/
+    `distance_at_install` unangetastet, aber der Periodenbeginn wird **nicht**
+    darauf zurückdatiert — die Standzeit zwischen Ausbau und Wiedermontage soll
+    ja gerade nicht als gefahrene km zählen (sonst würde km, die zwischenzeitlich
+    ein anderer Laufradsatz gefahren ist, hier mitgezählt). Die Tage-Achse
+    altert trotzdem seit dem ursprünglichen `installed_at` weiter, exakt wie bei
+    einer geparkten statt ausgebauten Baugruppe — nur die km-Achse startet
+    wieder bei 0. Für `existing_slot_id` gilt dagegen: damit der Verlauf des
+    übernommenen Teils dabei nicht verloren geht (die Nutzungsperiode sonst
+    erst ab heute zählen würde, siehe api/usage.py), wird der Periodenbeginn
+    dort auf das früheste Einbaudatum/km unter den übernommenen Teilen
+    zurückdatiert — neu angelegte Teile bleiben unangetastet beim gemeinsamen
+    `installed_at`.
     """
     installed_at = data.get("installed_at") or datetime.date.today()
     # Bei rückdatiertem Einbau der damalige km-Stand, damit Baugruppen-Periode und
@@ -915,6 +952,34 @@ def _build_assembly_from_request(
                         period_started_km = mounted.distance_at_install
                 continue
 
+            reuse_component_id = item.get("reuse_component_id")
+            if reuse_component_id:
+                component = Component.objects.select_for_update().get(
+                    pk=reuse_component_id,
+                    slot__bike=bike,
+                    slot__template=template,
+                    is_mounted=False,
+                )
+                slot = ComponentSlot.objects.create(
+                    bike=bike, assembly=assembly, template=template
+                )
+                component.slot = slot
+                component.is_mounted = True
+                component.retired_at = None
+                component.distance_at_retire = None
+                component.save(
+                    update_fields=[
+                        "slot",
+                        "is_mounted",
+                        "retired_at",
+                        "distance_at_retire",
+                    ]
+                )
+                # Periodenbeginn bewusst NICHT zurückdatiert (siehe Docstring) —
+                # die km-Achse beginnt für das wiedermontierte Teil neu bei 0,
+                # nur die Tage-Achse zählt über sein `installed_at` weiter.
+                continue
+
             slot, _ = ComponentSlot.objects.get_or_create(
                 assembly=assembly, template=template, defaults={"bike": bike}
             )
@@ -963,9 +1028,9 @@ def _validate_assembly_items(
 ) -> str | None:
     """
     Prüft, dass alle referenzierten Templates zur Gruppe + richtigen Art gehören,
-    und dass jede referenzierte `existing_slot_id` (vorhandene Komponente
-    übernehmen) wirklich ein ungruppierter Slot dieses Bikes mit passendem
-    Template und montiertem Teil ist.
+    und dass jede referenzierte `existing_slot_id` (vorhandene, montierte
+    Komponente übernehmen) bzw. `reuse_component_id` (ausgebautes Teil
+    reaktivieren) wirklich zu diesem Bike und Template passt.
     """
     part_ids = {
         t.id for t in group.templates.filter(maintenance_kind=MaintenanceKind.PART)
@@ -979,21 +1044,37 @@ def _validate_assembly_items(
             return f"Template {item['template_id']} gehört nicht als Verschleißteil zu '{group.name}'."
 
         existing_slot_id = item.get("existing_slot_id")
-        if not existing_slot_id:
-            continue
-        slot = ComponentSlot.objects.filter(
-            pk=existing_slot_id,
-            bike=bike,
-            assembly__isnull=True,
-            template_id=item["template_id"],
-        ).first()
-        if slot is None:
-            return (
-                f"Vorhandene Komponente {existing_slot_id} wurde nicht gefunden — "
-                "entweder nicht mehr ungruppiert oder falsches Template."
-            )
-        if slot.mounted_component is None:
-            return f"Vorhandene Komponente {existing_slot_id} hat kein montiertes Teil."
+        reuse_component_id = item.get("reuse_component_id")
+        if existing_slot_id and reuse_component_id:
+            return "existing_slot_id und reuse_component_id schließen sich aus."
+
+        if existing_slot_id:
+            slot = ComponentSlot.objects.filter(
+                pk=existing_slot_id,
+                bike=bike,
+                assembly__isnull=True,
+                template_id=item["template_id"],
+            ).first()
+            if slot is None:
+                return (
+                    f"Vorhandene Komponente {existing_slot_id} wurde nicht gefunden — "
+                    "entweder nicht mehr ungruppiert oder falsches Template."
+                )
+            if slot.mounted_component is None:
+                return f"Vorhandene Komponente {existing_slot_id} hat kein montiertes Teil."
+
+        if reuse_component_id:
+            component = Component.objects.filter(
+                pk=reuse_component_id,
+                slot__bike=bike,
+                slot__template_id=item["template_id"],
+                is_mounted=False,
+            ).first()
+            if component is None:
+                return (
+                    f"Ausgebautes Teil {reuse_component_id} wurde nicht gefunden — "
+                    "entweder inzwischen montiert oder falsches Template."
+                )
     for item in data.get("intervals", []):
         if item["template_id"] not in consumable_ids:
             return f"Template {item['template_id']} gehört nicht als Verbrauchsmaterial zu '{group.name}'."
@@ -1031,8 +1112,13 @@ class BikeAssemblyListView(AthleteMixin, APIView):
     GET liefert die aktiven Baugruppen des Bikes (inkl. Slots mit Wear +
     Intervall-Status), die geparkten Alternativen (`parked_assemblies` — z.B. der
     Winter-LRS im Keller), die noch nicht zugeordneten Alt-Slots
-    (`ungrouped_slots`, nach Kategorie) und die noch verfügbaren Katalog-Gruppen
-    (`available_groups`).
+    (`ungrouped_slots`, nach Kategorie), die ausgebauten Ersatzteile
+    (`spare_components`, für den "vorhandene Komponente übernehmen"-Vorschlag)
+    und die zum Bike-Typ passenden Katalog-Gruppen (`available_groups`).
+    `available_groups` enthält bewusst auch Gruppen mit bereits aktiver
+    Instanz (`has_active_instance: true`) — ein zweiter Satz (Sommer-/
+    Winter-LRS) soll sich anlegen lassen, POST parkt ihn dann automatisch statt
+    die aktive Instanz zu verdrängen (siehe `_active_sibling` weiter unten).
     POST legt eine neue Baugruppe komplett an (ein Dialog = eine Baugruppe).
     """
 
@@ -1084,14 +1170,20 @@ class BikeAssemblyListView(AthleteMixin, APIView):
             ungrouped, many=True, context=dict(context)
         ).data
 
+        spare_data = SpareComponentSerializer(
+            list(_spare_components_by_template(bike).values()), many=True
+        ).data
+
         used_group_ids = set(assemblies.values_list("group_id", flat=True))
         available = [
             g
             for g in ComponentGroup.objects.prefetch_related("templates")
-            if g.id not in used_group_ids and g.applies_to(bike.bike_type)
+            if g.applies_to(bike.bike_type)
         ]
         available_data = ComponentGroupSerializer(
-            available, many=True, context={"bike_type": bike.bike_type}
+            available,
+            many=True,
+            context={"bike_type": bike.bike_type, "used_group_ids": used_group_ids},
         ).data
 
         return Response(
@@ -1099,6 +1191,7 @@ class BikeAssemblyListView(AthleteMixin, APIView):
                 "assemblies": assembly_data,
                 "parked_assemblies": parked_data,
                 "ungrouped_slots": ungrouped_data,
+                "spare_components": spare_data,
                 "available_groups": available_data,
             }
         )

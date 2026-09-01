@@ -264,10 +264,36 @@ class AssemblyListTests(AssemblyTestBase):
         self.assertEqual(len(res.data["assemblies"]), 1)
         self.assertEqual(len(res.data["ungrouped_slots"]), 1)
 
-        available_ids = {g["id"] for g in res.data["available_groups"]}
-        self.assertIn(self.wheel_group.id, {self.wheel_group.id})  # sanity
-        self.assertNotIn(self.wheel_group.id, available_ids)  # bereits aktiv
-        self.assertNotIn(self.susp_group.id, available_ids)  # falscher Bike-Typ
+        available = {g["id"]: g for g in res.data["available_groups"]}
+        # Bereits aktive Gruppe bleibt anlegbar (zweiter Satz, wird geparkt
+        # angelegt) — nur mit einem Hinweis-Flag markiert, nicht ausgeblendet.
+        self.assertIn(self.wheel_group.id, available)
+        self.assertTrue(available[self.wheel_group.id]["has_active_instance"])
+        self.assertNotIn(self.susp_group.id, available)  # falscher Bike-Typ
+
+    def test_spare_components_lists_removed_parts(self):
+        """
+        Ein ausgebautes (nicht montiertes) Teil taucht als Übernahme-Vorschlag
+        in `spare_components` auf, unabhängig davon, ob seine ursprüngliche
+        Baugruppe noch existiert/aktiv ist.
+        """
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
+            self._create_payload(),
+            format="json",
+        )
+        assembly_id = res.data["id"]
+        rim = Component.objects.get(
+            slot__assembly_id=assembly_id, slot__template=self.rim
+        )
+        rim.is_mounted = False
+        rim.retired_at = date.today()
+        rim.save(update_fields=["is_mounted", "retired_at"])
+
+        res = self.client.get(f"/api/maintenance/bikes/{self.bike.id}/assemblies/")
+        spares = {s["template"]: s for s in res.data["spare_components"]}
+        self.assertIn(self.rim.id, spares)
+        self.assertEqual(spares[self.rim.id]["id"], rim.id)
 
     def test_assembly_km_counts_only_time_on_the_bike(self):
         """
@@ -880,6 +906,194 @@ class AssemblyReuseExistingComponentTests(AssemblyTestBase):
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
         spare_slot.refresh_from_db()
         self.assertEqual(spare_slot.assembly_id, res.data["id"])
+
+
+class AssemblyReuseSpareComponentTests(AssemblyTestBase):
+    """
+    Verwandter Fall zu `AssemblyReuseExistingComponentTests`: `reuse_component_id`
+    reaktiviert ein bereits *ausgebautes* Teil (z.B. ein zurückgelegter
+    Laufradsatz-Teil), statt es neu anlegen zu müssen — unabhängig davon, ob
+    dessen alte Baugruppe noch existiert/aktiv ist (Regressionsfall für den
+    Prod-Bug: eine ausgemusterte Mavic-Felge tauchte nirgends mehr als
+    Übernahme-Vorschlag auf).
+    """
+
+    def _spare_component(self, template, installed_at, distance_at_install):
+        # Wie im Prod-Fall: das Teil hängt an einer inzwischen ausgemusterten
+        # Baugruppe, nicht an einem ungruppierten Slot (der wäre wegen
+        # `uniq_bike_template_ungrouped` je Template nur einmal möglich).
+        old_assembly = BikeAssembly.objects.create(
+            bike=self.bike,
+            group=self.wheel_group,
+            is_active=False,
+            retired_at=date.today() - timedelta(days=1),
+        )
+        slot = ComponentSlot.objects.create(
+            bike=self.bike, assembly=old_assembly, template=template
+        )
+        return Component.objects.create(
+            slot=slot,
+            brand="Mavic",
+            model_name="Cosmic CX80",
+            installed_at=installed_at,
+            distance_at_install=distance_at_install,
+            is_mounted=False,
+            retired_at=date.today() - timedelta(days=1),
+            distance_at_retire=90.0,
+        )
+
+    def test_reuse_remounts_component_into_a_fresh_slot(self):
+        spare = self._spare_component(
+            self.rim, date.today() - timedelta(days=20), 10.0
+        )
+
+        payload = self._create_payload()
+        payload["parts"][1] = {
+            "template_id": self.rim.id,
+            "include": True,
+            "reuse_component_id": spare.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+
+        spare.refresh_from_db()
+        self.assertTrue(spare.is_mounted)
+        self.assertIsNone(spare.retired_at)
+        self.assertIsNone(spare.distance_at_retire)
+        self.assertEqual(spare.slot.assembly_id, res.data["id"])
+        # Kein zweites Component-Objekt angelegt.
+        self.assertEqual(
+            Component.objects.filter(brand="Mavic", model_name="Cosmic CX80").count(),
+            1,
+        )
+
+    def test_reuse_resets_km_axis_but_keeps_days_aging(self):
+        """
+        Anders als bei `existing_slot_id` (durchgehender Einbau) war das Teil
+        hier wirklich ausgebaut — die km-Achse muss nach der Wiedermontage bei
+        0 anfangen (sonst zählten km mit, die zwischenzeitlich ein anderer
+        Laufradsatz gefahren ist), die Tage-Achse aber altert seit dem
+        ursprünglichen Einbau unverändert weiter (genau wie bei einer
+        geparkten statt ausgebauten Baugruppe).
+        """
+        spare = self._spare_component(
+            self.rim, date.today() - timedelta(days=20), 10.0
+        )
+
+        payload = self._create_payload()
+        payload["parts"][1] = {
+            "template_id": self.rim.id,
+            "include": True,
+            "reuse_component_id": spare.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+
+        spare.refresh_from_db()
+        self.assertEqual(
+            compute_wear(spare, self.bike.total_distance_km)["wear_km"],
+            0.0,
+            "Die km-Achse startet nach der Wiedermontage neu bei 0.",
+        )
+        self.assertEqual(
+            compute_wear(spare, self.bike.total_distance_km)["wear_days"],
+            20,
+            "Die Tage-Achse zählt seit dem ursprünglichen Einbau weiter.",
+        )
+
+        assembly = BikeAssembly.objects.get(pk=res.data["id"])
+        period = assembly.open_period()
+        self.assertEqual(period.started_at, date.today())
+        self.assertEqual(period.started_distance_km, self.bike.total_distance_km)
+
+    def test_reuse_rejects_still_mounted_component(self):
+        first = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
+            self._create_payload(),
+            format="json",
+        )
+        mounted_rim = ComponentSlot.objects.get(
+            assembly_id=first.data["id"], template=self.rim
+        ).mounted_component
+
+        payload = self._create_payload(name="Zweiter Satz")
+        payload["parts"][1] = {
+            "template_id": self.rim.id,
+            "include": True,
+            "reuse_component_id": mounted_rim.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reuse_rejects_template_mismatch(self):
+        spare = self._spare_component(self.tire, date.today(), 0.0)
+
+        payload = self._create_payload()
+        # reuse_component_id auf der FELGE-Zeile, aber die Component ist ein Reifen.
+        payload["parts"][1] = {
+            "template_id": self.rim.id,
+            "include": True,
+            "reuse_component_id": spare.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reuse_rejects_component_of_another_bike(self):
+        other_bike = Bike.objects.create(
+            athlete=self.profile,
+            strava_bike_id="asm3",
+            name="Drittrad",
+            bike_type=BikeType.GRAVEL,
+        )
+        other_slot = ComponentSlot.objects.create(bike=other_bike, template=self.rim)
+        other_spare = Component.objects.create(
+            slot=other_slot,
+            installed_at=date.today(),
+            distance_at_install=0.0,
+            is_mounted=False,
+            retired_at=date.today(),
+        )
+
+        payload = self._create_payload()
+        payload["parts"][1] = {
+            "template_id": self.rim.id,
+            "include": True,
+            "reuse_component_id": other_spare.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_existing_slot_id_and_reuse_component_id_are_mutually_exclusive(self):
+        old_slot = ComponentSlot.objects.create(bike=self.bike, template=self.rim)
+        Component.objects.create(
+            slot=old_slot,
+            installed_at=date.today(),
+            distance_at_install=0.0,
+            is_mounted=True,
+        )
+        spare = self._spare_component(self.rim, date.today(), 0.0)
+
+        payload = self._create_payload()
+        payload["parts"][1] = {
+            "template_id": self.rim.id,
+            "include": True,
+            "existing_slot_id": old_slot.id,
+            "reuse_component_id": spare.id,
+        }
+        res = self.client.post(
+            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 class CassetteBelongsToRearWheelGroupTests(TestCase):

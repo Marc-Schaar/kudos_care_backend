@@ -485,6 +485,28 @@ class ComponentSlotListSerializer(serializers.ModelSerializer[ComponentSlot]):
         }
 
 
+class SpareComponentSerializer(serializers.ModelSerializer[Component]):
+    """
+    Ein ausgebautes Teil als Übernahme-Vorschlag beim Baugruppe-Anlegen (siehe
+    `_spare_components_by_template`) — Pendant zu `ComponentSlotListSerializer`s
+    `mounted_component` für den Fall, dass das Teil gerade *nicht* montiert ist.
+    """
+
+    template = serializers.IntegerField(source="slot.template_id", read_only=True)
+
+    class Meta:
+        model = Component
+        fields = [
+            "id",
+            "template",
+            "brand",
+            "model_name",
+            "installed_at",
+            "retired_at",
+            "distance_at_retire",
+        ]
+
+
 class BikeSerializer(serializers.ModelSerializer[Bike]):
     bike_type_display = serializers.CharField(
         source="get_bike_type_display", read_only=True
@@ -668,6 +690,7 @@ class ComponentGroupSerializer(serializers.ModelSerializer[ComponentGroup]):
     )
     parts = serializers.SerializerMethodField()
     consumables = serializers.SerializerMethodField()
+    has_active_instance = serializers.SerializerMethodField()
 
     class Meta:
         model = ComponentGroup
@@ -683,6 +706,7 @@ class ComponentGroupSerializer(serializers.ModelSerializer[ComponentGroup]):
             "is_system",
             "parts",
             "consumables",
+            "has_active_instance",
         ]
 
     def _templates(self, obj: ComponentGroup, kind: str):
@@ -701,6 +725,17 @@ class ComponentGroupSerializer(serializers.ModelSerializer[ComponentGroup]):
 
     def get_consumables(self, obj: ComponentGroup):
         return self._templates(obj, MaintenanceKind.CONSUMABLE)
+
+    def get_has_active_instance(self, obj: ComponentGroup) -> bool:
+        """
+        True, wenn das Bike bereits eine aufgezogene Instanz dieser Gruppe hat.
+        Nur gesetzt, wenn der Aufrufer (`BikeAssemblyListView.get`) die IDs im
+        Context mitgibt — sonst (Katalog ohne Bike-Bezug) immer False.
+        """
+        used_group_ids = cast(dict, self.context).get("used_group_ids")
+        if used_group_ids is None:
+            return False
+        return obj.id in used_group_ids
 
 
 class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
@@ -815,6 +850,10 @@ class AssemblyPartItemSerializer(serializers.Serializer):
     # ignoriert — es ist ja dasselbe physische Teil. Siehe
     # _build_assembly_from_request/_validate_assembly_items.
     existing_slot_id = serializers.IntegerField(required=False, allow_null=True)
+    # Verwandter Fall: ein bereits *ausgebautes* Teil (z.B. der zurückgelegte
+    # Laufradsatz aus dem Keller, siehe `spare_components`) reaktivieren, statt
+    # es neu anzulegen. Schließt sich mit existing_slot_id aus.
+    reuse_component_id = serializers.IntegerField(required=False, allow_null=True)
 
 
 class AssemblyIntervalItemSerializer(serializers.Serializer):
