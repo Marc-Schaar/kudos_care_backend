@@ -18,9 +18,16 @@ STRAVA_VERIFY_TOKEN = os.environ.get("STRAVA_VERIFY_TOKEN")
 
 AI_PROVIDER = os.environ.get("AI_PROVIDER", "gemini")  # "gemini" | "groq"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-lite")
+# gemini-2.0-flash-lite wurde von Google abgeschaltet (HTTP 404 "no longer
+# available", Google verweist selbst auf den Nachfolger) — nicht an einem
+# ungueltigen Key gelegen, siehe `manage.py ai_diagnose`.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# llama-3.3-70b-versatile ist aus Groqs Modell-Katalog verschwunden (HTTP 404
+# "does not exist"). gpt-oss-20b bestaetigt per Diagnose: Freitext- und
+# JSON-Modus laufen sauber innerhalb der bestehenden Token-Budgets (AI_MAX_
+# OUTPUT_TOKENS=300 in ai_providers.py), inkl. seines Reasoning-Overheads.
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
 # E-Mail-Versand (Benachrichtigungen, siehe app_notifications). Default = Brevo SMTP-Relay,
 # aber vollstaendig env-gesteuert: ein spaeterer Wechsel auf einen eigenen Mailserver aendert
