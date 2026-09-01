@@ -39,7 +39,12 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
 
 - **`app_auth`** — Strava-OAuth-Login. Model `StravaProfile` (1:1 zu Django `User`,
   speichert Access/Refresh-Token + Sync-Status). Endpoints: `POST /api/strava/auth/`,
-  `GET /api/strava/me/`, `POST /api/strava/logout/`. `api/utils.py` hat
+  `GET|PATCH /api/strava/me/`, `POST /api/strava/logout/`. `GET me/` liefert neben der
+  `athlete_id` auch `email`, `email_notifications_enabled` und `needs_email`; `PATCH me/`
+  (`UserSettingsSerializer`) schreibt beides — `email` an den Django-`User`, das Flag ans
+  `StravaProfile`. Wird zum ersten Mal eine Adresse gesetzt und `welcome_email_sent_at`
+  ist noch leer, wird die bei der Erstanmeldung ins Leere gelaufene Willkommens-Mail
+  nachgeholt. `api/utils.py` hat
   `get_valid_access_token()`/`strava_get()` als geteilten Strava-HTTP-Helper mit
   Token-Refresh + 401-Retry — von anderen Apps wiederverwendet.
 - **`app_dashboard`** — Ride-Ingestion, Geodaten, Wetter/Wind. Models `Ride` (PostGIS-Track,
@@ -53,10 +58,16 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   können Text, Chart und Karte nicht mehr auseinanderlaufen — vorher gab es drei
   unabhängige Berechnungen mit drei verschiedenen Ergebnissen. Ohne GPS-Stream greift
   `build_coarse_wind_segment()` (Start-Ziel-Gerade), erkennbar an `wind_source="coarse"`.
+  Fehlen die Wetterdaten ganz, entstehen **reine Geometrie-Abschnitte**
+  (`wind_source="none"`, `headwind=None`) und die Route wird neutral gezeichnet — die
+  Einfärbung ist ein Overlay, kein Existenzgrund für die Strecke. Genau daran hing der
+  Prod-Bug „Streckenverlauf: keine Daten": Bestandsfahrten lieferten vorher gar keine
+  Abschnitte und die Karte blieb leer.
   Die Abschnitte werden **nicht persistiert**, sondern im Detail-Request aus `RideStream`
   + `weather_data` rekonstruiert (`hourly_from_weather_data()`); dafür liegt seit dem
   Refactoring `wind_direction_10m` mit in `weather_data`. **Altfahrten ohne dieses Feld
-  fallen auf den groben Modus zurück, bis `recompute_wind` gelaufen ist.**
+  bleiben auf `wind_source="none"` (Strecke sichtbar, keine Einfärbung), bis
+  `recompute_wind` gelaufen ist — der Backfill gehört zu jedem Deploy dieser Änderung.**
   `api/services.py`: `StravaSyncService` (Bikes + paginierte Activities),
   `StravaImportService.sync_activity_to_db` (Polyline-Decode → Shapely-RDP-Simplify →
   Gear-Matching → Streams → Open-Meteo-Wetter → Windabschnitte), `WeatherService`,
@@ -70,6 +81,10 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   GeoJSON-FeatureCollection mit einem Feature je Abschnitt
   (`headwind`/`wind_direction`/`bearing`/`precipitation`), die das Frontend direkt
   rendert — die Karte interpoliert selbst nichts mehr.
+  `GET /api/activities/<id>/wear-impact/?refresh=true` liefert, was **diese eine Fahrt**
+  die Komponenten gekostet hat (siehe `app_maintenance`); der Endpoint gibt die Zahlen
+  auch dann zurück, wenn die KI ausfällt (`ai_unavailable: true` statt 503) — der
+  Erzähltext ist die Zugabe, die Zahlen sind die Aussage.
   Endpoint `GET /api/activities/<id>/summary/?refresh=true`
   liefert eine gecachte KI-Zusammenfassung der Fahrt (Distanz/Dauer/Wetter/Gegenwind);
   Cache-Felder `Ride.ai_summary`/`ai_summary_generated_at`, keine Staleness-Prüfung nötig
@@ -111,15 +126,40 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   genutzt von `app_notifications` für die Fahrt-Vorhersage-Warnung, km-/Wetter-Achse bleiben
   auf dem aktuellen Stand, da zukünftige Distanz unbekannt ist.
   `api/services.py`: `WeatherWearCalculator` (reine Formel: Wetter → Verschleiß-Multiplikator
-  pro Ride) + `WeatherWearService` (voller Recompute über die Ride-Historie seit Einbau, nur
+  pro Ride; `ride_multiplier_detail()` gibt zusätzlich die Einzelbeiträge zurück,
+  `ride_multiplier()` ist der dünne Wrapper darauf) + `WeatherWearService` (voller Recompute über die Ride-Historie seit Einbau, nur
   aktuell montierte Komponenten); außerdem `get_new_component_warnings()`/
   `get_predicted_unsafe_bikes()` als fachliche Grundlage für `app_notifications` (siehe dort).
   Celery-Task `recompute_weather_wear_for_bike` in
   `api/tasks.py`, getriggert nach jedem Ride-Import (Hook in
   `app_dashboard/api/services.py::sync_activity_to_db`); löst nach erfolgreicher
   Neuberechnung zusätzlich `app_notifications.tasks.check_component_warnings_for_bike` aus.
+  `ride_wear_breakdown(ride)` beantwortet **„was hat diese eine Fahrt gekostet"**: je
+  `ComponentCategory` den wetterbedingten Aufschlag (`extra_pct`, dominanter Treiber)
+  und je Komponente `share_of_life_pct` (Anteil an der empfohlenen Lebensdauer). Die
+  Rechnung war immer schon fahrtbezogen — persistiert wurde nur die Summe. Anders als
+  `WeatherWearService` rekonstruiert das die **Historie**: berücksichtigt werden die zum
+  Fahrtzeitpunkt montierten Teile (`installed_at`/`retired_at`), nicht die heute
+  montierten. KI-Erzähltext via `build_ride_wear_impact_prompt()` + Cache-Felder
+  `Ride.wear_impact_summary`/`wear_impact_generated_at`, Staleness über
+  `ride_wear_impact_is_stale()` (Komponenten seither geändert?).
+  `api/bike_assistant.py`: **„Kudo"**, der KI-Assistent fürs Bike-Anlegen.
+  `suggest_models()` (Hersteller + Baujahr → Modellauswahl) und `suggest_setup()`
+  (Modell → Vorbelegung für den Setup-Stepper). Endpoints
+  `POST maintenance/assistant/models/` und `POST maintenance/bikes/<id>/assistant/setup/`,
+  beide `503` bei AI-Ausfall, damit das Frontend auf die manuelle Einrichtung zurückfällt.
+  **Sicherheitsgrenze:** die KI bekommt den erlaubten Katalog im Prompt und darf nur
+  daraus wählen; `_filter_to_catalog()` verwirft anschließend serverseitig jede
+  `template_id`, die nicht zur Gruppe und zur richtigen `maintenance_kind` gehört —
+  derselbe Schutz wie `views.py::_validate_assembly_items()`. Der Prompt allein ist keine
+  Absicherung. Marke/Modell je Zeile sind dagegen echtes Modellwissen und damit ein
+  bewusster Bruch mit „die KI erfindet nichts" — deshalb trägt jede Zeile ein
+  `confidence`-Feld, und der Stepper weist sie als Vorschlag aus.
   `api/ai_providers.py`: austauschbarer
-  Gemini/Groq-Adapter (`AI_PROVIDER`-Setting) für die On-Demand-KI-Erklärung. Bei
+  Gemini/Groq-Adapter (`AI_PROVIDER`-Setting) für die On-Demand-KI-Erklärung.
+  `generate_json()` erzwingt eine JSON-Antwort (Gemini `responseMimeType`, Groq
+  `response_format`) mit deutlich höherem Token-Budget — die 300 Tokens der
+  Freitext-Erklärungen reichen für ein komplettes Bike-Setup nicht. Bei
   `AI_PROVIDER=gemini` (Default) läuft intern ein `FallbackAIProvider`: primär das günstige
   Gemini-Flash-Lite-Modell (`GEMINI_MODEL`, Default `gemini-2.0-flash-lite`), bei Fehlschlag
   (fehlender Key/Timeout/Rate-Limit/...) automatisch Fallback auf Groq. `AI_PROVIDER=groq`
@@ -163,7 +203,8 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   entstehen nur über den Baugruppen-Create; `GET` bleibt. Katalog + Zuordnung aller
   System-Templates zu Gruppen in Migration `0016`, Backfill bestehender Slots →
   `BikeAssembly`/`MaintenanceInterval` (erzwungen) in `0017`.
-  Endpoints unter `/api/maintenance/`: `bikes/`, `bikes/<id>/condition-report/`,
+  Endpoints unter `/api/maintenance/`: `assistant/models/`,
+  `bikes/<id>/assistant/setup/`, `bikes/`, `bikes/<id>/condition-report/`,
   `groups/`, `bikes/<id>/assemblies/` (GET/POST), `assemblies/<id>/` (PATCH/DELETE),
   `assemblies/<id>/swap/`, `bikes/<id>/intervals/`, `intervals/<id>/` (PATCH/DELETE),
   `intervals/<id>/log/`, `bikes/<id>/slots/` (nur GET), `slots/<id>/mount|unmount`,
@@ -176,7 +217,16 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `Component.last_warn_notified_status`, `Bike.predicted_unsafe_notified_for_date`.
   `services.py::send_templated_email()` rendert ein gemeinsames HTML-Template
   (`templates/emails/base_email.html`, alle E-Mails erben per `{% extends %}` davon) mit
-  Plaintext-Fallback via `strip_tags`; gibt bei Opt-out/fehlender E-Mail/Versandfehler `False`
+  Plaintext-Fallback via `html_to_plaintext()`. Letzteres statt `strip_tags` allein, weil
+  `strip_tags` nur Tags entfernt, nicht den Inhalt von `<style>` — sonst landet das
+  komplette Stylesheet im Plaintext-Teil; zusätzlich werden HTML-Entities aufgelöst.
+  Das Layout ist **tabellenbasiert** (Outlook rendert mit Word und bricht bei
+  div/flex), hell mit dunklem Marken-Band und Lime-CTA — durchgehend dunkel wie die App
+  invertieren Outlook und einige Gmail-Dark-Modes teilweise. Webfonts werden in Mail-
+  Clients meist nicht geladen, es zählen die Fallback-Stacks. Deutsche Status-Labels
+  kommen aus dem Template-Filter `templatetags/notification_extras.py::warn_label`
+  (vorher stand dort der rohe Slug „critical"). Design prüfen ohne Versand:
+  `python manage.py preview_emails --text --open`. gibt bei Opt-out/fehlender E-Mail/Versandfehler `False`
   zurück statt zu werfen. Drei E-Mail-Typen, alle über `tasks.py`: (1) Willkommens-Mail
   (`send_welcome_email_task`) — automatisch bei Erstanmeldung (Hook in
   `app_auth/api/views.py::StravaAuthCallbackView`), rückwirkend für Bestandsnutzer per
@@ -334,6 +384,17 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   `as_of`-Projektion der Tage-Achse, `unknown` ohne Grenzen), `MaintenanceIntervalLogViewTests`
   (`/log/` setzt Baseline zurück + hängt `MaintenanceLog` an, explizite Werte,
   Athleten-Scoping, Ad-hoc-Intervall anlegen/löschen).
+- `app_maintenance/test_ride_wear_impact.py`: `RideWearBreakdownTests` (Regenfahrt kostet
+  mehr als dieselbe Trockenfahrt; Historie: zum Fahrtzeitpunkt montierte Teile zählen,
+  nie montierte Ersatzteile nicht), `RideMultiplierDetailTests`,
+  `ActivityWearImpactViewTests` (Caching, Invalidierung bei Komponenten-Änderung, und
+  vor allem: ein KI-Ausfall liefert weiterhin 200 mit den Zahlen, kein 503).
+- `app_maintenance/test_bike_assistant.py`: `KudoCatalogGuardTests` — die eigentliche
+  Sicherheitsgrenze. Erfundene `template_id`s, Templates aus einer fremden Gruppe und
+  als Teil ausgegebenes Verbrauchsmaterial müssen serverseitig herausfallen; dazu
+  ```json-Fences, kaputtes JSON und Provider-Ausfall. `KudoModelSuggestionTests`
+  (leere Liste = „Hersteller unbekannt" vs. `None` = „KI kaputt" — ein Unterschied),
+  `AssistantEndpointTests` (503-Pfad, fremdes Bike → 404, Auth).
 - `app_notifications/tests.py`: `SendTemplatedEmailTests` (Opt-out-Flag, fehlende
   E-Mail-Adresse), `PredictNextRideDateTests` (Median-Vorhersage, Clamping bei
   Überfälligkeit auf "heute", zu wenig Historie → `None`), `CheckComponentWarningsTests`/
@@ -342,7 +403,11 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   zwischen event- und tages-getriggertem Check), `CheckBikeUnsafePredictionsTests`
   (Projektion, Ausschluss bereits heute kritischer Bikes, Dedupe via
   `predicted_unsafe_notified_for_date`), `SendWelcomeEmailTaskTests`.
-- `app_auth/tests.py`: `StravaAuthCallbackWelcomeEmailTests` (Willkommens-Mail-Trigger nur bei
+  Dazu `HtmlToPlaintextTests` (Stylesheet-Inhalt und HTML-Entities dürfen nicht im
+  Plaintext-Teil landen) und `WarnLabelFilterTests` (deutsche Labels statt roher Slugs).
+- `app_auth/tests.py`: `CurrentUserSettingsTests` (GET/PATCH `me/`, `needs_email`,
+  Nachholen der Willkommens-Mail beim ersten Setzen einer Adresse — und nur dann),
+  `StravaAuthCallbackWelcomeEmailTests` (Willkommens-Mail-Trigger nur bei
   Erstanlage eines Profils, nicht bei Re-Login) — sonst keine weiteren Tests für `app_auth`.
   Keine Tests für `app_strava_webhook`.
 

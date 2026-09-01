@@ -13,8 +13,10 @@ from django.test import SimpleTestCase
 
 from app_dashboard.api.wind import (
     WIND_SOURCE_COARSE,
+    WIND_SOURCE_NONE,
     WIND_SOURCE_STREAM,
     average_headwind,
+    compute_ride_wind,
     build_coarse_wind_segment,
     build_wind_segments,
     calculate_headwind,
@@ -136,8 +138,20 @@ class DegenerateInputTests(SimpleTestCase):
             build_wind_segments(self.latlngs, self.times[:-1], START, _hourly()), []
         )
 
-    def test_missing_hourly_returns_empty(self):
-        self.assertEqual(build_wind_segments(self.latlngs, self.times, START, {}), [])
+    def test_missing_hourly_still_yields_route_geometry(self):
+        """
+        Ohne Wetterdaten muss die Strecke trotzdem entstehen — nur ohne Einfaerbung.
+        Vorher lieferte das eine leere Liste, wodurch die Karte fuer alle
+        Bestandsfahrten (ohne wind_direction_10m in weather_data) komplett leer blieb.
+        """
+        segments = build_wind_segments(self.latlngs, self.times, START, {})
+
+        self.assertTrue(segments)
+        self.assertTrue(all(s["coords"] for s in segments))
+        self.assertTrue(all(s["headwind"] is None for s in segments))
+        self.assertTrue(all(s["wind_direction"] is None for s in segments))
+        # Der Kurs ist reine Geometrie und bleibt auch ohne Wetter bekannt.
+        self.assertIsNotNone(segments[0]["bearing"])
 
     def test_stationary_track_returns_empty(self):
         stationary = [[50.0, 7.0]] * 10
@@ -189,14 +203,26 @@ class CoarseFallbackTests(SimpleTestCase):
         self.assertEqual(len(segments), 1)
         self.assertAlmostEqual(segments[0]["headwind"], 20.0, delta=0.5)
 
-    def test_returns_empty_for_loop_track(self):
-        """Start == Ziel: kein sinnvoller Kurs ableitbar, lieber gar keine Aussage."""
+    def test_loop_track_keeps_geometry_but_reports_no_headwind(self):
+        """Start == Ziel: kein sinnvoller Gesamtkurs — die Strecke bleibt trotzdem."""
         track = [(7.0, 50.0), (7.0, 50.05), (7.0, 50.0)]
-        self.assertEqual(build_coarse_wind_segment(track, START, 3600, _hourly()), [])
+        segments = build_coarse_wind_segment(track, START, 3600, _hourly())
 
-    def test_returns_empty_without_hourly(self):
+        self.assertEqual(len(segments), 1)
+        self.assertIsNone(segments[0]["headwind"])
+        self.assertIsNone(segments[0]["bearing"])
+        self.assertEqual(len(segments[0]["coords"]), 3)
+
+    def test_without_hourly_keeps_geometry(self):
         track = [(7.0, 50.0), (7.0, 50.05)]
-        self.assertEqual(build_coarse_wind_segment(track, START, 3600, {}), [])
+        segments = build_coarse_wind_segment(track, START, 3600, {})
+
+        self.assertEqual(len(segments), 1)
+        self.assertIsNone(segments[0]["headwind"])
+        self.assertEqual(len(segments[0]["coords"]), 2)
+
+    def test_returns_empty_without_track(self):
+        self.assertEqual(build_coarse_wind_segment([], START, 3600, _hourly()), [])
 
 
 class HourlyHeadwindTests(SimpleTestCase):
@@ -283,6 +309,77 @@ class GeoJsonTests(SimpleTestCase):
     def test_empty_segments_yield_empty_collection(self):
         collection = segments_to_geojson([], WIND_SOURCE_COARSE)
         self.assertEqual(collection["features"], [])
+
+
+class LegacyRideRouteTests(SimpleTestCase):
+    """
+    Regression: Fahrten, die vor der Wind-Umstellung importiert wurden, haben kein
+    `wind_direction_10m` in `weather_data`. Die Karte darf deshalb nicht leer bleiben —
+    genau das ist in Produktion passiert ("Streckenverlauf: keine Daten").
+    """
+
+    class _FakeTrack:
+        def __init__(self, coords):
+            self.coords = coords
+
+    class _FakeStream:
+        def __init__(self, latlngs, times):
+            self.latlngs = latlngs
+            self.time_series = times
+
+    class _FakeRide:
+        def __init__(self, streams=None, track=None):
+            self.streams = streams
+            self.track = track
+            self.start_date = START
+            self.elapsed_time = 3600
+
+    LEGACY_WEATHER = {
+        "time": ["2024-06-01T10:00"],
+        "wind_speed_10m": [12.0],
+        "precipitation": [0.0],
+        "temperature_2m": [18.0],
+        # wind_direction_10m fehlt — genau der Prod-Zustand vor dem Backfill.
+    }
+
+    def test_legacy_ride_with_stream_still_renders_the_route(self):
+        latlngs = _north_leg(40)
+        times = list(range(0, 40 * 60, 60))
+        ride = self._FakeRide(streams=self._FakeStream(latlngs, times))
+
+        hourly = hourly_from_weather_data(self.LEGACY_WEATHER)
+        segments, source = compute_ride_wind(ride, hourly)
+
+        self.assertEqual(hourly, {}, "Altdaten liefern bewusst keinen hourly-Block")
+        self.assertTrue(segments, "Route muss trotzdem gezeichnet werden")
+        self.assertEqual(source, WIND_SOURCE_NONE)
+        self.assertTrue(all(s["headwind"] is None for s in segments))
+
+    def test_legacy_ride_without_stream_falls_back_to_track(self):
+        ride = self._FakeRide(track=self._FakeTrack([(7.0, 50.0), (7.0, 50.05)]))
+
+        segments, source = compute_ride_wind(ride, {})
+
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(source, WIND_SOURCE_NONE)
+
+    def test_ride_without_any_geometry_yields_nothing(self):
+        segments, source = compute_ride_wind(self._FakeRide(), {})
+
+        self.assertEqual(segments, [])
+        self.assertEqual(source, WIND_SOURCE_NONE)
+
+    def test_backfilled_ride_reports_stream_source(self):
+        """Nach `recompute_wind` ist wind_direction_10m da — dann wieder voll bunt."""
+        latlngs = _north_leg(40)
+        times = list(range(0, 40 * 60, 60))
+        ride = self._FakeRide(streams=self._FakeStream(latlngs, times))
+
+        backfilled = {**self.LEGACY_WEATHER, "wind_direction_10m": [0.0]}
+        segments, source = compute_ride_wind(ride, hourly_from_weather_data(backfilled))
+
+        self.assertEqual(source, WIND_SOURCE_STREAM)
+        self.assertTrue(all(s["headwind"] is not None for s in segments))
 
 
 class HeadwindSignConventionTests(SimpleTestCase):

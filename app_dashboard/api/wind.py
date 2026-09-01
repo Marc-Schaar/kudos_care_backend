@@ -37,6 +37,9 @@ MAX_GEOMETRY_POINTS = 1500
 
 WIND_SOURCE_STREAM = "stream"
 WIND_SOURCE_COARSE = "coarse"
+# Route vorhanden, aber keine nutzbaren Wetterdaten (z.B. Bestandsfahrten vor der
+# Wind-Umstellung, oder ein fehlgeschlagener Open-Meteo-Abruf beim Import).
+WIND_SOURCE_NONE = "none"
 
 
 def calculate_headwind(ride_heading, wind_direction, wind_speed):
@@ -198,15 +201,19 @@ def build_wind_segments(
     :param latlngs: Roh-GPS-Stream als [[lat, lon], ...] (Strava-Reihenfolge)
     :param times:   Sekunden seit Fahrtstart, gleiche Laenge wie `latlngs`
     :param start_time: Startzeitpunkt der Fahrt (datetime oder ISO-String)
-    :param hourly:  Open-Meteo-`hourly`-Block (time/wind_direction_10m/wind_speed_10m/...)
+    :param hourly:  Open-Meteo-`hourly`-Block (time/wind_direction_10m/wind_speed_10m/...).
+        Darf leer sein: dann entstehen reine Geometrie-Abschnitte mit `headwind=None`.
+        Die Route muss auch ohne Wetterdaten zeichenbar bleiben — die Einfaerbung ist
+        ein Overlay, kein Existenzgrund fuer die Strecke.
 
-    Gibt eine leere Liste zurueck, wenn die Eingaben fuer eine sinnvolle Aussage nicht
-    reichen — die Aufrufer fallen dann auf `build_coarse_wind_segment()` zurueck.
+    Gibt eine leere Liste nur zurueck, wenn die GEOMETRIE nicht reicht (kein/zu kurzer
+    Stream, unpassende Zeitreihe) — die Aufrufer fallen dann auf
+    `build_coarse_wind_segment()` zurueck.
     """
     start = _to_aware(start_time)
     if start is None or not latlngs or not times or len(latlngs) != len(times):
         return []
-    if len(latlngs) < 2 or not hourly or not hourly.get("time"):
+    if len(latlngs) < 2:
         return []
 
     points, point_times = _subsample(list(latlngs), list(times), MAX_GEOMETRY_POINTS)
@@ -300,34 +307,42 @@ def build_coarse_wind_segment(
     Schaetzung ausweisen kann statt falsche Praezision vorzutaeuschen.
 
     :param track_coords: [(lon, lat), ...] wie von `LineString.coords`
+
+    `hourly` darf leer sein — dann bleibt `headwind` None und es entsteht ein reiner
+    Geometrie-Abschnitt, damit die Strecke trotzdem gezeichnet werden kann.
     """
     start = _to_aware(start_time)
     if start is None or not track_coords or len(track_coords) < 2:
         return []
-    if not hourly or not hourly.get("time"):
-        return []
 
     lon1, lat1 = track_coords[0][0], track_coords[0][1]
     lon2, lat2 = track_coords[-1][0], track_coords[-1][1]
-    if (lat1, lon1) == (lat2, lon2):
-        return []
 
-    bearing = calculate_heading(lat1, lon1, lat2, lon2)
+    # Bei einer Rundfahrt (Start == Ziel) gibt es keinen sinnvollen Gesamtkurs. Die
+    # Strecke wird trotzdem gezeichnet, nur ohne Wind-Aussage.
+    closed_loop = (lat1, lon1) == (lat2, lon2)
+    bearing = None if closed_loop else calculate_heading(lat1, lon1, lat2, lon2)
+
     duration = elapsed_time or 0
     values = _segment_values(
         _hour_epochs(hourly), hourly, start.timestamp() + duration / 2
     )
 
-    if values["wind_direction"] is None or values["wind_speed"] is None:
-        return []
+    headwind = None
+    if (
+        bearing is not None
+        and values["wind_direction"] is not None
+        and values["wind_speed"] is not None
+    ):
+        headwind = calculate_headwind(
+            bearing, values["wind_direction"], values["wind_speed"]
+        )
 
     return [
         {
             "coords": [[c[0], c[1]] for c in track_coords],
-            "bearing": round(bearing, 1),
-            "headwind": calculate_headwind(
-                bearing, values["wind_direction"], values["wind_speed"]
-            ),
+            "bearing": _round_or_none(bearing),
+            "headwind": headwind,
             "wind_speed": _round_or_none(values["wind_speed"]),
             "wind_direction": _round_or_none(values["wind_direction"]),
             "precipitation": _round_or_none(values["precipitation"], 2),
@@ -403,11 +418,20 @@ def compute_ride_wind(
     :param stream_data: Roh-Antwort von `StravaStreamService.fetch_activity_streams()`.
         Ohne Angabe wird der gespeicherte `ride.streams` genutzt.
 
-    Gibt `(segments, wind_source)` zurueck; `wind_source` ist `"stream"` bei echter
-    Abschnittsberechnung und `"coarse"` beim Start-Ziel-Fallback ohne GPS-Stream.
+    Gibt `(segments, wind_source)` zurueck:
+
+    - `"stream"` — abschnittsgenau aus dem GPS-Stream, mit Wind je Abschnitt.
+    - `"coarse"` — nur Start-Ziel-Gerade aus `Ride.track`, ein Wind-Wert fuer alles.
+    - `"none"`   — Route vorhanden, aber keine nutzbaren Wetterdaten: die Abschnitte
+      tragen `headwind=None` und werden neutral gezeichnet.
+
+    Der `"none"`-Fall ist kein Rand-, sondern der Normalfall fuer Bestandsfahrten:
+    `weather_data` enthaelt `wind_direction_10m` erst seit der Wind-Umstellung, davor
+    importierte Fahrten haben es nicht (siehe `hourly_from_weather_data` und den
+    Backfill `recompute_wind`). Die Strecke muss trotzdem sichtbar sein — die
+    Einfaerbung ist ein Overlay, kein Existenzgrund fuer die Route.
     """
-    if not hourly or not hourly.get("time"):
-        return [], WIND_SOURCE_COARSE
+    has_weather = bool(hourly and hourly.get("time"))
 
     if stream_data is not None:
         latlngs = (stream_data.get("latlng") or {}).get("data") or []
@@ -417,17 +441,20 @@ def compute_ride_wind(
         latlngs = getattr(stream, "latlngs", None) or []
         times = getattr(stream, "time_series", None) or []
 
-    segments = build_wind_segments(latlngs, times, ride.start_date, hourly)
+    segments = build_wind_segments(latlngs, times, ride.start_date, hourly or {})
     if segments:
-        return segments, WIND_SOURCE_STREAM
+        return segments, (WIND_SOURCE_STREAM if has_weather else WIND_SOURCE_NONE)
 
     track_coords = list(ride.track.coords) if ride.track else []
-    return (
-        build_coarse_wind_segment(
-            track_coords, ride.start_date, ride.elapsed_time, hourly
-        ),
-        WIND_SOURCE_COARSE,
+    coarse = build_coarse_wind_segment(
+        track_coords, ride.start_date, ride.elapsed_time, hourly or {}
     )
+    if not coarse:
+        return [], WIND_SOURCE_NONE
+    # Ohne Wetterdaten traegt auch der Grob-Abschnitt keinen Gegenwind — dann ist
+    # "none" die ehrlichere Auskunft als "coarse".
+    usable = coarse[0].get("headwind") is not None
+    return coarse, (WIND_SOURCE_COARSE if usable else WIND_SOURCE_NONE)
 
 
 def hourly_from_weather_data(weather_data: dict | None) -> dict:
