@@ -371,6 +371,17 @@ die DB-Engine.
   `api/`), gerade weil seine Tasks von Celery Beat direkt per Namen aufgerufen werden (kein
   View importiert sie) — `autodiscover_tasks()` findet es dort nativ, ohne auf die fragile
   Import-Kette angewiesen zu sein.
+- `ComponentTemplateSerializer.Meta.fields` hatte lange `default_in_group` und
+  `maintenance_kind` vergessen, obwohl beide Felder im Model existieren und das
+  Frontend-Model (`ComponentTemplate` in `maintenance.models.ts`) sie als vorhanden
+  voraussetzt — die API lieferte sie einfach nicht mit. Sichtbare Folge: im
+  Baugruppen-Anlegen-Dialog waren **alle** Teile-/Verbrauchsmaterial-Checkboxen
+  unabhängig vom Katalog-Flag unchecked (`t.default_in_group` kam im Frontend als
+  `undefined` an → falsy). Gefunden erst beim Durchklicken der echten UI per
+  Playwright — API-Testskripte gegen `django.test.Client` hatten das nie bemerkt, weil
+  sie die Rohdaten selbst prüften statt die Anzeige. Jetzt behoben; bei künftigen
+  Serializer-Feldern im Zweifel gegen das Frontend-Model gegenchecken statt anzunehmen,
+  dass "das Feld existiert ja im Model" ausreicht.
 ## Env Vars (`.env`, nicht committed)
 
 `DJANGO_SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`,

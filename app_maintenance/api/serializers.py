@@ -204,6 +204,8 @@ class ComponentTemplateSerializer(serializers.ModelSerializer[ComponentTemplate]
             "warn_days",
             "is_system",
             "supports_condition_estimate",
+            "maintenance_kind",
+            "default_in_group",
             "notes",
             "group",
             "group_name",
