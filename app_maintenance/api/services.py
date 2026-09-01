@@ -212,7 +212,13 @@ class WeatherWearService:
         weather_wear_km, ride_count = WeatherWearService.calculate_weather_wear_km(
             component
         )
-        component.weather_wear_km = weather_wear_km
+        # + carried_over_weather_wear_km: analog zu wear_km in compute_wear() —
+        # component_date_windows() sieht nur die Fahrten der *aktuellen* Baugruppe,
+        # eine reaktivierte Komponente (siehe reuse_component_id) würde sonst ihre
+        # vor dem Ausbau aufgelaufene Wetter-Last verlieren.
+        component.weather_wear_km = weather_wear_km + (
+            component.carried_over_weather_wear_km or 0.0
+        )
         component.weather_wear_ride_count = ride_count
         component.weather_wear_computed_at = timezone.now()
         component.save(

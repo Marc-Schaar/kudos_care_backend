@@ -89,7 +89,16 @@ def compute_wear(
     }
 
     # ── km-Verschleiß (informativ, seit Einbau, ohne Parkzeiten) ──────────────
-    result["wear_km"] = component_active_km(component, bike_total_km)
+    # + carried_over_wear_km: km, die vor einem früheren Ausbau schon aufgelaufen
+    # waren (siehe Component.carried_over_wear_km) — component_active_km() sieht
+    # nur die Perioden der *aktuellen* Baugruppe, eine reaktivierte Komponente
+    # würde sonst wieder bei 0 anfangen.
+    active_km = component_active_km(component, bike_total_km)
+    carried_km = component.carried_over_wear_km
+    if active_km is None and carried_km is None:
+        result["wear_km"] = None
+    else:
+        result["wear_km"] = round((active_km or 0.0) + (carried_km or 0.0), 1)
 
     # ── Tage-Verschleiß (informativ, seit Einbau) ─────────────────────────────
     if component.installed_at:
@@ -493,6 +502,7 @@ class SpareComponentSerializer(serializers.ModelSerializer[Component]):
     """
 
     template = serializers.IntegerField(source="slot.template_id", read_only=True)
+    prior_wear_km = serializers.SerializerMethodField()
 
     class Meta:
         model = Component
@@ -504,7 +514,20 @@ class SpareComponentSerializer(serializers.ModelSerializer[Component]):
             "installed_at",
             "retired_at",
             "distance_at_retire",
+            "prior_wear_km",
         ]
+
+    def get_prior_wear_km(self, obj: Component) -> float | None:
+        """
+        Bereits gefahrene km bis zum Ausbau — informativ für den Übernahme-
+        Vorschlag ("dieses Teil hat schon X km"). Wird bei tatsächlicher
+        Übernahme (`reuse_component_id`) 1:1 zu `carried_over_wear_km`
+        (plus bereits vorher eingefrorenem Altverschleiß, falls vorhanden).
+        """
+        if obj.distance_at_install is None or obj.distance_at_retire is None:
+            return obj.carried_over_wear_km
+        ridden = obj.distance_at_retire - obj.distance_at_install
+        return round(ridden + (obj.carried_over_wear_km or 0.0), 1)
 
 
 class BikeSerializer(serializers.ModelSerializer[Bike]):

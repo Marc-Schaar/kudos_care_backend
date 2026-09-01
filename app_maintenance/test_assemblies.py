@@ -295,6 +295,51 @@ class AssemblyListTests(AssemblyTestBase):
         self.assertIn(self.rim.id, spares)
         self.assertEqual(spares[self.rim.id]["id"], rim.id)
 
+    def test_spare_components_prefers_actually_used_part_over_same_day_artifact(self):
+        """
+        Regressionstest: bei zwei am selben Tag ausgebauten Teilen desselben
+        Templates darf nicht schlicht "zuletzt eingebaut" gewinnen — sonst
+        schlägt ein am selben Tag angelegtes und gleich wieder ausgebautes Teil
+        (z.B. ein Tippfehler-Fix) das eigentlich wochenlang gefahrene vor.
+        """
+        # Zwei getrennte (ausgemusterte) Baugruppen-Instanzen, damit beide
+        # Kandidaten je einen eigenen Slot fürs Template bekommen können
+        # (uniq_assembly_template erlaubt nur einen Slot je Baugruppe+Template).
+        assembly_real = BikeAssembly.objects.create(
+            bike=self.bike, group=self.wheel_group, is_active=False, retired_at=date.today()
+        )
+        assembly_artifact = BikeAssembly.objects.create(
+            bike=self.bike, group=self.wheel_group, is_active=False, retired_at=date.today()
+        )
+        real_part = Component.objects.create(
+            slot=ComponentSlot.objects.create(
+                bike=self.bike, assembly=assembly_real, template=self.rim
+            ),
+            brand="Mavic",
+            model_name="Cosmic CX80",
+            installed_at=date.today() - timedelta(days=18),
+            distance_at_install=10.0,
+            is_mounted=False,
+            retired_at=date.today(),
+            distance_at_retire=90.0,
+        )
+        Component.objects.create(
+            slot=ComponentSlot.objects.create(
+                bike=self.bike, assembly=assembly_artifact, template=self.rim
+            ),
+            brand="Tippfehler-Artefakt",
+            model_name="",
+            installed_at=date.today(),
+            distance_at_install=90.0,
+            is_mounted=False,
+            retired_at=date.today(),
+            distance_at_retire=90.0,
+        )
+
+        res = self.client.get(f"/api/maintenance/bikes/{self.bike.id}/assemblies/")
+        spares = {s["template"]: s for s in res.data["spare_components"]}
+        self.assertEqual(spares[self.rim.id]["id"], real_part.id)
+
     def test_assembly_km_counts_only_time_on_the_bike(self):
         """
         `assembly_km` misst die Nutzung der Baugruppe selbst (Nutzungsperioden),
@@ -969,14 +1014,16 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
             1,
         )
 
-    def test_reuse_resets_km_axis_but_keeps_days_aging(self):
+    def test_reuse_carries_over_prior_wear_and_keeps_days_aging(self):
         """
         Anders als bei `existing_slot_id` (durchgehender Einbau) war das Teil
-        hier wirklich ausgebaut — die km-Achse muss nach der Wiedermontage bei
-        0 anfangen (sonst zählten km mit, die zwischenzeitlich ein anderer
-        Laufradsatz gefahren ist), die Tage-Achse aber altert seit dem
-        ursprünglichen Einbau unverändert weiter (genau wie bei einer
-        geparkten statt ausgebauten Baugruppe).
+        hier wirklich ausgebaut — die neue Nutzungsperiode startet erst heute
+        (sonst zählten km mit, die zwischenzeitlich ein anderer Laufradsatz
+        gefahren ist). Der vor dem Ausbau real aufgelaufene Verschleiß (hier:
+        80 km, von km 10 bis km 90) geht dabei aber nicht verloren, sondern
+        wird in carried_over_wear_km eingefroren und von compute_wear() wieder
+        draufaddiert — die km-Achse macht also bei 80 weiter, nicht bei 0. Die
+        Tage-Achse altert ohnehin unverändert seit dem ursprünglichen Einbau.
         """
         spare = self._spare_component(
             self.rim, date.today() - timedelta(days=20), 10.0
@@ -994,10 +1041,11 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
 
         spare.refresh_from_db()
+        self.assertEqual(spare.carried_over_wear_km, 80.0)
         self.assertEqual(
             compute_wear(spare, self.bike.total_distance_km)["wear_km"],
-            0.0,
-            "Die km-Achse startet nach der Wiedermontage neu bei 0.",
+            80.0,
+            "Der vor dem Ausbau aufgelaufene Verschleiß bleibt erhalten.",
         )
         self.assertEqual(
             compute_wear(spare, self.bike.total_distance_km)["wear_days"],
@@ -1009,6 +1057,21 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
         period = assembly.open_period()
         self.assertEqual(period.started_at, date.today())
         self.assertEqual(period.started_distance_km, self.bike.total_distance_km)
+
+        # Weitere 30 km fahren zählen normal oben drauf — keine Standzeit-km,
+        # aber auch keine doppelt gezählten.
+        Ride.objects.create(
+            strava_id=5010,
+            name="Testfahrt",
+            distance=30_000,
+            start_date=timezone.now(),
+            athlete=self.profile,
+            bike=self.bike,
+        )
+        self.bike.refresh_from_db()
+        self.assertEqual(
+            compute_wear(spare, self.bike.total_distance_km)["wear_km"], 110.0
+        )
 
     def test_reuse_rejects_still_mounted_component(self):
         first = self.client.post(

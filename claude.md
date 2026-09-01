@@ -246,10 +246,21 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   den Periodenbeginn auf das früheste Einbaudatum/km unter allen übernommenen Teilen zurück,
   damit der Verlauf nicht durch die neue `AssemblyUsagePeriod` abgeschnitten wird (siehe
   `api/usage.py`) — neu angelegte Teile bleiben beim gemeinsamen `installed_at`. Bei
-  `reuse_component_id` (echte Standzeit dazwischen) passiert das bewusst **nicht**: die km-Achse
-  startet nach der Wiedermontage neu bei 0 (sonst zählten km mit, die währenddessen ein anderer
-  Satz gefahren ist), nur die Tage-Achse altert seit dem ursprünglichen `installed_at` unverändert
-  weiter — exakt wie bei einer geparkten statt ausgebauten Baugruppe. `_validate_assembly_items`
+  `reuse_component_id` (echte Standzeit dazwischen) passiert das bewusst **nicht** — die neue
+  Nutzungsperiode zählt km erst ab jetzt, sonst zählten km mit, die währenddessen ein anderer
+  Satz gefahren ist. Der davor real aufgelaufene Verschleiß geht dabei aber **nicht** verloren:
+  `Component.carried_over_wear_km`/`carried_over_weather_wear_km` frieren ihn einmalig ein (weil
+  `component_active_km()`/`component_date_windows()` nur die Perioden der *aktuellen* Baugruppe
+  sehen), `compute_wear()` bzw. `WeatherWearService.recompute_component()` addieren ihn auf den
+  künftig neu berechneten Wert drauf — die km-Achse macht also am eingefrorenen Stand weiter,
+  nicht bei 0. Die Tage-Achse altert ohnehin unverändert seit dem ursprünglichen `installed_at`
+  weiter — exakt wie bei einer geparkten statt ausgebauten Baugruppe.
+  `SpareComponentSerializer.prior_wear_km` zeigt den (voraussichtlichen) Carry-over-Wert schon
+  im Vorschlag an, bevor er tatsächlich übernommen wird. `_spare_components_by_template` wählt
+  je Template den zuletzt ausgebauten Kandidaten, bei gleichem Ausbau-Datum den mit der längeren
+  tatsächlichen Standzeit (nicht schlicht "zuletzt eingebaut") — sonst gewinnt ein am selben Tag
+  angelegtes und gleich wieder ausgebautes Teil gegen eins, das wochenlang gefahren wurde.
+  `_validate_assembly_items`
   prüft entsprechend, dass der referenzierte Slot/die referenzierte Component zum Bike und zum
   Template der Zeile gehört (und bei `existing_slot_id` zusätzlich ein montiertes Teil hat).
   Drei getrennte Aktionen auf einer Instanz, die man nicht verwechseln darf:
@@ -439,7 +450,8 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   treibt `warn_status_overall`), `ComputeWearAsOfProjectionTests` (Tage-Achse-Projektion für
   die Fahrt-Vorhersage-Warnung, `as_of` defaultet auf heute).
 - `app_maintenance/test_weather_wear.py`: `WeatherWearCalculatorTests` (reine Formel, keine
-  DB), `WeatherWearServiceTests` (Recompute gegen echte `Ride`-Objekte),
+  DB), `WeatherWearServiceTests` (Recompute gegen echte `Ride`-Objekte, inkl.
+  `carried_over_weather_wear_km` wird draufaddiert statt überschrieben),
   `ComponentWeatherExplanationViewTests` (KI-Endpoint, `requests.post` gemockt in
   `ai_providers.py`, inkl. Zweit-Prüfung durch das jeweils andere Gemini/Groq-Modell:
   bestandene Prüfung liefert die Antwort direkt, durchgefallene Prüfung löst genau eine
@@ -483,9 +495,12 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   Template-Mismatch/fehlendem montierten Teil, derselbe Mechanismus funktioniert auch über
   `swap/`), `AssemblyReuseSpareComponentTests` (verwandter Fall für bereits *ausgebaute*
   Teile über `reuse_component_id`: Component zieht in einen frischen Slot um statt eine
-  zweite anzulegen, km-Achse startet nach Wiedermontage bei 0 während die Tage-Achse seit
-  dem ursprünglichen Einbau weiterzählt, Ablehnung bei noch montierter/fremder Bike-
-  Component/Template-Mismatch, gegenseitiger Ausschluss mit `existing_slot_id` —
+  zweite anzulegen, der vor dem Ausbau aufgelaufene Verschleiß bleibt via
+  `carried_over_wear_km` erhalten (macht bei Wiedermontage am eingefrorenen Stand weiter,
+  nicht bei 0) während die Tage-Achse seit dem ursprünglichen Einbau ohnehin weiterzählt,
+  Ablehnung bei noch montierter/fremder Bike-Component/Template-Mismatch, gegenseitiger
+  Ausschluss mit `existing_slot_id`, `_spare_components_by_template` bevorzugt bei gleichem
+  Ausbau-Datum die längere tatsächliche Standzeit statt "zuletzt eingebaut" —
   Regressionstest für den Prod-Bug, bei dem ein ausgemustertes Teil (Mavic-Felge) nirgends
   mehr als Übernahme-Vorschlag auftauchte), `CassetteBelongsToRearWheelGroupTests`
   (Regressionstest gegen die echten Migrations-Daten: Kassette gehört zu "Laufrad hinten",

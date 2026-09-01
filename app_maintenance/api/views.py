@@ -51,6 +51,7 @@ from .services import (
     bike_condition_report_is_stale,
 )
 from .ai_providers import generate_reviewed_text
+from .usage import component_active_km
 from .bike_assistant import suggest_models, suggest_setup
 import logging
 
@@ -850,14 +851,31 @@ def _spare_components_by_template(bike: Bike) -> dict[int, Component]:
     unabhängig davon, ob dessen Baugruppe noch aktiv/geparkt/ausgemustert ist —
     ein zurückgelegter Laufradsatz-Teil ist genauso ein Kandidat wie einer aus
     einer längst ausgemusterten Baugruppe.
+
+    Sortierung je Template: zuletzt ausgebaut zuerst, bei gleichem Ausbau-Datum
+    entscheidet die tatsächliche Standzeit (`retired_at - installed_at`) statt
+    schlicht "zuletzt eingebaut" — sonst gewinnt ein am selben Tag angelegtes
+    und gleich wieder ausgebautes Teil gegen eins, das wochenlang gefahren wurde.
     """
-    spares = (
-        Component.objects.filter(slot__bike=bike, is_mounted=False)
-        .select_related("slot__template")
-        .order_by("slot__template_id", "-retired_at", "-installed_at", "-id")
-    )
+    spares = Component.objects.filter(
+        slot__bike=bike, is_mounted=False
+    ).select_related("slot__template")
+
+    def sort_key(comp: Component):
+        mounted_days = (
+            (comp.retired_at - comp.installed_at).days
+            if comp.retired_at and comp.installed_at
+            else 0
+        )
+        return (
+            comp.retired_at or datetime.date.min,
+            mounted_days,
+            comp.installed_at or datetime.date.min,
+            comp.id,
+        )
+
     by_template: dict[int, Component] = {}
-    for comp in spares:
+    for comp in sorted(spares, key=sort_key, reverse=True):
         by_template.setdefault(comp.slot.template_id, comp)
     return by_template
 
@@ -883,18 +901,23 @@ def _build_assembly_from_request(
     montiert (`is_mounted=True`, `retired_at`/`distance_at_retire`
     zurückgesetzt). Anders als bei `existing_slot_id` (durchgehend derselbe
     physische Einbau, nie ausgebaut) bleibt hier `installed_at`/
-    `distance_at_install` unangetastet, aber der Periodenbeginn wird **nicht**
+    `distance_at_install` unangetastet, und der Periodenbeginn wird **nicht**
     darauf zurückdatiert — die Standzeit zwischen Ausbau und Wiedermontage soll
-    ja gerade nicht als gefahrene km zählen (sonst würde km, die zwischenzeitlich
-    ein anderer Laufradsatz gefahren ist, hier mitgezählt). Die Tage-Achse
-    altert trotzdem seit dem ursprünglichen `installed_at` weiter, exakt wie bei
-    einer geparkten statt ausgebauten Baugruppe — nur die km-Achse startet
-    wieder bei 0. Für `existing_slot_id` gilt dagegen: damit der Verlauf des
-    übernommenen Teils dabei nicht verloren geht (die Nutzungsperiode sonst
-    erst ab heute zählen würde, siehe api/usage.py), wird der Periodenbeginn
-    dort auf das früheste Einbaudatum/km unter den übernommenen Teilen
-    zurückdatiert — neu angelegte Teile bleiben unangetastet beim gemeinsamen
-    `installed_at`.
+    ja nicht als gefahrene km zählen (sonst würde km, die zwischenzeitlich ein
+    anderer Laufradsatz gefahren ist, hier mitgezählt). Der davor real
+    aufgelaufene Verschleiß geht dabei aber **nicht** verloren: er wird in
+    `Component.carried_over_wear_km`/`carried_over_weather_wear_km` eingefroren
+    (component_active_km() sieht nur die Perioden der aktuellen Baugruppe) und
+    von `compute_wear()` bzw. `WeatherWearService.recompute_component()` auf den
+    künftig neu berechneten Wert addiert — die km-Achse macht also am
+    eingefrorenen Stand weiter, nicht bei 0. Die Tage-Achse altert ohnehin
+    unverändert seit dem ursprünglichen `installed_at` weiter, exakt wie bei
+    einer geparkten statt ausgebauten Baugruppe. Für `existing_slot_id` gilt
+    dagegen: damit der Verlauf des übernommenen Teils dabei nicht verloren geht
+    (die Nutzungsperiode sonst erst ab heute zählen würde, siehe api/usage.py),
+    wird der Periodenbeginn dort auf das früheste Einbaudatum/km unter den
+    übernommenen Teilen zurückdatiert — neu angelegte Teile bleiben unangetastet
+    beim gemeinsamen `installed_at`.
     """
     installed_at = data.get("installed_at") or datetime.date.today()
     # Bei rückdatiertem Einbau der damalige km-Stand, damit Baugruppen-Periode und
@@ -960,6 +983,20 @@ def _build_assembly_from_request(
                     slot__template=template,
                     is_mounted=False,
                 )
+                # Verschleiß VOR dem Umhängen einfrieren — component_active_km()
+                # rechnet nur über die Perioden der Baugruppe, an der die Component
+                # gerade noch hängt (die alte); danach wäre diese Geschichte für
+                # component_active_km() unsichtbar. compute_wear() addiert
+                # carried_over_wear_km auf den künftig neu berechneten Wert drauf,
+                # WeatherWearService.recompute_component() analog für die
+                # Wetter-Achse (siehe Docstring/Kommentare dort).
+                component.carried_over_wear_km = (
+                    component.carried_over_wear_km or 0.0
+                ) + (component_active_km(component, bike.total_distance_km) or 0.0)
+                component.carried_over_weather_wear_km = (
+                    component.carried_over_weather_wear_km or 0.0
+                ) + (component.weather_wear_km or 0.0)
+
                 slot = ComponentSlot.objects.create(
                     bike=bike, assembly=assembly, template=template
                 )
@@ -973,11 +1010,13 @@ def _build_assembly_from_request(
                         "is_mounted",
                         "retired_at",
                         "distance_at_retire",
+                        "carried_over_wear_km",
+                        "carried_over_weather_wear_km",
                     ]
                 )
                 # Periodenbeginn bewusst NICHT zurückdatiert (siehe Docstring) —
-                # die km-Achse beginnt für das wiedermontierte Teil neu bei 0,
-                # nur die Tage-Achse zählt über sein `installed_at` weiter.
+                # die neue Nutzungsperiode zählt km ab jetzt, der eingefrorene
+                # Altverschleiß wird stattdessen in compute_wear() draufaddiert.
                 continue
 
             slot, _ = ComponentSlot.objects.get_or_create(

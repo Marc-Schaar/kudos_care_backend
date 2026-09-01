@@ -656,6 +656,29 @@ class Component(models.Model):
             "(siehe AssemblyUsagePeriod)."
         ),
     )
+    carried_over_wear_km = models.FloatField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Verschleiß-km, die bereits vor einem früheren Ausbau aufgelaufen waren. "
+            "Wird beim Reaktivieren eines ausgebauten Teils (siehe "
+            "api/views.py::_build_assembly_from_request, reuse_component_id) einmalig "
+            "eingefroren, weil die neue Nutzungsperiode/Baugruppe die alte Fahrhistorie "
+            "sonst nicht sieht — component_active_km() rechnet ja nur die Perioden der "
+            "aktuellen Baugruppe. compute_wear() addiert diesen Wert auf den frisch "
+            "berechneten km-Verschleiß."
+        ),
+    )
+    carried_over_weather_wear_km = models.FloatField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Analog zu carried_over_wear_km, aber für die wetter-gewichtete Achse: "
+            "friert weather_wear_km beim Reaktivieren ein, damit "
+            "WeatherWearService.recompute_component() den alten Wert nicht durch die "
+            "neue (kürzere) Fahrhistorie überschreibt statt ihn draufzurechnen."
+        ),
+    )
     is_mounted = models.BooleanField(default=True)
     notes = models.TextField(blank=True)
 

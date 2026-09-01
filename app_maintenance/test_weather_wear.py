@@ -215,6 +215,28 @@ class WeatherWearServiceTests(APITestCase):
         self.assertEqual(self.component.weather_wear_ride_count, 1)
         self.assertIsNotNone(self.component.weather_wear_computed_at)
 
+    def test_recompute_component_adds_carried_over_weather_wear(self):
+        """
+        Ein reaktiviertes Teil (siehe `_build_assembly_from_request`,
+        `reuse_component_id`) friert seine bisherige Wetter-Last in
+        `carried_over_weather_wear_km` ein — recompute_component() darf sie
+        nicht überschreiben, sondern muss sie draufaddieren.
+        """
+        self.component.carried_over_weather_wear_km = 42.0
+        self.component.save(update_fields=["carried_over_weather_wear_km"])
+
+        Ride.objects.create(
+            strava_id=1005,
+            name="Fahrt nach Reaktivierung",
+            distance=10000,
+            start_date=timezone.now() - timedelta(days=1),
+            athlete=self.profile,
+            bike=self.bike,
+        )
+        WeatherWearService.recompute_component(self.component)
+        self.component.refresh_from_db()
+        self.assertEqual(self.component.weather_wear_km, 52.0)
+
 
 class RecomputeWeatherWearForBikeTaskTests(APITestCase):
     """
