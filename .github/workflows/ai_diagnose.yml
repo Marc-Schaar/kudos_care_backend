@@ -1,0 +1,55 @@
+name: AI Diagnose
+
+# Manuell ausloesbarer Lauf von `manage.py ai_diagnose` auf dem Server — prueft die
+# Gemini/Groq-Anbindung mit den ECHTEN Prod-Keys (SSH-Zugang liegt nur im Secret
+# SSH_PRIVATE_KEY, siehe wind_backfill.yml fuer die ausfuehrlichere Begruendung).
+#
+# Der Command selbst gibt niemals einen Key-Wert aus (Redaktion + Header statt
+# Query-Param bei Gemini), das Actions-Log ist also gefahrlos einsehbar.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Setup SSH key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          HOST: ${{ secrets.SERVER_IP }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run ai_diagnose
+        env:
+          HOST: ${{ secrets.SERVER_IP }}
+          DEPLOY_USER: ${{ secrets.SERVER_USER }}
+        run: |
+          set -uo pipefail
+
+          cat > /tmp/remote_ai_diagnose.sh <<'REMOTE'
+          set -e
+          cd /home/marc/projects/kudo_care/kudos_care_backend
+          set -a && source .env && set +a
+          source venv/bin/activate
+          python manage.py ai_diagnose
+          REMOTE
+
+          # Einmaliger Retry analog zum Deploy: sshd weist per PerSourcePenalties
+          # kurzzeitig ab ("Not allowed at this time"), eine Penalty haelt ~15s.
+          for attempt in 1 2 3; do
+            if ssh -i "$HOME/.ssh/id_deploy" -o ConnectTimeout=15 -o BatchMode=yes \
+                 "$DEPLOY_USER@$HOST" bash -s < /tmp/remote_ai_diagnose.sh; then
+              exit 0
+            fi
+            echo "Versuch $attempt fehlgeschlagen, warte 30s"
+            sleep 30
+          done
+          echo "ai_diagnose nach 3 Versuchen fehlgeschlagen"
+          exit 1
