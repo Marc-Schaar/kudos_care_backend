@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -62,8 +63,7 @@ class WarnLevel:
 
 def warn_status_from_ratio(ratio: float | None) -> str:
     """
-    Gemeinsame Ampel-Logik (siehe auch api/serializers.py::WarnStatus, das hierher
-    delegiert): ratio = aktueller Wert / Grenzwert.
+    Gemeinsame Ampel-Logik: ratio = aktueller Wert / Grenzwert.
     < 0.8 → ok, 0.8–1.0 → warn, ≥ 1.0 → critical, None → unknown.
     """
     if ratio is None:
@@ -73,6 +73,30 @@ def warn_status_from_ratio(ratio: float | None) -> str:
     if ratio >= 0.8:
         return WarnLevel.WARN
     return WarnLevel.OK
+
+
+#: Reihenfolge der Ampel-Aggregation — der schlechteste Wert gewinnt. `unknown`
+#: steht bewusst hinter `ok`: ein Teil ohne Datenbasis soll die Bike-Ampel nicht
+#: besser aussehen lassen, aber auch keine Warnung erfinden.
+WARN_LEVEL_PRIORITY = (
+    WarnLevel.CRITICAL,
+    WarnLevel.WARN,
+    WarnLevel.OK,
+    WarnLevel.UNKNOWN,
+)
+
+
+def worst_of(statuses: "Iterable[str]") -> str:
+    """
+    Schlechtester Status einer Sammlung — die einzige Stelle, an der aus
+    mehreren Ampeln eine wird (Achsen einer Komponente, Slots+Intervalle einer
+    Baugruppe, Baugruppen eines Bikes). Leere Sammlung → `unknown`.
+    """
+    seen = set(statuses)
+    for level in WARN_LEVEL_PRIORITY:
+        if level in seen:
+            return level
+    return WarnLevel.UNKNOWN
 
 
 class BikeQuerySet(models.QuerySet):
@@ -467,15 +491,7 @@ class BikeAssembly(models.Model):
         for interval in self.intervals.all():
             statuses.append(interval.status(bike_total_km))
 
-        for level in (
-            WarnLevel.CRITICAL,
-            WarnLevel.WARN,
-            WarnLevel.OK,
-            WarnLevel.UNKNOWN,
-        ):
-            if level in statuses:
-                return level
-        return WarnLevel.UNKNOWN
+        return worst_of(statuses)
 
 
 class AssemblyUsagePeriod(models.Model):

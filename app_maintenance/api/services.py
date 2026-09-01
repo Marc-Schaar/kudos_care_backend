@@ -11,7 +11,8 @@ from app_maintenance.models import (
     ComponentSlot,
     WeatherSensitivityCoefficient,
 )
-from .serializers import WarnStatus, compute_wear
+from ..models import WarnLevel
+from .serializers import compute_wear
 from .usage import component_date_windows, date_in_windows
 
 logger = logging.getLogger("my_app_debug")
@@ -615,7 +616,7 @@ def get_new_component_warnings(
             wear = compute_wear(comp, b.total_distance_km)
             status = wear["warn_status_overall"]
             if (
-                status in (WarnStatus.WARN, WarnStatus.CRITICAL)
+                status in (WarnLevel.WARN, WarnLevel.CRITICAL)
                 and status != comp.last_warn_notified_status
             ):
                 results.append(
@@ -656,19 +657,19 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
             continue
 
         bike_total_km = bike.total_distance_km
-        today_worst = WarnStatus.UNKNOWN
+        today_worst = WarnLevel.UNKNOWN
         projected_components = []
         for slot, comp in mounted:
             today_wear = compute_wear(comp, bike_total_km)
-            if today_wear["warn_status_overall"] == WarnStatus.CRITICAL:
-                today_worst = WarnStatus.CRITICAL
+            if today_wear["warn_status_overall"] == WarnLevel.CRITICAL:
+                today_worst = WarnLevel.CRITICAL
             projected_wear = compute_wear(comp, bike_total_km, as_of=predicted_date)
-            if projected_wear["warn_status_overall"] == WarnStatus.CRITICAL:
+            if projected_wear["warn_status_overall"] == WarnLevel.CRITICAL:
                 projected_components.append(
                     {"slot": slot, "component": comp, "wear": projected_wear}
                 )
 
-        if today_worst == WarnStatus.CRITICAL:
+        if today_worst == WarnLevel.CRITICAL:
             continue  # schon heute kritisch -> deckt get_new_component_warnings() ab
         if not projected_components:
             continue

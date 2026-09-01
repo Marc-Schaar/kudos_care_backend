@@ -13,25 +13,11 @@ from app_maintenance.models import (
     MaintenanceIntervalKind,
     MaintenanceKind,
     MaintenanceLog,
+    WarnLevel,
     warn_status_from_ratio,
+    worst_of,
 )
 from .usage import component_active_km
-
-
-class WarnStatus:
-    OK = "ok"
-    WARN = "warn"
-    CRITICAL = "critical"
-    UNKNOWN = "unknown"
-
-    @staticmethod
-    def from_ratio(ratio: float | None) -> str:
-        """
-        ratio = aktueller Wert / Grenzwert (z.B. gefahrene km / warn_km)
-        < 0.8  → ok / 0.8–1.0 → warn / ≥ 1.0 → critical / None → unknown.
-        Delegiert an die gemeinsame Logik in models.py.
-        """
-        return warn_status_from_ratio(ratio)
 
 
 def bike_total_km(context: dict, bike: Bike) -> float | None:
@@ -104,10 +90,10 @@ def compute_wear(
     result = {
         "wear_km": None,
         "wear_days": None,
-        "warn_status_km": WarnStatus.UNKNOWN,
-        "warn_status_days": WarnStatus.UNKNOWN,
-        "warn_status_weather_km": WarnStatus.UNKNOWN,
-        "warn_status_overall": WarnStatus.UNKNOWN,
+        "warn_status_km": WarnLevel.UNKNOWN,
+        "warn_status_days": WarnLevel.UNKNOWN,
+        "warn_status_weather_km": WarnLevel.UNKNOWN,
+        "warn_status_overall": WarnLevel.UNKNOWN,
     }
 
     # ── km-Verschleiß (informativ, seit Einbau, ohne Parkzeiten) ──────────────
@@ -142,36 +128,36 @@ def compute_wear(
         if km_since_check is not None:
             threshold_km = latest_check.snooze_km or warn_km
             if threshold_km:
-                result["warn_status_km"] = WarnStatus.from_ratio(
+                result["warn_status_km"] = warn_status_from_ratio(
                     km_since_check / threshold_km
                 )
             else:
-                result["warn_status_km"] = WarnStatus.OK
+                result["warn_status_km"] = WarnLevel.OK
 
         days_since_check = (as_of - latest_check.checked_at).days
         threshold_days = latest_check.snooze_days or warn_days
         if threshold_days:
-            result["warn_status_days"] = WarnStatus.from_ratio(
+            result["warn_status_days"] = warn_status_from_ratio(
                 days_since_check / threshold_days
             )
         else:
-            result["warn_status_days"] = WarnStatus.OK
+            result["warn_status_days"] = WarnLevel.OK
     else:
         if result["wear_km"] is not None:
             if warn_km:
-                result["warn_status_km"] = WarnStatus.from_ratio(
+                result["warn_status_km"] = warn_status_from_ratio(
                     result["wear_km"] / warn_km
                 )
             else:
-                result["warn_status_km"] = WarnStatus.OK
+                result["warn_status_km"] = WarnLevel.OK
 
         if result["wear_days"] is not None:
             if warn_days:
-                result["warn_status_days"] = WarnStatus.from_ratio(
+                result["warn_status_days"] = warn_status_from_ratio(
                     result["wear_days"] / warn_days
                 )
             else:
-                result["warn_status_days"] = WarnStatus.OK
+                result["warn_status_days"] = WarnLevel.OK
 
     # ── Wetter-gewichteter km-Verschleiß ──────────────────────────────────────
     # component.weather_wear_km wird asynchron von WeatherWearService befüllt
@@ -193,23 +179,20 @@ def compute_wear(
             weather_km_since_check = component.weather_wear_km
 
         if warn_km:
-            result["warn_status_weather_km"] = WarnStatus.from_ratio(
+            result["warn_status_weather_km"] = warn_status_from_ratio(
                 weather_km_since_check / warn_km
             )
         else:
-            result["warn_status_weather_km"] = WarnStatus.OK
+            result["warn_status_weather_km"] = WarnLevel.OK
 
     # ── Gesamt-Status = schlechtester Einzelwert ──────────────────────────────
-    statuses = [
-        result["warn_status_km"],
-        result["warn_status_days"],
-        result["warn_status_weather_km"],
-    ]
-    priority = [WarnStatus.CRITICAL, WarnStatus.WARN, WarnStatus.OK, WarnStatus.UNKNOWN]
-    for status in priority:
-        if status in statuses:
-            result["warn_status_overall"] = status
-            break
+    result["warn_status_overall"] = worst_of(
+        [
+            result["warn_status_km"],
+            result["warn_status_days"],
+            result["warn_status_weather_km"],
+        ]
+    )
 
     return result
 
@@ -429,7 +412,7 @@ class ComponentSlotSerializer(serializers.ModelSerializer[ComponentSlot]):
     def get_warn_status(self, obj: ComponentSlot) -> str:
         comp = obj.mounted_component
         if comp is None:
-            return WarnStatus.UNKNOWN
+            return WarnLevel.UNKNOWN
         wear = compute_wear(comp, bike_total_km(cast(dict, self.context), obj.bike))
         return wear["warn_status_overall"]
 
@@ -474,7 +457,7 @@ class ComponentSlotListSerializer(serializers.ModelSerializer[ComponentSlot]):
     def get_warn_status(self, obj: ComponentSlot) -> str:
         comp = obj.mounted_component
         if comp is None:
-            return WarnStatus.UNKNOWN
+            return WarnLevel.UNKNOWN
         return self._get_wear(comp, obj)["warn_status_overall"]
 
     def get_mounted_component(self, obj: ComponentSlot):
@@ -571,30 +554,20 @@ class BikeSerializer(serializers.ModelSerializer[Bike]):
         ).data
 
     def get_warn_status(self, obj: Bike) -> str:
-        priority = [
-            WarnStatus.CRITICAL,
-            WarnStatus.WARN,
-            WarnStatus.OK,
-            WarnStatus.UNKNOWN,
-        ]
         total_km = bike_total_km(cast(dict, self.context), obj)
-        slot_statuses = []
+        statuses = []
 
         for slot in slots_on_bike(obj):
             comp = slot.mounted_component
             if comp is None:
-                slot_statuses.append(WarnStatus.UNKNOWN)
+                statuses.append(WarnLevel.UNKNOWN)
                 continue
-            wear = compute_wear(comp, total_km)
-            slot_statuses.append(wear["warn_status_overall"])
+            statuses.append(compute_wear(comp, total_km)["warn_status_overall"])
 
         for interval in obj.intervals.all():
-            slot_statuses.append(interval.status(total_km))
+            statuses.append(interval.status(total_km))
 
-        for status in priority:
-            if status in slot_statuses:
-                return status
-        return WarnStatus.UNKNOWN
+        return worst_of(statuses)
 
 
 class BikeListSerializer(serializers.ModelSerializer[Bike]):
@@ -624,26 +597,16 @@ class BikeListSerializer(serializers.ModelSerializer[Bike]):
         return bike_total_km(cast(dict, self.context), obj)
 
     def get_warn_status(self, obj: Bike) -> str:
-        priority = [
-            WarnStatus.CRITICAL,
-            WarnStatus.WARN,
-            WarnStatus.OK,
-            WarnStatus.UNKNOWN,
-        ]
         total_km = bike_total_km(cast(dict, self.context), obj)
-        slot_statuses = []
+        statuses = []
         for slot in slots_on_bike(obj):
             comp = slot.mounted_component
             if comp is None:
                 continue
-            wear = compute_wear(comp, total_km)
-            slot_statuses.append(wear["warn_status_overall"])
+            statuses.append(compute_wear(comp, total_km)["warn_status_overall"])
         for interval in obj.intervals.all():
-            slot_statuses.append(interval.status(total_km))
-        for status in priority:
-            if status in slot_statuses:
-                return status
-        return WarnStatus.UNKNOWN
+            statuses.append(interval.status(total_km))
+        return worst_of(statuses)
 
 
 # ── Baugruppen (BikeAssembly) & Wartungs-Intervalle ───────────────────────────

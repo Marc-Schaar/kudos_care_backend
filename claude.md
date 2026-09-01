@@ -148,8 +148,14 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   entsprechend `slots__template__group` (für `ComponentTemplateSerializer.group_name`)
   und `slots__components__checks`; Baugruppen-Ketten zusätzlich `slots__bike`, da Django
   bei diesem Pfad nur `slot.assembly` zurückcacht.
-  `WarnStatus` (`api/serializers.py`) berechnet
-  `ok`/`warn`/`critical`/`unknown` aus einem Ratio (≥1.0 critical, ≥0.8 warn);
+  Die Ampel hat **eine** Quelle, `models.py`: `WarnLevel` (die vier Konstanten),
+  `warn_status_from_ratio()` (Ratio → Status, ≥1.0 critical, ≥0.8 warn) und `worst_of()`
+  (schlechtester aus mehreren). `worst_of()` ist die einzige Stelle, an der aus mehreren
+  Ampeln eine wird — Achsen einer Komponente, Slots+Intervalle einer Baugruppe, Baugruppen
+  eines Bikes; vorher stand dieselbe Prioritätsschleife viermal ausgeschrieben da, und
+  `api/serializers.py` hatte mit `WarnStatus` zusätzlich einen zweiten Namen für dieselben
+  vier Konstanten. In der Prioritätsordnung steht `unknown` bewusst hinter `ok`: ein Teil
+  ohne Datenbasis soll die Bike-Ampel nicht schönen, aber auch keine Warnung erfinden.
   `compute_wear()` kombiniert km-/Tage-/Wetter-Achse zum schlechtesten Einzelwert; optionaler
   `as_of`-Parameter (Default: heute) projiziert nur die Tage-Achse auf ein zukünftiges Datum —
   genutzt von `app_notifications` für die Fahrt-Vorhersage-Warnung, km-/Wetter-Achse bleiben
