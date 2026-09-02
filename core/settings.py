@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 from celery.schedules import crontab
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -53,9 +54,6 @@ EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "True") == "True"
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
 
-# Basis-URL des Frontends fuer Links in E-Mails (z.B. "Zum Bike" in Warn-Mails).
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -67,6 +65,26 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 DEBUG = os.environ.get("DEBUG", "True") == "True"
 
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost").split(",")
+
+# Basis-URL des Frontends fuer Links in E-Mails (z.B. "Zum Bike" in Warn-Mails).
+#
+# Ohne gesetzten Wert griff hier frueher stillschweigend "http://localhost:3000".
+# In Produktion hiess das: jede verschickte Mail verlinkte auf den Rechner des
+# Empfaengers. Aufgefallen ist es erst an echten Mails. Zwei Konsequenzen:
+#
+# * Der Entwicklungs-Default zeigt jetzt auf 4200 — dort laeuft `ng serve`,
+#   3000 war ohnehin nie richtig.
+# * Ohne DEBUG ist der Wert Pflicht. Ein Startfehler ist deutlich billiger als
+#   Mails mit toten Links, die niemand bemerkt.
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "")
+if not FRONTEND_URL:
+    if DEBUG:
+        FRONTEND_URL = "http://localhost:4200"
+    else:
+        raise ImproperlyConfigured(
+            "FRONTEND_URL fehlt. Die Links in den Benachrichtigungs-Mails brauchen "
+            "die oeffentliche Adresse des Frontends (z.B. https://example.com)."
+        )
 
 CORS_ALLOWED_ORIGINS = os.environ.get(
     "CORS_ALLOWED_ORIGINS", "http://localhost:3000"

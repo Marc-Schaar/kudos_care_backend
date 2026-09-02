@@ -589,8 +589,7 @@ Grounding-Kontingent, siehe `app_maintenance` oben),
 `GROQ_API_KEY`, `GROQ_MODEL`, `EMAIL_BACKEND` (Default Djangos SMTP-Backend),
 `EMAIL_HOST` (Default `smtp-relay.brevo.com`), `EMAIL_PORT` (Default `587`),
 `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS` (Default `True`),
-`DEFAULT_FROM_EMAIL` (Default = `EMAIL_HOST_USER`), `FRONTEND_URL` (für Links in E-Mails,
-Default `http://localhost:3000`), `MAINTENANCE_EMAIL_CHECK_HOUR` (Default `7`, Stunde der
+`DEFAULT_FROM_EMAIL` (Default = `EMAIL_HOST_USER`), `FRONTEND_URL` (Basis für die Links in E-Mails; **ohne `DEBUG` Pflicht** — fehlt der Wert, bricht der Start mit `ImproperlyConfigured` ab. Vorher griff still `http://localhost:3000`, wodurch **jede Produktions-Mail auf den Rechner des Empfängers verlinkte**; aufgefallen ist das erst an echten Mails. Dev-Default ist jetzt `http://localhost:4200`, wo `ng serve` läuft), `MAINTENANCE_EMAIL_CHECK_HOUR` (Default `7`, Stunde der
 täglichen `app_notifications`-Checks). Die AI-Keys werden nur für die optionale
 KI-Erklärung gebraucht — ohne sie liefert der Endpoint kontrolliert 503, der Rest der App
 funktioniert unabhängig davon; E-Mail-Versand ist analog fehlertolerant
@@ -726,6 +725,11 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   ```json-Fences, kaputtes JSON und Provider-Ausfall. `KudoModelSuggestionTests`
   (leere Liste = „Hersteller unbekannt" vs. `None` = „KI kaputt" — ein Unterschied),
   `AssistantEndpointTests` (503-Pfad, fremdes Bike → 404, Auth).
+- `app_notifications/test_frontend_url.py`: `FrontendUrlInEmailsTests` — kein Link in
+  einer Mail zeigt auf localhost, und die Basis-URL kommt ausschließlich aus
+  `settings.FRONTEND_URL` (nichts im Template festverdrahtet). Regressionstest gegen den
+  Produktionsfehler, bei dem der stille Default jede Mail auf den Empfängerrechner
+  verlinkte.
 - `app_notifications/tests.py`: `SendTemplatedEmailTests` (Opt-out-Flag, fehlende
   E-Mail-Adresse), `PredictNextRideDateTests` (Median-Vorhersage, Clamping bei
   Überfälligkeit auf "heute", zu wenig Historie → `None`), `CheckComponentWarningsTests`/
