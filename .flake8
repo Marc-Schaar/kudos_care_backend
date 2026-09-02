@@ -1,0 +1,28 @@
+[flake8]
+# Muss zu pyproject.toml ([tool.black]/[tool.isort]) passen.
+max-line-length = 88
+
+# E203 (whitespace vor ':') und W503 (Zeilenumbruch vor binärem Operator)
+# widersprechen direkt dem, was black erzeugt — beide sind in einem
+# black-formatierten Projekt immer falsch positiv.
+# E501 bleibt aus: black bricht Code auf 88, kann aber lange Strings und
+# URLs in Kommentaren/Docstrings nicht umbrechen, und die sollen nicht
+# künstlich zerhackt werden.
+extend-ignore = E203, W503, E501
+
+exclude =
+    .git,
+    __pycache__,
+    venv,
+    */migrations/*,
+    staticfiles
+
+# Django-Konvention: settings.py zieht Werte per `from ... import *`-ähnlichen
+# Mustern und definiert absichtlich Namen, die hier ungenutzt aussehen.
+per-file-ignores =
+    core/settings.py: F401
+    */__init__.py: F401
+# startapp-Boilerplate: app_strava_webhook hat weder Models noch
+# Admin-Registrierungen, die Imports stehen nur als Geruest da.
+    app_strava_webhook/admin.py: F401
+    app_strava_webhook/models.py: F401

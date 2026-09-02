@@ -33,7 +33,14 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   — zusätzlich zum Worker; in Produktion als eigenes Supervisor-Programm `celery-beat`
   eingerichtet, wird von `deploy.yml` mitneugestartet
 - Tests: `python manage.py test` (kein pytest konfiguriert, trotz anderslautender Vermutung)
-- Linter/Formatter: `black . && isort . && flake8`
+- Linter/Formatter: **`PYTHONUTF8=1 isort . && black . && flake8`** (isort vor black —
+  black glättet danach, was isort umbricht). Alle drei stehen in `requirements.txt`;
+  Konfiguration in `pyproject.toml` (black + isort mit `profile = "black"`) und `.flake8`
+  (`max-line-length = 88`, `E203`/`W503`/`E501` aus, weil sie black direkt
+  widersprechen). **`PYTHONUTF8=1` ist unter Windows nicht optional:** ohne den
+  UTF-8-Modus liest isort mit der ANSI-Codepage und überspringt jede Datei, die `→` oder
+  `≈` enthält, *stillschweigend* — gemessen 8 Dateien, darunter `app_maintenance/models.py`
+  und `api/views.py`. Der Lauf meldet trotzdem Erfolg.
 
 ## Architektur — Apps
 

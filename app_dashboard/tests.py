@@ -3,14 +3,13 @@ from unittest.mock import Mock, patch
 import requests
 from django.contrib.auth import get_user_model
 from django.test import override_settings
-from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
-from app_dashboard.api.tasks import run_strava_sync
 from app_dashboard.api.services import StravaImportService
+from app_dashboard.api.tasks import run_strava_sync
 from app_dashboard.models import Ride
 from app_maintenance.models import Bike, BikeType
 

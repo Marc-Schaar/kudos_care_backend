@@ -21,11 +21,8 @@ ein `confidence`-Feld, das die UI als "bitte pruefen" ausweisen kann.
 
 import logging
 
-from app_maintenance.models import (
-    ComponentGroup,
-    ComponentTemplate,
-    MaintenanceKind,
-)
+from app_maintenance.models import ComponentGroup, MaintenanceKind
+
 from .ai_providers import get_ai_provider
 
 logger = logging.getLogger("my_app_debug")

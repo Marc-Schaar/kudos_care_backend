@@ -16,8 +16,6 @@ oft die vollstaendige URL, und die soll in keinem Log/Actions-Run auftauchen. Zu
 wird jede Ausgabe hart gegen die bekannten Key-Werte redigiert, als zweite Absicherung.
 """
 
-import re
-
 import requests
 from django.conf import settings
 from django.core.management.base import BaseCommand
@@ -123,7 +121,7 @@ class Command(BaseCommand):
 
         status = resp.status_code
         if status == 200:
-            return f"OK (HTTP 200) — Key ist gueltig und aktiv."
+            return "OK (HTTP 200) — Key ist gueltig und aktiv."
         if status in (401, 403):
             body = self._short_body(resp)
             return f"FEHLER: HTTP {status} (Key ungueltig/nicht autorisiert). Antwort: {body}"

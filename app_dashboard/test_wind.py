@@ -16,10 +16,10 @@ from app_dashboard.api.wind import (
     WIND_SOURCE_NONE,
     WIND_SOURCE_STREAM,
     average_headwind,
-    compute_ride_wind,
     build_coarse_wind_segment,
     build_wind_segments,
     calculate_headwind,
+    compute_ride_wind,
     haversine_km,
     hourly_from_weather_data,
     hourly_headwind,
@@ -90,7 +90,6 @@ class OutAndBackTests(SimpleTestCase):
         self.assertAlmostEqual(average_headwind(self.segments), 0.0, delta=1.0)
 
     def test_bearings_reflect_the_actual_direction_travelled(self):
-        half = len(self.segments) // 2
         self.assertAlmostEqual(self.segments[0]["bearing"], 0.0, delta=1.0)
         self.assertAlmostEqual(self.segments[-1]["bearing"], 180.0, delta=1.0)
 
