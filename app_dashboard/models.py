@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING
 
 from django.contrib.gis.db import models
+
 from app_auth.models import StravaProfile
 from app_maintenance.models import Bike
 

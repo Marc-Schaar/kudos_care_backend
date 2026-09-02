@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand
 
-from app_maintenance.models import Component
 from app_maintenance.api.services import WeatherWearService
+from app_maintenance.models import Component
 
 
 class Command(BaseCommand):

@@ -12,8 +12,8 @@ def recompute_weather_wear_for_bike(self, bike_id: int):
     Bikes neu. Wird als Fire-and-forget-Seiteneffekt nach jedem Ride-Import
     ausgelöst (siehe app_dashboard/api/services.py::sync_activity_to_db).
     """
-    from app_maintenance.models import Bike
     from app_maintenance.api.services import WeatherWearService
+    from app_maintenance.models import Bike
     from app_notifications.tasks import check_component_warnings_for_bike
 
     try:

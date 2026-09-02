@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.template.loader import render_to_string
+
 from app_notifications.services import html_to_plaintext
 
 DEFAULT_OUTPUT_DIR = "email_previews"

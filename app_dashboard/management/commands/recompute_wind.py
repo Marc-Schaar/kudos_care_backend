@@ -1,12 +1,12 @@
 from django.core.management.base import BaseCommand
 
-from app_dashboard.models import Ride
 from app_dashboard.api.services import WeatherService
 from app_dashboard.api.wind import (
     average_headwind,
     compute_ride_wind,
     get_filtered_weather,
 )
+from app_dashboard.models import Ride
 
 
 class Command(BaseCommand):

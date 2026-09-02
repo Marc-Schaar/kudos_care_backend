@@ -1,6 +1,8 @@
 import time
+
 import requests
 from django.conf import settings
+
 from app_maintenance.models import Bike, BikeType
 
 

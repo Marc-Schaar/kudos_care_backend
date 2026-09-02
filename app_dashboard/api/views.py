@@ -5,12 +5,21 @@ from celery.result import AsyncResult
 from django.core.serializers import serialize
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-
+from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework import status
 
+from app_auth.mixins import CsrfExemptSessionAuthentication
+from app_auth.models import StravaProfile
+from app_maintenance.api.ai_providers import generate_reviewed_text, get_ai_provider
+from app_maintenance.api.services import (
+    build_ride_wear_impact_prompt,
+    ride_wear_breakdown,
+    ride_wear_impact_is_stale,
+)
+
+from ..models import Ride
 from .serializers import RideSerializer, StravaSyncStatusSerializer
 from .services import build_ride_summary_prompt
 from .tasks import run_strava_sync
@@ -18,15 +27,6 @@ from .wind import (
     compute_ride_wind,
     hourly_from_weather_data,
     segments_to_geojson,
-)
-from ..models import Ride
-from app_auth.models import StravaProfile
-from app_auth.mixins import CsrfExemptSessionAuthentication
-from app_maintenance.api.ai_providers import generate_reviewed_text, get_ai_provider
-from app_maintenance.api.services import (
-    build_ride_wear_impact_prompt,
-    ride_wear_breakdown,
-    ride_wear_impact_is_stale,
 )
 
 logger = logging.getLogger("my_app_debug")

@@ -9,9 +9,6 @@ from django.test import SimpleTestCase
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
-from app_notifications.services import html_to_plaintext
-from app_notifications.templatetags.notification_extras import warn_label
-
 from app_auth.models import StravaProfile
 from app_dashboard.api.services import predict_next_ride_date
 from app_dashboard.models import Ride
@@ -23,13 +20,14 @@ from app_maintenance.models import (
     ComponentSlot,
     ComponentTemplate,
 )
-from app_notifications.services import send_templated_email
+from app_notifications.services import html_to_plaintext, send_templated_email
 from app_notifications.tasks import (
     check_bike_unsafe_predictions,
     check_component_warnings,
     check_component_warnings_for_bike,
     send_welcome_email_task,
 )
+from app_notifications.templatetags.notification_extras import warn_label
 
 
 def _make_profile(user, strava_athlete_id=80001, email_enabled=True):

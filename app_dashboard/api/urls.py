@@ -1,12 +1,13 @@
 from django.urls import path
+
 from .views import (
-    StravaSyncView,
-    StravaSyncCancelView,
-    StravaSyncStatusView,
-    ActivityListView,
     ActivityDetailView,
+    ActivityListView,
     ActivitySummaryView,
     ActivityWearImpactView,
+    StravaSyncCancelView,
+    StravaSyncStatusView,
+    StravaSyncView,
 )
 
 urlpatterns = [

@@ -1,8 +1,9 @@
 from celery import shared_task
-from app_auth.models import StravaProfile
+
 from app_auth.api.utils import strava_get
-from app_dashboard.models import Ride
+from app_auth.models import StravaProfile
 from app_dashboard.api.services import StravaImportService
+from app_dashboard.models import Ride
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)

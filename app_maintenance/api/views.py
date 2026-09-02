@@ -1,9 +1,9 @@
 import datetime
+import logging
 
-from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
-
 from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -15,45 +15,45 @@ from app_maintenance.models import (
     AssemblyUsagePeriod,
     Bike,
     BikeAssembly,
-    ComponentGroup,
-    ComponentTemplate,
-    ComponentSlot,
     Component,
     ComponentCheck,
+    ComponentGroup,
+    ComponentSlot,
+    ComponentTemplate,
     MaintenanceInterval,
     MaintenanceIntervalKind,
     MaintenanceKind,
     MaintenanceLog,
 )
+
+from .ai_providers import generate_reviewed_text
+from .bike_assistant import suggest_models, suggest_setup
 from .serializers import (
-    BikeSerializer,
-    BikeListSerializer,
-    BikeAssemblySerializer,
-    ComponentGroupSerializer,
-    ComponentTemplateSerializer,
-    ComponentSlotSerializer,
-    ComponentSlotListSerializer,
-    ComponentSerializer,
-    SpareComponentSerializer,
-    ComponentCheckCreateSerializer,
     AssemblyCreateRequestSerializer,
-    MaintenanceIntervalSerializer,
-    MaintenanceIntervalCreateSerializer,
-    MaintenanceIntervalLogRequestSerializer,
     AssistantModelsRequestSerializer,
     AssistantSetupRequestSerializer,
+    BikeAssemblySerializer,
+    BikeListSerializer,
+    BikeSerializer,
+    ComponentCheckCreateSerializer,
+    ComponentGroupSerializer,
+    ComponentSerializer,
+    ComponentSlotListSerializer,
+    ComponentSlotSerializer,
+    ComponentTemplateSerializer,
+    MaintenanceIntervalCreateSerializer,
+    MaintenanceIntervalLogRequestSerializer,
+    MaintenanceIntervalSerializer,
+    SpareComponentSerializer,
     compute_wear,
 )
 from .services import (
-    build_weather_explanation_prompt,
-    build_check_instructions_prompt,
-    build_bike_condition_report_prompt,
     bike_condition_report_is_stale,
+    build_bike_condition_report_prompt,
+    build_check_instructions_prompt,
+    build_weather_explanation_prompt,
 )
-from .ai_providers import generate_reviewed_text
 from .usage import component_active_km
-from .bike_assistant import suggest_models, suggest_setup
-import logging
 
 logger = logging.getLogger("my_app_debug")
 

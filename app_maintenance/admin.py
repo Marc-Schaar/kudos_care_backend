@@ -1,12 +1,13 @@
 from django.contrib import admin
+
 from .models import (
     Bike,
     BikeAssembly,
-    ComponentGroup,
-    ComponentTemplate,
-    ComponentSlot,
     Component,
     ComponentCheck,
+    ComponentGroup,
+    ComponentSlot,
+    ComponentTemplate,
     MaintenanceInterval,
     MaintenanceLog,
     WeatherSensitivityCoefficient,

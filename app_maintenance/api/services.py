@@ -11,6 +11,7 @@ from app_maintenance.models import (
     ComponentSlot,
     WeatherSensitivityCoefficient,
 )
+
 from ..models import AssemblyStatus, WarnLevel
 from .serializers import compute_wear
 from .usage import component_date_windows, date_in_windows
@@ -634,9 +635,9 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
     compute_wear(..., as_of=...)). Bikes die bereits heute kritisch sind werden ausgeschlossen
     — das deckt bereits get_new_component_warnings() ab, keine Doppel-Meldung.
     """
-    from app_dashboard.api.services import (
+    from app_dashboard.api.services import (  # inline: Cross-App, siehe Architektur-Notiz
         predict_next_ride_date,
-    )  # inline: Cross-App, siehe Architektur-Notiz
+    )
 
     results = []
     bikes = Bike.objects.filter(athlete=profile, retired=False)

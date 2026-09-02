@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING
 
-from django.db import models
 from django.contrib.auth.models import User
+from django.db import models
 
 
 class StravaProfile(models.Model):

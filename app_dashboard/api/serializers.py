@@ -1,6 +1,8 @@
 from rest_framework import serializers
-from ..models import Ride
+
 from app_auth.models import StravaProfile
+
+from ..models import Ride
 
 
 class StravaAuthSerializer(serializers.Serializer):

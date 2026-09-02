@@ -1,14 +1,16 @@
 from datetime import date
 from typing import cast
+
 from rest_framework import serializers
+
 from app_maintenance.models import (
     Bike,
     BikeAssembly,
-    ComponentGroup,
-    ComponentTemplate,
-    ComponentSlot,
     Component,
     ComponentCheck,
+    ComponentGroup,
+    ComponentSlot,
+    ComponentTemplate,
     MaintenanceInterval,
     MaintenanceIntervalKind,
     MaintenanceKind,
@@ -17,6 +19,7 @@ from app_maintenance.models import (
     warn_status_from_ratio,
     worst_of,
 )
+
 from .usage import component_active_km
 
 

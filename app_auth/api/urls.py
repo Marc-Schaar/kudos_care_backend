@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.urls import path
-from .views import StravaAuthCallbackView, CurrentUserView, LogoutView
+
+from .views import CurrentUserView, LogoutView, StravaAuthCallbackView
 
 urlpatterns = [
     path("strava/auth/", StravaAuthCallbackView.as_view(), name="strava-auth"),

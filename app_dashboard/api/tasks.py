@@ -6,6 +6,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
 
 from app_auth.models import StravaProfile
+
 from .services import StravaSyncService
 
 logger = logging.getLogger("my_app_debug")

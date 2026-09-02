@@ -4,11 +4,16 @@ from datetime import date, timedelta
 
 import polyline
 import requests
+from django.conf import settings
+from django.contrib.gis.geos import LineString as DjangoLineString
+from django.contrib.gis.geos import Point
+from django.db.models import F
 from shapely.geometry import LineString as ShapelyLineString
 
-from django.conf import settings
-from django.contrib.gis.geos import LineString as DjangoLineString, Point
-from django.db.models import F
+from app_auth.api.utils import strava_get
+from app_auth.models import StravaProfile
+from app_maintenance.api.tasks import recompute_weather_wear_for_bike
+from app_maintenance.models import Bike
 
 from ..models import Ride, RideStream
 from .wind import (
@@ -16,10 +21,6 @@ from .wind import (
     compute_ride_wind,
     get_filtered_weather,
 )
-from app_auth.models import StravaProfile
-from app_auth.api.utils import strava_get
-from app_maintenance.models import Bike
-from app_maintenance.api.tasks import recompute_weather_wear_for_bike
 
 logger = logging.getLogger(__name__)
 
