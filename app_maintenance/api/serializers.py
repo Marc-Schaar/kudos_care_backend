@@ -213,6 +213,9 @@ class ComponentTemplateSerializer(serializers.ModelSerializer[ComponentTemplate]
         fields = [
             "id",
             "name",
+            # Vorne/hinten als Feld — das Diagramm liest das statt den
+            # Anzeigenamen zu durchsuchen (siehe models.py::MountPosition).
+            "position",
             "category",
             "category_display",
             "applicable_bike_types",
@@ -698,6 +701,10 @@ class ComponentGroupSerializer(serializers.ModelSerializer[ComponentGroup]):
             "sort_order",
             "recommended",
             "is_system",
+            # Steuert im Client, ob "Wechseln"/"Teile erneuern" ueberhaupt
+            # angeboten werden (siehe models.py::GroupKind).
+            "kind",
+            "position",
             "parts",
             "consumables",
             "has_active_instance",

@@ -21,6 +21,7 @@ from app_maintenance.models import (
     ComponentGroup,
     ComponentSlot,
     ComponentTemplate,
+    GroupKind,
     MaintenanceInterval,
 )
 
@@ -59,8 +60,14 @@ class AssemblyTestBase(APITestCase):
             bike=self.bike,
         )
 
+        # Ein Laufradsatz ist eine echte Baugruppe: nur dafür bieten activate/swap
+        # überhaupt Sinn (siehe models.py::GroupKind). Ohne das greift der
+        # Default AREA, und beide Endpoints lehnen mit 400 ab.
         self.wheel_group = ComponentGroup.objects.create(
-            name="Laufrad vorne", category=ComponentCategory.WHEELS, sort_order=30
+            name="Laufrad vorne",
+            category=ComponentCategory.WHEELS,
+            sort_order=30,
+            kind=GroupKind.ASSEMBLY,
         )
         self.tire = ComponentTemplate.objects.create(
             name="Reifen vorne",

@@ -202,6 +202,45 @@ class Bike(models.Model):
         return (result or 0) / 1000  # Strava liefert Meter
 
 
+class MountPosition(models.TextChoices):
+    """
+    Wo am Rad ein Teil sitzt — als Feld, nicht als Wort im Namen.
+
+    Vorher stand "vorne"/"hinten" ausschliesslich im Freitext-Namen und wurde
+    an zwei unabhaengigen Stellen per String-Match wieder herausgelesen (im
+    Backend gar nicht, im Frontend-Diagramm ueber `display_name.includes(...)`).
+    Das hatte zwei Folgen: ein umbenannter Slot verlor seine Position (und
+    landete im Diagramm auf dem Vorderrad, weil das der Fallback war), und die
+    Kassette hatte "hinten" nie im Namen — sie sass nur wegen einer zweiten,
+    unabhaengigen Regel hinten, waehrend Migration 0020 sie gruppenseitig nach
+    "Laufrad hinten" verschob und ihre `category` weiter `drivetrain` blieb.
+    Drei Quellen, keine davon massgeblich.
+    """
+
+    FRONT = "front", "Vorne"
+    REAR = "rear", "Hinten"
+
+
+class GroupKind(models.TextChoices):
+    """
+    Ob eine `ComponentGroup` eine echte Baugruppe ist oder nur ein Bereich.
+
+    `ASSEMBLY` = physische Einheit, die man am Stueck ab- und aufzieht
+    (Laufradsatz). Nur hier ergeben "Wechseln" (`activate`) und "Teile
+    erneuern" (`swap`) einen Sinn: ein zweiter kompletter Satz im Keller ist
+    ein realer Fall.
+
+    `AREA` = Teile, die denselben Ort teilen, aber unabhaengig verschleissen —
+    Bremsbelaege 3.000 km neben Bremsscheibe 15.000 km neben Bremsfluessigkeit
+    730 Tage; Kette 2.000 km neben Kurbel 30.000 km. Niemand hat ein zweites
+    komplettes "Cockpit". Dort wird einzeln getauscht (`slots/<id>/mount`),
+    und `activate`/`swap` werden serverseitig abgelehnt.
+    """
+
+    ASSEMBLY = "assembly", "Baugruppe (am Stück wechselbar)"
+    AREA = "area", "Bereich (Teile einzeln)"
+
+
 class ComponentGroup(models.Model):
     """
     Baugruppe im Katalog, die mehrere ComponentTemplates verbindet, die
@@ -236,6 +275,26 @@ class ComponentGroup(models.Model):
     recommended = models.BooleanField(
         default=True,
         help_text="Im geführten Stepper für ein neues Bike vorausgewählt.",
+    )
+    position = models.CharField(
+        max_length=10,
+        choices=MountPosition.choices,
+        blank=True,
+        default="",
+        help_text=(
+            "Vorne/hinten als Feld statt als Wort im Namen. Leer = ohne Seite "
+            "(Antrieb, Cockpit, ...). Siehe MountPosition."
+        ),
+    )
+    kind = models.CharField(
+        max_length=10,
+        choices=GroupKind.choices,
+        default=GroupKind.AREA,
+        help_text=(
+            "ASSEMBLY = am Stück wechselbar (Laufradsatz), AREA = Teile "
+            "verschleißen unabhängig und werden einzeln getauscht. Steuert, ob "
+            "activate/swap überhaupt angeboten werden. Siehe GroupKind."
+        ),
     )
 
     class Meta:
@@ -307,6 +366,18 @@ class ComponentTemplate(models.Model):
     default_in_group = models.BooleanField(
         default=True,
         help_text="Im Baugruppen-Dialog vorausgewählt (seltene Teile: False).",
+    )
+    position = models.CharField(
+        max_length=10,
+        choices=MountPosition.choices,
+        blank=True,
+        default="",
+        help_text=(
+            "Vorne/hinten als Feld statt als Wort im Namen — das Diagramm liest "
+            "das hier statt den Anzeigenamen zu durchsuchen, sodass Umbenennen "
+            "die Position nicht mehr kaputtmacht. Leer = ohne Seite. "
+            "Siehe MountPosition."
+        ),
     )
     notes = models.TextField(blank=True)
 

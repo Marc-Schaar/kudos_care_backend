@@ -5,6 +5,7 @@ from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -20,6 +21,7 @@ from app_maintenance.models import (
     ComponentGroup,
     ComponentSlot,
     ComponentTemplate,
+    GroupKind,
     MaintenanceInterval,
     MaintenanceIntervalKind,
     MaintenanceKind,
@@ -736,8 +738,28 @@ def _spare_components_for_bike(bike: Bike) -> list[Component]:
     )
 
 
+def _carry_over_slots(assembly: BikeAssembly | None) -> dict[int, ComponentSlot]:
+    """
+    Montierte Slots einer Baugruppe, nach Template — die Kandidaten, die beim
+    Teile-Erneuern uebernommen statt weggeworfen werden.
+    """
+    if assembly is None:
+        return {}
+    return {
+        slot.template_id: slot
+        for slot in ComponentSlot.objects.filter(assembly=assembly).select_related(
+            "template"
+        )
+        if slot.mounted_component is not None
+    }
+
+
 def _build_assembly_from_request(
-    bike: Bike, group: ComponentGroup, data: dict, activate: bool = True
+    bike: Bike,
+    group: ComponentGroup,
+    data: dict,
+    activate: bool = True,
+    carry_over_from: BikeAssembly | None = None,
 ) -> BikeAssembly:
     """
     Legt eine BikeAssembly + ihre Slots/Components + MaintenanceIntervals atomar an.
@@ -804,8 +826,28 @@ def _build_assembly_from_request(
         period_started_at = installed_at
         period_started_km = bike_total_km
 
+        # Beim Teile-Erneuern sind die *nicht* angehakten Teile die, die dranbleiben
+        # sollen. Vorher fielen sie ersatzlos weg: die alte Instanz wurde komplett
+        # ausgemustert und die neue nur aus den angehakten Zeilen aufgebaut — wer
+        # an einem Antrieb nur die Kette erneuerte, verlor Kurbel und Tretlager
+        # vom Rad. Jetzt zieht ihr Slot in die neue Instanz um, mit Verlauf.
+        carry_over = _carry_over_slots(carry_over_from)
+
         for item in data.get("parts", []):
             if not item["include"]:
+                keep = carry_over.get(item["template_id"])
+                if keep is not None:
+                    keep.assembly = assembly
+                    keep.save(update_fields=["assembly"])
+                    mounted = keep.mounted_component
+                    if mounted is not None and mounted.installed_at is not None:
+                        if mounted.installed_at < period_started_at:
+                            period_started_at = mounted.installed_at
+                        if mounted.distance_at_install is not None and (
+                            period_started_km is None
+                            or mounted.distance_at_install < period_started_km
+                        ):
+                            period_started_km = mounted.distance_at_install
                 continue
             template = allowed_parts[item["template_id"]]
 
@@ -1150,7 +1192,8 @@ class BikeAssemblyDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView
     muss über activate/retire/swap laufen, weil sonst die
     `AssemblyUsagePeriod`-Buchführung ausbliebe und ein abgezogener Satz
     weiter km sammeln würde.
-    DELETE /api/maintenance/assemblies/{pk}/
+    DELETE /api/maintenance/assemblies/{pk}/ → **löst die Gruppierung auf**,
+    ohne Teile wegzuwerfen (siehe `perform_destroy`).
     """
 
     serializer_class = BikeAssemblySerializer
@@ -1170,20 +1213,92 @@ class BikeAssemblyDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView
             )
         )
 
+    def perform_destroy(self, instance: BikeAssembly):
+        """
+        Löst nur die Gruppierung auf — die Teile bleiben am Rad.
 
-def _retire_assembly(assembly: BikeAssembly, on: datetime.date | None = None) -> None:
+        Vorher cascadierte das Löschen über Slots, Components, Intervalle und
+        Nutzungszeiträume: die Baugruppe wegzuwerfen hiess, die Teile samt
+        ihrer kompletten Verschleiss-Historie wegzuwerfen. Das ist fast nie
+        gemeint — wer eine Gruppierung loswerden will, will die Kette nicht
+        verlieren.
+
+        Slots und Intervalle werden stattdessen entkoppelt (`assembly = None`)
+        und tauchen danach unter "Ohne Baugruppe" wieder auf. Nur die
+        `BikeAssembly` selbst und ihre Nutzungszeiträume verschwinden — beide
+        beschreiben die Gruppierung, nicht die Teile.
+        """
+        conflicts = _ungrouped_template_conflicts(instance)
+        if conflicts:
+            raise ValidationError(
+                {
+                    "error": (
+                        "Auflösen nicht möglich: für "
+                        + ", ".join(sorted(conflicts))
+                        + " gibt es bereits einen Slot ohne Baugruppe. Bitte den "
+                        "dort zuerst auflösen oder das Teil ausbauen."
+                    ),
+                    "code": "ungrouped_conflict",
+                }
+            )
+
+        with transaction.atomic():
+            ComponentSlot.objects.filter(assembly=instance).update(assembly=None)
+            MaintenanceInterval.objects.filter(assembly=instance).update(assembly=None)
+            instance.delete()
+
+
+def _ungrouped_template_conflicts(assembly: BikeAssembly) -> set[str]:
+    """
+    Templates, die beim Auflösen mit einem bestehenden ungruppierten Slot
+    kollidieren würden.
+
+    `ComponentSlot` erlaubt je (bike, template) nur **einen** Slot ohne
+    Baugruppe (`uniq_bike_template_ungrouped`). Hat das Bike also schon einen
+    ungruppierten Slot desselben Templates, liesse sich der Slot der Baugruppe
+    nicht danebenhängen — statt in einen IntegrityError zu laufen, wird der
+    Fall vorher erkannt und als 400 mit Klartext beantwortet.
+    """
+    template_ids = set(
+        ComponentSlot.objects.filter(assembly=assembly).values_list(
+            "template_id", flat=True
+        )
+    )
+    if not template_ids:
+        return set()
+    clashing = ComponentSlot.objects.filter(
+        bike=assembly.bike,
+        assembly__isnull=True,
+        template_id__in=template_ids,
+    ).select_related("template")
+    return {slot.template.name for slot in clashing}
+
+
+def _retire_assembly(
+    assembly: BikeAssembly,
+    on: datetime.date | None = None,
+    keep_slot_ids: "set[int] | None" = None,
+) -> None:
     """
     Baugruppe endgültig ausmustern (verkauft/entsorgt) — im Unterschied zum
     Parken werden hier auch die Komponenten ausgebaut. `distance_at_retire` hält
     den km-Stand fest, damit ein später erneuter Blick auf die Historie das Teil
     korrekt abschneiden kann (siehe api/usage.py).
+
+    `keep_slot_ids` verschont einzelne Slots vom Ausbauen. Gebraucht beim
+    Teile-Erneuern (`AssemblySwapView`): dort werden die *nicht* angehakten
+    Teile in die neue Instanz übernommen statt weggeworfen — sie dürfen also
+    nicht als ausgebaut markiert werden.
     """
     on = on or datetime.date.today()
     period = assembly.ensure_open_period()
     if period is not None:
         period.close(on, assembly.bike.total_distance_km)
 
-    Component.objects.filter(slot__assembly=assembly, is_mounted=True).update(
+    components = Component.objects.filter(slot__assembly=assembly, is_mounted=True)
+    if keep_slot_ids:
+        components = components.exclude(slot_id__in=keep_slot_ids)
+    components.update(
         is_mounted=False,
         retired_at=on,
         distance_at_retire=assembly.bike.total_distance_km,
@@ -1210,6 +1325,17 @@ class AssemblyActivateView(AthleteMixin, APIView):
             bike__athlete=self.get_athlete(),
         )
         bike = assembly.bike
+
+        if assembly.group.kind != GroupKind.ASSEMBLY:
+            return Response(
+                {
+                    "error": f"'{assembly.group.name}' ist ein Bereich, keine "
+                    "Baugruppe — ein zweiter kompletter Satz davon ist kein "
+                    "realer Fall.",
+                    "code": "not_an_assembly",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if assembly.is_retired:
             return Response(
@@ -1298,13 +1424,37 @@ class AssemblySwapView(AthleteMixin, APIView):
         body.is_valid(raise_exception=True)
         data = body.validated_data
 
+        if group.kind != GroupKind.ASSEMBLY:
+            return Response(
+                {
+                    "error": f"'{group.name}' ist ein Bereich, keine Baugruppe — "
+                    "die Teile darin verschleißen unabhängig und werden einzeln "
+                    "getauscht.",
+                    "code": "not_an_assembly",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         err = _validate_assembly_items(bike, group, data)
         if err:
             return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Nicht angehakte Teile bleiben am Rad: ihre Slots dürfen beim Ausmustern
+        # der alten Instanz nicht ausgebaut werden, sie ziehen gleich um.
+        keep = {
+            slot.id
+            for template_id, slot in _carry_over_slots(old).items()
+            if not any(
+                item["template_id"] == template_id and item["include"]
+                for item in data.get("parts", [])
+            )
+        }
+
         with transaction.atomic():
-            _retire_assembly(old)
-            new_assembly = _build_assembly_from_request(bike, group, data)
+            _retire_assembly(old, keep_slot_ids=keep)
+            new_assembly = _build_assembly_from_request(
+                bike, group, data, carry_over_from=old
+            )
 
         return Response(
             BikeAssemblySerializer(

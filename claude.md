@@ -104,6 +104,22 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   verbindet mehrere `ComponentTemplate`s; `category`/`applicable_bike_types`/`sort_order`/
   `recommended` steuern UI-Filter + den Neu-Bike-Stepper; bewusst generisch, weitere
   Gruppen rein über Admin/Migration anlegbar; voller Satz in Migration `0016` geseedet),
+  **`ComponentGroup.kind` trennt zwei Dinge, die vorher beide „Baugruppe" hießen:**
+  `assembly` = physische Einheit, die man am Stück ab- und aufzieht (nur die beiden
+  Laufradsätze); `area` = Teile am selben Ort, die unabhängig verschleißen (Bremsbeläge
+  3.000 km neben Bremsscheibe 15.000 km neben Bremsflüssigkeit 730 Tage; Kette 2.000 km
+  neben Kurbel 30.000 km). `activate/` und `swap/` werden für `area` serverseitig mit
+  400 `not_an_assembly` abgelehnt und im Client gar nicht erst angeboten — dort wird pro
+  Zeile einzeln getauscht. Niemand hat ein zweites komplettes „Cockpit" im Keller.
+  **`MountPosition`** (`ComponentGroup.position`/`ComponentTemplate.position`) macht
+  vorne/hinten zu einem Feld. Vorher stand die Seite nur im Freitext-Namen und wurde im
+  Frontend-Diagramm per `display_name.includes('vorne')` wieder herausgelesen: ein
+  umbenannter Slot verlor damit seine Position (Fallback war das *Vorderrad*), und die
+  **Kassette** trug „hinten" nie im Namen — sie saß nur wegen einer zweiten, unabhängigen
+  Regel hinten, während Migration `0020` sie gruppenseitig nach „Laufrad hinten" verschob
+  und ihre `category` `drivetrain` blieb. Drei Quellen, keine maßgeblich. Backfill und die
+  Ausnahmen (Kassette, Freilaufkörper, Schaltwerk, Umwerfer, ...) in Migration `0023`;
+  das Diagramm liest jetzt `template_detail.position`.
   `BikeAssembly` (per-Bike-Instanz einer `ComponentGroup`: eigener `name`, `installed_at`,
   `status` — **mehrere Instanzen je `(bike, group)` sind erlaubt** (Sommer-/Winter-LRS),
   aber max. eine *aktive*. Der Zustand steckt in **einem** Feld
@@ -358,7 +374,21 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `POST assemblies/<id>/retire/` **mustert aus** (Komponenten ausgebaut,
   `retired_at`/`distance_at_retire` gesetzt), und `POST assemblies/<id>/swap/` **erneuert die
   Teile** (alte Instanz ausgemustert, neue aktive mit frischen Teilen — der alte
-  „Baugruppe tauschen"-Pfad). `POST intervals/<id>/log/` = "Erledigt".
+  „Baugruppe tauschen"-Pfad). Beim Erneuern bleiben die **nicht angehakten** Teile am
+  Rad: ihr Slot zieht in die neue Instanz um (`_carry_over_slots()`,
+  `_retire_assembly(keep_slot_ids=...)`), mit Verlauf und zurückdatiertem
+  Periodenbeginn. Vorher fielen sie ersatzlos weg — die alte Instanz wurde komplett
+  ausgemustert, die neue nur aus den angehakten Zeilen aufgebaut; wer an einem Antrieb
+  nur die Kette erneuerte, verlor Kurbel und Tretlager vom Rad (nachgestellt: 1 von 3
+  Teilen blieb montiert).
+  `DELETE assemblies/<id>/` **löst nur die Gruppierung auf**: Slots und Intervalle werden
+  entkoppelt (`assembly = None`, tauchen danach unter „Ohne Baugruppe" auf), die Teile
+  bleiben montiert. Vorher cascadierte das über Slots/Components/Intervalle/Perioden —
+  die Gruppierung wegzuwerfen hieß, die Kette samt Verschleiß-Historie wegzuwerfen.
+  Kollidiert ein Slot mit einem bereits ungruppierten desselben Templates
+  (`uniq_bike_template_ungrouped`), bricht der Aufruf vorher mit 400
+  `ungrouped_conflict` ab statt in einen IntegrityError zu laufen.
+  `POST intervals/<id>/log/` = "Erledigt".
   `POST bikes/<id>/slots/` (freies Einzel-Slot-Anlegen) entfällt für den Client — Slots
   entstehen nur über den Baugruppen-Create; `GET` bleibt. Katalog + Zuordnung aller
   System-Templates zu Gruppen in Migration `0016`, Backfill bestehender Slots →
@@ -567,6 +597,14 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   alles stehen, Widersprüche werden abgewählt statt gelöscht, `researched` lügt nicht,
   Grounding wird nur bei `AI_GROUNDING_ENABLED` angefragt — und ein 429 darauf fällt
   auf reines Modellwissen zurück, statt den Nutzer ohne Vorbelegung stehenzulassen).
+- `app_maintenance/test_assembly_grouping.py`: `AssemblySwapKeepsUncheckedPartsTests`
+  (das nicht angehakte Teil bleibt montiert, dieselbe Component statt einer Kopie, hängt
+  danach an der neuen Instanz), `GroupKindTests` (`area` lehnt activate/swap mit 400 ab,
+  echte Baugruppe nicht), `AssemblyDeleteDissolvesTests` (Löschen behält die Teile und
+  entkoppelt sie, sie erscheinen als `ungrouped_slots`, Kollision mit einem bestehenden
+  ungruppierten Slot wird abgelehnt), `MountPositionTests` (Regressionstest gegen die
+  Migrations-Daten: Kassette ist fest `rear`, obwohl „hinten" nicht im Namen steht; nur
+  die Laufradsätze sind `assembly`).
 - `app_maintenance/test_query_counts.py`: `QueryScalingTests` — Regressionstests gegen
   N+1. Bewusst **keine** festen Query-Zahlen (die wären bei jeder Serializer-Änderung rot),
   sondern die Invariante: dieselbe Route mit 3 und mit 15 Slots muss gleich viele Queries
