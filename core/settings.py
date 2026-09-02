@@ -30,6 +30,16 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 # OUTPUT_TOKENS=300 in ai_providers.py), inkl. seines Reasoning-Overheads.
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
+# Laesst Kudo (app_maintenance/api/bike_assistant.py) Produktdaten per
+# Google-Search-Grounding nachschlagen, statt sie aus dem Modellwissen zu
+# beantworten. Default aus: Grounding haengt an einem eigenen Kontingent, und ein
+# Key ohne dieses Kontingent antwortet darauf mit HTTP 429, waehrend derselbe
+# Aufruf ohne Werkzeug 200 liefert (nachgemessen auf dem aktuellen Key, ueber drei
+# Modelle hinweg). Der Code faengt das ab und weicht auf reines Modellwissen aus —
+# eingeschaltet zahlt man dafuer aber jedes Mal einen vergeblichen Anlauf.
+# Auf einem Key mit Grounding-Kontingent: AI_GROUNDING_ENABLED=True.
+AI_GROUNDING_ENABLED = os.environ.get("AI_GROUNDING_ENABLED", "False") == "True"
+
 # E-Mail-Versand (Benachrichtigungen, siehe app_notifications). Default = Brevo SMTP-Relay,
 # aber vollstaendig env-gesteuert: ein spaeterer Wechsel auf einen eigenen Mailserver aendert
 # nur .env-Werte, keinen Code.

@@ -46,12 +46,34 @@ def suggest_models(
     system_prompt = (
         "Du bist ein Fahrrad-Experte und hilfst beim Anlegen eines Fahrrads in einer "
         "Wartungs-App. Du bekommst Hersteller, Baujahr und Fahrradtyp und nennst "
-        "plausible Modellreihen dieses Herstellers, die dazu passen. Antworte "
-        "ausschliesslich mit einem JSON-Objekt der Form "
-        '{"models": [{"model": "...", "year_range": "...", "note": "..."}]}. '
-        f"Nenne hoechstens {MAX_MODEL_SUGGESTIONS} Modelle, das gaengigste zuerst. "
-        "'note' ist eine sehr kurze deutsche Einordnung (max. 8 Woerter). Kennst du den "
-        'Hersteller nicht, gib {"models": []} zurueck — erfinde keine Hersteller.'
+        "Modellreihen dieses Herstellers, die es dafuer WIRKLICH GAB.\n\n"
+        "Recherchiere die Modellpalette, statt sie zu erinnern, wenn dir eine Suche "
+        "zur Verfuegung steht. Der Nutzer waehlt aus deiner Liste sein eigenes Rad "
+        "aus — ein erfundenes Modell schickt ihn in eine Ausstattung, die es nie gab, "
+        "und das faellt ihm erst auf, wenn die Wartungsdaten nicht passen.\n\n"
+        "REGELN:\n"
+        "1. Nenne nur real existierende Modellreihen dieses Herstellers. Erfinde "
+        "keine Namen und keine Varianten, und haenge keine Ausstattungskuerzel an, "
+        "die du nicht belegen kannst.\n"
+        "2. Lieber weniger als unsicher: drei belegte Modelle sind besser als acht "
+        f"halb geratene. Hoechstens {MAX_MODEL_SUGGESTIONS}, das gaengigste zuerst.\n"
+        "3. Passe zum angefragten Baujahr und Fahrradtyp. Ein Modell, das es in dem "
+        "Jahr nicht gab oder das ein anderer Fahrradtyp ist, gehoert nicht in die "
+        "Liste.\n"
+        "4. 'spec' ist die Serienausstattung in Stichworten: Schaltgruppe, Bremsart, "
+        "gegebenenfalls Federung (max. 12 Woerter, deutsch). Genau daraus leitet der "
+        "naechste Schritt die Verschleissteile ab, also nur hineinschreiben, was du "
+        "belegen kannst — sonst leer lassen.\n"
+        "5. 'confidence': 'high' = Modellreihe und Ausstattung belegt, 'medium' = "
+        "Modellreihe sicher, Ausstattung ungenau, 'low' = unsicher.\n"
+        "6. 'note' ist eine sehr kurze deutsche Einordnung (max. 8 Woerter), z.B. die "
+        "Positionierung im Sortiment.\n"
+        "7. Kennst du den Hersteller nicht, gib eine leere Liste zurueck statt zu "
+        "raten.\n\n"
+        "Antworte ausschliesslich mit einem JSON-Objekt der Form:\n"
+        '{"models": [{"model": "Grail CF SL 7", "year_range": "2021-2023", '
+        '"spec": "Shimano GRX 1x11, hydraulische Scheibenbremsen", '
+        '"confidence": "high", "note": "Gravel-Mittelklasse"}]}'
     )
     user_prompt = (
         f"Hersteller: {manufacturer}\n"
@@ -59,7 +81,7 @@ def suggest_models(
         f"Fahrradtyp: {bike_type}\n"
     )
 
-    data = get_ai_provider().generate_json(system_prompt, user_prompt)
+    data = get_ai_provider().generate_json_researched(system_prompt, user_prompt)
     if data is None:
         return None
 
@@ -76,6 +98,11 @@ def suggest_models(
             {
                 "model": str(entry["model"])[:100],
                 "year_range": str(entry.get("year_range") or "")[:50],
+                # Serienausstattung in Stichworten. Wird dem Nutzer bei der Auswahl
+                # angezeigt UND an Schritt 2 durchgereicht, damit die Komponenten zu
+                # genau dem Rad passen, das er hier ausgewaehlt hat.
+                "spec": str(entry.get("spec") or "")[:200],
+                "confidence": _coerce_confidence(entry.get("confidence")),
                 "note": str(entry.get("note") or "")[:120],
             }
         )
@@ -145,6 +172,9 @@ def _allowed_template_ids(
                 allowed[template.id] = {
                     "group_id": group.id,
                     "maintenance_kind": template.maintenance_kind,
+                    # Fuer die Ausstattungs-Pruefung (siehe SPEC_REQUIREMENTS) und
+                    # als lesbarer Kontext in Logs.
+                    "name": template.name,
                 }
     return allowed
 
@@ -179,6 +209,9 @@ def _clean_row(
 
     row = {
         "template_id": template_id,
+        # Aus dem Katalog, nicht aus der KI-Antwort — dient der
+        # Ausstattungs-Pruefung in `_apply_spec_consistency()`.
+        "template_name": meta["name"],
         "include": bool(entry.get("include", True)),
         "confidence": _coerce_confidence(entry.get("confidence")),
         "note": str(entry.get("note") or "")[:120],
@@ -203,13 +236,80 @@ def _positive_number(value):
     return number if number > 0 else None
 
 
-def suggest_setup(bike, manufacturer: str, model: str, year: int | None) -> dict | None:
+#: Teile, deren Existenz von der Ausstattung abhaengt. Der Schluessel ist ein
+#: Namensfragment des Templates (kleingeschrieben), der Wert eine Funktion, die auf
+#: der gemeldeten `spec` entscheidet, ob das Teil an so einem Rad ueberhaupt sein
+#: kann. Namensbasiert wie `views.py::_interval_kind_for_template()` — der Katalog
+#: hat fuer diese Semantik kein eigenes Feld, und eines dafuer einzufuehren waere
+#: mehr Schema, als die Handvoll Faelle rechtfertigt.
+SPEC_REQUIREMENTS = {
+    "umwerfer": lambda s: not str(s.get("drivetrain", "")).startswith("1x"),
+    "di2": lambda s: bool(s.get("electronic_shifting")),
+    "axs": lambda s: bool(s.get("electronic_shifting")),
+    "dichtmilch": lambda s: bool(s.get("tubeless")),
+    "zahnriemen": lambda s: bool(s.get("belt_drive")),
+}
+
+
+def _contradicts_spec(template_name: str, spec: dict) -> bool:
+    """
+    Ob dieses Teil der gemeldeten Ausstattung widerspricht. Ohne `spec` (oder ohne
+    passende Regel) immer False — im Zweifel bleibt die Auswahl der KI stehen.
+    """
+    if not spec:
+        return False
+    name = template_name.lower()
+    for fragment, is_possible in SPEC_REQUIREMENTS.items():
+        if fragment in name and not is_possible(spec):
+            return True
+    return False
+
+
+def _apply_spec_consistency(groups: list[dict], spec: dict) -> list[dict]:
+    """
+    Prueft die Teileauswahl gegen die Ausstattung, die das Modell selbst gemeldet
+    hat — die eigentliche Antwort auf "passen die Komponenten zum Modell".
+
+    Ein Widerspruch wird **abgewaehlt, nicht geloescht** (`include=False` plus
+    Begruendung in `note`): die Zeile bleibt im Stepper sichtbar, und wer es
+    besser weiss, hakt sie wieder an. Stilles Loeschen wuerde dem Nutzer die
+    Korrekturmoeglichkeit nehmen, ohne dass er merkt, dass ueberhaupt etwas
+    entfernt wurde.
+    """
+    if not spec:
+        return groups
+
+    for group in groups:
+        for row in group["parts"] + group["intervals"]:
+            if not row["include"]:
+                continue
+            if _contradicts_spec(row.get("template_name", ""), spec):
+                row["include"] = False
+                row["note"] = (
+                    row["note"] or "Passt nicht zur ermittelten Ausstattung."
+                )[:120]
+                logger.info(
+                    "Kudo: %s abgewaehlt, widerspricht der Ausstattung %r.",
+                    row.get("template_name"),
+                    spec,
+                )
+    return groups
+
+
+def suggest_setup(
+    bike, manufacturer: str, model: str, year: int | None, spec: str = ""
+) -> dict | None:
     """
     Schritt 2: Vorbelegung fuer den Setup-Stepper.
 
     Die Antwortform entspricht bewusst dem, was `AssemblyChecklistComponent` im Frontend
     ohnehin bindet (`parts`/`intervals` je Baugruppe) — so braucht der Stepper kein
     zweites Datenmodell und bleibt in jedem Feld editierbar.
+
+    `spec` ist die Serienausstattung aus Schritt 1 (`suggest_models`), falls der
+    Nutzer ein vorgeschlagenes Modell gewaehlt hat. Sie ankert die Auswahl an genau
+    dem Rad, das er angeklickt hat, statt das Modell den Namen erneut interpretieren
+    zu lassen.
 
     Gibt None zurueck, wenn keine KI verfuegbar ist.
     """
@@ -261,10 +361,22 @@ def suggest_setup(bike, manufacturer: str, model: str, year: int | None) -> dict
         "9. Kennst du das Modell gar nicht, liefere die typische Ausstattung fuer diesen "
         "Fahrradtyp: include nach der 'ueblich'-Markierung, brand und model_name leer, "
         "confidence 'low'.\n\n"
+        "ZUERST die Ausstattung, DANN die Teile: Fuelle das Feld 'spec' aus, bevor du "
+        "Komponenten waehlst, und leite die Auswahl daraus ab. Recherchiere die "
+        "Ausstattung, wenn dir eine Suche zur Verfuegung steht, statt sie zu erinnern. "
+        "'spec' hat die Felder drivetrain ('1x11', '2x12', 'unbekannt'), "
+        "electronic_shifting (true/false), belt_drive (true/false), tubeless "
+        "(true/false), suspension ('keine', 'vorne', 'voll'). Diese Angaben werden "
+        "serverseitig gegen deine Teileauswahl geprueft: ein Umwerfer bei 1x, ein "
+        "Di2-Akku ohne elektronische Schaltung oder Dichtmilch ohne Tubeless werden "
+        "automatisch abgewaehlt. Setze 'unbekannt' bzw. false, wenn du es nicht "
+        "belegen kannst.\n\n"
         "Antworte ausschliesslich mit einem JSON-Objekt dieser Form. Die IDs im Beispiel "
         "sind PLATZHALTER, die nur das Format zeigen — verwende ausschliesslich die "
         "echten IDs aus dem KATALOG:\n"
-        '{"groups": [{"group_id": 9001, "parts": [{"template_id": 9002, '
+        '{"spec": {"drivetrain": "1x11", "electronic_shifting": false, '
+        '"belt_drive": false, "tubeless": true, "suspension": "keine"}, '
+        '"groups": [{"group_id": 9001, "parts": [{"template_id": 9002, '
         '"include": true, "brand": "Shimano", "model_name": "CN-HG601", '
         '"confidence": "high", "note": ""}], "intervals": [{"template_id": 9003, '
         '"include": true, "interval_km": 300, "confidence": "medium", '
@@ -274,19 +386,29 @@ def suggest_setup(bike, manufacturer: str, model: str, year: int | None) -> dict
         f"Hersteller: {manufacturer}\n"
         f"Modell: {model}\n"
         f"Baujahr: {year if year else 'unbekannt'}\n"
-        f"Fahrradtyp: {bike.get_bike_type_display()} ({bike.bike_type})\n\n"
-        f"KATALOG:\n{_catalog_prompt_block(groups, bike.bike_type)}\n"
+        f"Fahrradtyp: {bike.get_bike_type_display()} ({bike.bike_type})\n"
+        + (f"Bekannte Serienausstattung: {spec}\n" if spec else "")
+        + f"\nKATALOG:\n{_catalog_prompt_block(groups, bike.bike_type)}\n"
     )
 
-    data = get_ai_provider().generate_json(system_prompt, user_prompt)
+    provider = get_ai_provider()
+    data = provider.generate_json_researched(system_prompt, user_prompt)
     if data is None:
         return None
+
+    reported_spec = data.get("spec") if isinstance(data.get("spec"), dict) else {}
+    suggested = _filter_to_catalog(data, groups, allowed)
 
     return {
         "manufacturer": manufacturer,
         "model": model,
         "year": year,
-        "groups": _filter_to_catalog(data, groups, allowed),
+        "spec": reported_spec,
+        # Ob die Ausstattung wirklich nachgeschlagen wurde oder aus dem
+        # Modellwissen kam — damit die UI keine Recherche behaupten kann, die
+        # nicht stattgefunden hat (siehe settings.AI_GROUNDING_ENABLED).
+        "researched": provider.last_call_was_researched,
+        "groups": _apply_spec_consistency(suggested, reported_spec),
     }
 
 

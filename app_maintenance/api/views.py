@@ -1463,7 +1463,11 @@ class AssistantSetupView(AthleteMixin, APIView):
         data = body.validated_data
 
         suggestion = suggest_setup(
-            bike, data["manufacturer"], data["model"], data.get("year")
+            bike,
+            data["manufacturer"],
+            data["model"],
+            data.get("year"),
+            spec=data.get("spec", ""),
         )
         if suggestion is None:
             return Response(

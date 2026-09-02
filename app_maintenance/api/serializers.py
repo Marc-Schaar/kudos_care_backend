@@ -906,3 +906,9 @@ class AssistantSetupRequestSerializer(serializers.Serializer):
     year = serializers.IntegerField(
         required=False, allow_null=True, min_value=1850, max_value=2100
     )
+    # Serienausstattung aus Schritt 1, falls der Nutzer ein vorgeschlagenes Modell
+    # angeklickt hat statt frei zu tippen. Ankert Schritt 2 an genau dem Rad aus der
+    # Liste, statt den Modellnamen ein zweites Mal interpretieren zu lassen.
+    spec = serializers.CharField(
+        max_length=200, required=False, allow_blank=True, default=""
+    )

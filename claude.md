@@ -213,7 +213,14 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `ride_wear_impact_is_stale()` (Komponenten seither geändert?).
   `api/bike_assistant.py`: **„Kudo"**, der KI-Assistent fürs Bike-Anlegen.
   `suggest_models()` (Hersteller + Baujahr → Modellauswahl) und `suggest_setup()`
-  (Modell → Vorbelegung für den Setup-Stepper). Endpoints
+  (Modell → Vorbelegung für den Setup-Stepper). Beide gehen über
+  `generate_json_researched()`, dürfen die Produktdaten also nachschlagen statt sie
+  zu erinnern — genau dort ist eine erfundene Antwort am teuersten, weil sie plausibel
+  aussieht. **Die Kette ist zweistufig:** `suggest_models()` liefert je Kandidat ein
+  `spec`-Feld (Serienausstattung in Stichworten), der Client zeigt es bei der Auswahl
+  an und schickt es beim Klick als `spec` an `suggest_setup()` mit. Schritt 2 ankert
+  damit an genau dem Rad, das der Nutzer angeklickt hat, statt den Modellnamen ein
+  zweites Mal zu interpretieren. Endpoints
   `POST maintenance/assistant/models/` und `POST maintenance/bikes/<id>/assistant/setup/`,
   beide `503` bei AI-Ausfall, damit das Frontend auf die manuelle Einrichtung zurückfällt.
   **Sicherheitsgrenze:** die KI bekommt den erlaubten Katalog im Prompt und darf nur
@@ -223,6 +230,17 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   Absicherung. Marke/Modell je Zeile sind dagegen echtes Modellwissen und damit ein
   bewusster Bruch mit „die KI erfindet nichts" — deshalb trägt jede Zeile ein
   `confidence`-Feld, und der Stepper weist sie als Vorschlag aus.
+  **Ausstattungs-Prüfung:** `suggest_setup()` verlangt, dass das Modell erst ein
+  `spec`-Objekt meldet (`drivetrain`, `electronic_shifting`, `belt_drive`, `tubeless`,
+  `suspension`) und die Teile daraus ableitet. `_apply_spec_consistency()` prüft die
+  Auswahl anschließend **serverseitig** dagegen (`SPEC_REQUIREMENTS`, namensbasiert wie
+  `views.py::_interval_kind_for_template()`): Umwerfer bei 1x, Di2/AXS-Akku ohne
+  elektronische Schaltung, Dichtmilch ohne Tubeless und Zahnriemen ohne Riemenantrieb
+  werden **abgewählt, nicht gelöscht** — die Zeile bleibt im Stepper sichtbar und
+  wieder ankreuzbar, falls die Erkennung danebenlag. Ohne `spec` greift die Prüfung
+  gar nicht, im Zweifel gilt die KI-Auswahl. Die Antwort trägt zusätzlich
+  `researched: bool`, damit die UI keine Recherche behaupten kann, die nicht
+  stattgefunden hat.
   **Prompt-Konventionen** (`KudoPromptTests` sichert sie ab): `include` und `confidence`
   sind orthogonal und der Prompt sagt das ausdrücklich — `include` heißt „ist dieses Teil
   an diesem Rad verbaut", `confidence` heißt „wie sicher bin ich bei Marke/Modell". Ein
@@ -241,6 +259,18 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   komplett aus dem Ergebnis.
   `api/ai_providers.py`: austauschbarer
   Gemini/Groq-Adapter (`AI_PROVIDER`-Setting) für die On-Demand-KI-Erklärung.
+  `generate_json_researched()` ist `generate_json()` plus Google-Search-Grounding
+  (`tools: [{google_search: {}}]`), gesteuert über `AI_GROUNDING_ENABLED` (Default
+  **aus**). Zwei Eigenheiten, beide gemessen und bewusst: der Recherche-Aufruf setzt
+  **kein** `responseMimeType` (ob JSON-Modus und Suchwerkzeug zusammen zulässig sind,
+  ist nicht zugesichert — das JSON wird stattdessen im Prompt verlangt und mit dem
+  Fence-Parser gelesen), und er **fällt bei Fehlschlag automatisch auf
+  `generate_json()` zurück**. Letzteres ist kein theoretischer Fall: auf dem aktuellen
+  Key liefert jeder grounded Aufruf HTTP 429 (`RESOURCE_EXHAUSTED`), während derselbe
+  Aufruf ohne Werkzeug 200 gibt — nachgeprüft über `gemini-3.5-flash-lite`,
+  `gemini-3.5-flash` und `gemini-flash-latest`. Grounding hängt an einem eigenen
+  Kontingent; deshalb der Default aus, sonst zahlt man pro Aufruf einen vergeblichen
+  Anlauf. `last_call_was_researched` sagt, ob wirklich recherchiert wurde.
   `generate_json()` erzwingt eine JSON-Antwort (Gemini `responseMimeType`, Groq
   `response_format`) mit deutlich höherem Token-Budget — die 300 Tokens der
   Freitext-Erklärungen reichen für ein komplettes Bike-Setup nicht. Bei
@@ -473,6 +503,8 @@ die DB-Engine.
 `STRAVA_VERIFY_TOKEN` (frei wählbarer Token für den `hub.verify_token`-Handshake beim
 Anlegen der Push-Subscription, muss zu keinem externen Wert passen),
 `AI_PROVIDER` (`gemini`|`groq`, Default `gemini`), `GEMINI_API_KEY`, `GEMINI_MODEL`,
+`AI_GROUNDING_ENABLED` (Default `False`; `True` nur auf einem Key mit
+Grounding-Kontingent, siehe `app_maintenance` oben),
 `GROQ_API_KEY`, `GROQ_MODEL`, `EMAIL_BACKEND` (Default Djangos SMTP-Backend),
 `EMAIL_HOST` (Default `smtp-relay.brevo.com`), `EMAIL_PORT` (Default `587`),
 `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS` (Default `True`),
@@ -528,6 +560,13 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   und erwartet `IntegrityError`); mehrere `parked`/`retired` je Gruppe bleiben erlaubt;
   `status` ist per PATCH nicht schreibbar; `is_active`/`is_parked` stehen weiter im
   Response.
+- `app_maintenance/test_bike_assistant.py` (Auszug): `KudoPromptTests` (Format-Beispiel
+  darf keine echten Katalog-IDs benutzen, `default_in_group` steht im Prompt, keine
+  `?`-Platzhalter mehr in der Lebensdauer) und `KudoSpecConsistencyTests` (Umwerfer bei
+  1x wird abgewählt, Di2-Akku ohne elektronische Schaltung ebenso, ohne `spec` bleibt
+  alles stehen, Widersprüche werden abgewählt statt gelöscht, `researched` lügt nicht,
+  Grounding wird nur bei `AI_GROUNDING_ENABLED` angefragt — und ein 429 darauf fällt
+  auf reines Modellwissen zurück, statt den Nutzer ohne Vorbelegung stehenzulassen).
 - `app_maintenance/test_query_counts.py`: `QueryScalingTests` — Regressionstests gegen
   N+1. Bewusst **keine** festen Query-Zahlen (die wären bei jeder Serializer-Änderung rot),
   sondern die Invariante: dieselbe Route mit 3 und mit 15 Slots muss gleich viele Queries

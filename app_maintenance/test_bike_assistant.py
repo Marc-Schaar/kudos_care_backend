@@ -528,3 +528,183 @@ class KudoPromptTests(APITestCase):
         self.assertNotIn("4000.0", prompt)
         self.assertNotIn("? Tage", prompt)
         self.assertNotIn("? km", prompt)
+
+
+@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="k", GROQ_API_KEY="")
+class KudoSpecConsistencyTests(APITestCase):
+    """
+    "Passen die Komponenten zum Modell?" wird nicht nur im Prompt verlangt, sondern
+    serverseitig geprueft: Kudo muss die Ausstattung (`spec`) melden, bevor es Teile
+    waehlt, und Zeilen, die dieser Ausstattung widersprechen, werden abgewaehlt.
+
+    Abgewaehlt, nicht geloescht — die Zeile bleibt im Stepper sichtbar und
+    korrigierbar, falls die Ausstattungserkennung danebenlag.
+    """
+
+    def setUp(self):
+        user = get_user_model().objects.create_user(username="kudospec")
+        self.profile = StravaProfile.objects.create(
+            user=user,
+            strava_athlete_id=112233,
+            access_token="t",
+            refresh_token="r",
+            expires_at=0,
+        )
+        self.bike = Bike.objects.create(
+            athlete=self.profile,
+            strava_bike_id="kudo-spec-bike",
+            name="Spec Bike",
+            bike_type=BikeType.GRAVEL,
+        )
+        self.group = ComponentGroup.objects.create(
+            name="Antrieb", category=ComponentCategory.DRIVETRAIN, sort_order=1
+        )
+        self.chain = ComponentTemplate.objects.create(
+            name="Kette",
+            category=ComponentCategory.DRIVETRAIN,
+            group=self.group,
+            warn_km=4000,
+            maintenance_kind=MaintenanceKind.PART,
+        )
+        self.front_derailleur = ComponentTemplate.objects.create(
+            name="Umwerfer",
+            category=ComponentCategory.DRIVETRAIN,
+            group=self.group,
+            warn_km=20000,
+            maintenance_kind=MaintenanceKind.PART,
+        )
+        self.di2 = ComponentTemplate.objects.create(
+            name="Schaltung Akku (Di2/AXS) laden",
+            category=ComponentCategory.DRIVETRAIN,
+            group=self.group,
+            warn_days=21,
+            maintenance_kind=MaintenanceKind.CONSUMABLE,
+        )
+
+    def _respond(self, spec, parts, intervals=None):
+        return _gemini_json(
+            {
+                "spec": spec,
+                "groups": [
+                    {
+                        "group_id": self.group.id,
+                        "parts": parts,
+                        "intervals": intervals or [],
+                    }
+                ],
+            }
+        )
+
+    def _rows(self, result):
+        group = result["groups"][0]
+        return {r["template_id"]: r for r in group["parts"] + group["intervals"]}
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_front_derailleur_is_unchecked_on_a_1x_drivetrain(self, mock_post):
+        mock_post.return_value = self._respond(
+            {"drivetrain": "1x11", "electronic_shifting": False},
+            [
+                {"template_id": self.chain.id, "include": True},
+                {"template_id": self.front_derailleur.id, "include": True},
+            ],
+        )
+        rows = self._rows(suggest_setup(self.bike, "Canyon", "Grail", 2022))
+
+        self.assertTrue(rows[self.chain.id]["include"])
+        self.assertFalse(rows[self.front_derailleur.id]["include"])
+        self.assertIn("Ausstattung", rows[self.front_derailleur.id]["note"])
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_front_derailleur_stays_checked_on_a_2x_drivetrain(self, mock_post):
+        mock_post.return_value = self._respond(
+            {"drivetrain": "2x11"},
+            [{"template_id": self.front_derailleur.id, "include": True}],
+        )
+        rows = self._rows(suggest_setup(self.bike, "Canyon", "Grail", 2022))
+        self.assertTrue(rows[self.front_derailleur.id]["include"])
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_electronic_shifting_battery_needs_electronic_shifting(self, mock_post):
+        mock_post.return_value = self._respond(
+            {"drivetrain": "1x11", "electronic_shifting": False},
+            [],
+            [{"template_id": self.di2.id, "include": True}],
+        )
+        rows = self._rows(suggest_setup(self.bike, "Canyon", "Grail", 2022))
+        self.assertFalse(rows[self.di2.id]["include"])
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_contradicting_row_is_unchecked_not_removed(self, mock_post):
+        """Der Nutzer soll die Zeile weiter sehen und wieder anhaken koennen."""
+        mock_post.return_value = self._respond(
+            {"drivetrain": "1x11"},
+            [{"template_id": self.front_derailleur.id, "include": True}],
+        )
+        result = suggest_setup(self.bike, "Canyon", "Grail", 2022)
+        self.assertIn(self.front_derailleur.id, self._rows(result))
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_without_a_spec_the_selection_is_left_alone(self, mock_post):
+        """Ohne Ausstattungsangabe wird nichts umgeschrieben — im Zweifel gilt die KI."""
+        mock_post.return_value = self._respond(
+            {},
+            [{"template_id": self.front_derailleur.id, "include": True}],
+        )
+        rows = self._rows(suggest_setup(self.bike, "Canyon", "Grail", 2022))
+        self.assertTrue(rows[self.front_derailleur.id]["include"])
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_response_reports_whether_it_actually_researched(self, mock_post):
+        """
+        Ohne Grounding darf die Antwort keine Recherche behaupten — sonst suggeriert
+        die UI eine Belegtheit, die es nicht gibt.
+        """
+        mock_post.return_value = self._respond({"drivetrain": "1x11"}, [])
+        result = suggest_setup(self.bike, "Canyon", "Grail", 2022)
+        self.assertFalse(result["researched"])
+        self.assertEqual(result["spec"]["drivetrain"], "1x11")
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_grounding_is_not_requested_while_disabled(self, mock_post):
+        """
+        Default ist aus: Grounding haengt an einem eigenen Kontingent, und ein Key
+        ohne dieses Kontingent quittiert den Aufruf mit 429.
+        """
+        mock_post.return_value = self._respond({}, [])
+        suggest_setup(self.bike, "Canyon", "Grail", 2022)
+        self.assertNotIn("tools", mock_post.call_args.kwargs["json"])
+
+    @override_settings(AI_GROUNDING_ENABLED=True)
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_grounding_is_requested_while_enabled(self, mock_post):
+        mock_post.return_value = self._respond({}, [])
+        suggest_setup(self.bike, "Canyon", "Grail", 2022)
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["tools"], [{"google_search": {}}])
+        # Ohne responseMimeType: ob JSON-Modus und Suchwerkzeug zusammen erlaubt
+        # sind, ist nicht zugesichert — das JSON wird stattdessen im Prompt
+        # verlangt und mit dem Fence-Parser gelesen.
+        self.assertNotIn("responseMimeType", payload["generationConfig"])
+
+    @override_settings(AI_GROUNDING_ENABLED=True)
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_failed_research_falls_back_to_plain_model_knowledge(self, mock_post):
+        """
+        Der Kernfall auf einem Key ohne Grounding-Kontingent: der recherchierte
+        Aufruf laeuft in HTTP 429, der Nutzer bekommt trotzdem eine Vorbelegung —
+        nur eine ungepruefte, was `researched: False` auch sagt.
+        """
+        failing = requests.Response()
+        failing.status_code = 429
+        ok = self._respond({"drivetrain": "1x11"}, [{"template_id": self.chain.id}])
+        mock_post.side_effect = [failing, ok]
+
+        result = suggest_setup(self.bike, "Canyon", "Grail", 2022)
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["researched"])
+        self.assertTrue(self._rows(result)[self.chain.id]["include"])
+        # Erst mit Werkzeug, dann ohne.
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertIn("tools", mock_post.call_args_list[0].kwargs["json"])
+        self.assertNotIn("tools", mock_post.call_args_list[1].kwargs["json"])

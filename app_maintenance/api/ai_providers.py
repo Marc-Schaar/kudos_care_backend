@@ -11,6 +11,10 @@ logger = logging.getLogger("my_app_debug")
 # LLM-Calls sind langsamer als der REQUEST_TIMEOUT=10 der Strava/Open-Meteo-Aufrufe.
 AI_REQUEST_TIMEOUT = 20
 
+# Ein Recherche-Aufruf schlaegt erst Suchtreffer nach und liest sie, bevor er
+# antwortet — das dauert deutlich laenger als eine reine Modellantwort.
+AI_RESEARCH_TIMEOUT = 45
+
 # Freitext-Antworten sind kurz (2-5 Saetze). Ein komplettes Bike-Setup als JSON hat
 # dagegen leicht 30+ Zeilen — mit 300 Tokens bricht die Antwort mitten im JSON ab.
 AI_MAX_OUTPUT_TOKENS = 300
@@ -71,12 +75,40 @@ class BaseAIProvider(ABC):
         raw = self.generate_text(system_prompt, user_prompt)
         return _parse_json_response(raw, self.name)
 
+    def generate_json_researched(
+        self, system_prompt: str, user_prompt: str
+    ) -> dict | None:
+        """
+        Wie `generate_json()`, darf die Frage aber im Web recherchieren, statt sie
+        allein aus dem Modellwissen zu beantworten.
+
+        Gedacht für Fragen nach realen Produktdaten (welches Modell gab es
+        wirklich, was war ab Werk verbaut) — dort ist eine erfundene Antwort
+        besonders teuer, weil sie plausibel aussieht.
+
+        Provider ohne Recherche-Fähigkeit fallen hier auf `generate_json()`
+        zurück; der Aufrufer bekommt also immer eine Antwort, nur ggf. eine
+        ungeprüfte. Ob tatsächlich recherchiert wurde, sagt
+        `last_call_was_researched`.
+        """
+        return self.generate_json(system_prompt, user_prompt)
+
+    #: Ob der letzte `generate_json_researched()`-Aufruf wirklich im Web recherchiert
+    #: hat. False heisst "aus dem Modellwissen beantwortet" — der Aufrufer kann das
+    #: an die UI durchreichen, statt Recherche zu suggerieren, die nicht stattfand.
+    last_call_was_researched: bool = False
+
 
 class GeminiProvider(BaseAIProvider):
     name = "gemini"
 
     def _request(
-        self, system_prompt: str, user_prompt: str, generation_config: dict
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        generation_config: dict,
+        tools: list | None = None,
+        timeout: int = AI_REQUEST_TIMEOUT,
     ) -> str | None:
         api_key = settings.GEMINI_API_KEY
         if not api_key:
@@ -92,11 +124,19 @@ class GeminiProvider(BaseAIProvider):
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
             "generationConfig": generation_config,
         }
+        if tools:
+            payload["tools"] = tools
         try:
-            resp = requests.post(url, json=payload, timeout=AI_REQUEST_TIMEOUT)
+            resp = requests.post(url, json=payload, timeout=timeout)
             resp.raise_for_status()
             data = resp.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            candidate = data["candidates"][0]
+            # Bei aktivierter Websuche verteilt Gemini die Antwort auf mehrere
+            # Parts; nur den ersten zu nehmen schneidet sie mittendrin ab.
+            parts = candidate["content"]["parts"]
+            text = "".join(part.get("text", "") for part in parts).strip()
+            self.last_call_was_researched = bool(candidate.get("groundingMetadata"))
+            return text or None
         except requests.exceptions.RequestException as e:
             logger.error("Gemini-Anfrage fehlgeschlagen: %s", e)
             return None
@@ -112,6 +152,7 @@ class GeminiProvider(BaseAIProvider):
         )
 
     def generate_json(self, system_prompt: str, user_prompt: str) -> dict | None:
+        self.last_call_was_researched = False
         raw = self._request(
             system_prompt,
             user_prompt,
@@ -122,6 +163,49 @@ class GeminiProvider(BaseAIProvider):
             },
         )
         return _parse_json_response(raw, self.name)
+
+    def generate_json_researched(
+        self, system_prompt: str, user_prompt: str
+    ) -> dict | None:
+        """
+        JSON-Antwort mit Google-Search-Grounding, damit Produktdaten belegt statt
+        erinnert sind.
+
+        Zwei Eigenheiten, beide bewusst:
+
+        * **Kein `responseMimeType`.** Ob der JSON-Modus mit dem Suchwerkzeug
+          zusammen erlaubt ist, ist nicht zugesichert; statt darauf zu wetten,
+          wird das JSON im Prompt verlangt und mit demselben Fence-Parser gelesen
+          wie bei Providern ohne JSON-Modus.
+        * **Automatischer Rückfall auf `generate_json()`.** Grounding ist an ein
+          eigenes Kontingent gebunden und antwortet auf einem Key ohne dieses
+          Kontingent mit HTTP 429 — nachgemessen auf dem aktuellen Key, während
+          derselbe Aufruf ohne Werkzeug 200 liefert. Der Rückfall macht daraus
+          eine ungeprüfte statt gar keiner Antwort.
+
+        `AI_GROUNDING_ENABLED=False` überspringt den Versuch ganz, damit man sich
+        auf einem Key ohne Kontingent nicht bei jedem Aufruf einen 429 einhandelt.
+        """
+        self.last_call_was_researched = False
+        if not getattr(settings, "AI_GROUNDING_ENABLED", False):
+            return self.generate_json(system_prompt, user_prompt)
+
+        raw = self._request(
+            system_prompt,
+            user_prompt,
+            {"temperature": 0.2, "maxOutputTokens": AI_JSON_MAX_OUTPUT_TOKENS},
+            tools=[{"google_search": {}}],
+            timeout=AI_RESEARCH_TIMEOUT,
+        )
+        parsed = _parse_json_response(raw, f"{self.name} (recherchiert)")
+        if parsed is not None:
+            return parsed
+
+        logger.info(
+            "Gemini-Recherche nicht verfuegbar, weiche auf reines Modellwissen aus."
+        )
+        self.last_call_was_researched = False
+        return self.generate_json(system_prompt, user_prompt)
 
 
 class GroqProvider(BaseAIProvider):
@@ -219,6 +303,23 @@ class FallbackAIProvider(BaseAIProvider):
         for provider in self._providers:
             result = provider.generate_json(system_prompt, user_prompt)
             if result is not None:
+                self.last_call_was_researched = False
+                return result
+        return None
+
+    def generate_json_researched(
+        self, system_prompt: str, user_prompt: str
+    ) -> dict | None:
+        """
+        Reicht die Recherche an die Kette durch. Ein Provider ohne
+        Recherche-Faehigkeit (Groq) beantwortet die Frage aus dem Modellwissen —
+        immer noch besser als gar keine Antwort, aber `last_call_was_researched`
+        sagt dann False.
+        """
+        for provider in self._providers:
+            result = provider.generate_json_researched(system_prompt, user_prompt)
+            if result is not None:
+                self.last_call_was_researched = provider.last_call_was_researched
                 return result
         return None
 
