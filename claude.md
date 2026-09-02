@@ -223,6 +223,22 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   Absicherung. Marke/Modell je Zeile sind dagegen echtes Modellwissen und damit ein
   bewusster Bruch mit „die KI erfindet nichts" — deshalb trägt jede Zeile ein
   `confidence`-Feld, und der Stepper weist sie als Vorschlag aus.
+  **Prompt-Konventionen** (`KudoPromptTests` sichert sie ab): `include` und `confidence`
+  sind orthogonal und der Prompt sagt das ausdrücklich — `include` heißt „ist dieses Teil
+  an diesem Rad verbaut", `confidence` heißt „wie sicher bin ich bei Marke/Modell". Ein
+  Gravelbike hat immer eine Kette, auch wenn der Hersteller unbekannt ist; dann bleibt
+  `brand` leer und `confidence` ist `low`, statt die Zeile ganz wegzulassen. Der
+  Katalog-Block gibt `default_in_group` als `ueblich`/`Sonderfall` mit aus — das Frontend
+  lässt `hint.include` genau diesen Default überschreiben, die KI darf ihn also nicht
+  raten müssen. Lebensdauer-Overrides (`custom_warn_km` etc.) nur bei echter Abweichung,
+  sonst gewinnt der gepflegte Katalogwert. Die IDs im Format-Beispiel sind bewusst
+  **Platzhalter außerhalb des ID-Raums** (9001/9002/9003): vorher standen dort echte
+  Katalog-IDs, die etwas anderes bedeuteten als das, wofür sie im Beispiel standen
+  (Gruppe 1 = „Laufrad vorne" mit einer Kette darin, ein Verschleißteil unter
+  `intervals`) — das Beispiel führte dem Modell also genau die Fehler vor, die
+  `_clean_row()` hinterher wegwirft. Sichtbare Folge war, dass Kudo **gar keine
+  Wartungsintervalle** lieferte: Verbrauchsmaterial kam als `part` zurück und fiel
+  komplett aus dem Ergebnis.
   `api/ai_providers.py`: austauschbarer
   Gemini/Groq-Adapter (`AI_PROVIDER`-Setting) für die On-Demand-KI-Erklärung.
   `generate_json()` erzwingt eine JSON-Antwort (Gemini `responseMimeType`, Groq

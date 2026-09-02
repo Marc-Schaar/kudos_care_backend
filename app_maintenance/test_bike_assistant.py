@@ -420,3 +420,111 @@ class AssistantEndpointTests(KudoCatalogGuardTests):
             response.status_code,
             (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
+
+
+@override_settings(AI_PROVIDER="gemini", GEMINI_API_KEY="k", GROQ_API_KEY="")
+class KudoPromptTests(APITestCase):
+    """
+    Tests fuer den Prompt selbst, nicht fuer den Filter dahinter.
+
+    Anlass war ein realer Fehler: das Few-Shot-Beispiel im System-Prompt benutzte
+    echte Katalog-IDs, die etwas voellig anderes bedeuteten als das, wofuer sie im
+    Beispiel standen (group_id 1 = "Laufrad vorne", darin template_id 2 = "Kassette"
+    aus Gruppe 2, mit einer Ketten-Modellnummer als Marke; template_id 9 = "Ritzel",
+    ein Verschleissteil, stand unter "intervals"). Das Beispiel fuehrte dem Modell
+    also genau die drei Fehler vor, die `_clean_row()` hinterher wegwirft.
+    """
+
+    def setUp(self):
+        user = get_user_model().objects.create_user(username="kudoprompt")
+        self.profile = StravaProfile.objects.create(
+            user=user,
+            strava_athlete_id=778899,
+            access_token="t",
+            refresh_token="r",
+            expires_at=0,
+        )
+        self.bike = Bike.objects.create(
+            athlete=self.profile,
+            strava_bike_id="kudo-prompt-bike",
+            name="Prompt Bike",
+            bike_type=BikeType.GRAVEL,
+        )
+        self.group = ComponentGroup.objects.create(
+            name="Antrieb", category=ComponentCategory.DRIVETRAIN, sort_order=1
+        )
+        self.common = ComponentTemplate.objects.create(
+            name="Kette",
+            category=ComponentCategory.DRIVETRAIN,
+            group=self.group,
+            warn_km=4000,
+            maintenance_kind=MaintenanceKind.PART,
+            default_in_group=True,
+        )
+        self.rare = ComponentTemplate.objects.create(
+            name="Zahnriemen",
+            category=ComponentCategory.DRIVETRAIN,
+            group=self.group,
+            warn_days=1095,
+            maintenance_kind=MaintenanceKind.PART,
+            default_in_group=False,
+        )
+
+    def _captured_system_prompt(self, mock_post) -> str:
+        """Der System-Prompt, wie er tatsaechlich an den Provider ging."""
+        body = mock_post.call_args.kwargs["json"]
+        return json.dumps(body, ensure_ascii=False)
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_example_ids_in_the_prompt_are_not_real_catalog_ids(self, mock_post):
+        """
+        Regressionstest fuer den Anlass dieser Klasse: die Platzhalter-IDs im
+        Format-Beispiel duerfen mit keiner echten Gruppen- oder Template-ID
+        kollidieren, sonst widerspricht das Beispiel dem mitgelieferten Katalog.
+        """
+        mock_post.return_value = _gemini_json({"groups": []})
+        suggest_setup(self.bike, "Canyon", "Grail", 2022)
+
+        prompt = self._captured_system_prompt(mock_post)
+        real_ids = set(ComponentTemplate.objects.values_list("id", flat=True)) | set(
+            ComponentGroup.objects.values_list("id", flat=True)
+        )
+        for placeholder in (9001, 9002, 9003):
+            self.assertIn(str(placeholder), prompt)
+            self.assertNotIn(
+                placeholder,
+                real_ids,
+                f"Platzhalter {placeholder} kollidiert mit einer echten Katalog-ID.",
+            )
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_catalog_marks_usual_versus_special_templates(self, mock_post):
+        """
+        `default_in_group` muss im Prompt stehen: das Frontend laesst `hint.include`
+        der KI diesen Default ueberschreiben, also darf die KI ihn nicht raten.
+        """
+        mock_post.return_value = _gemini_json({"groups": []})
+        suggest_setup(self.bike, "Canyon", "Grail", 2022)
+
+        prompt = self._captured_system_prompt(mock_post)
+        self.assertIn(f"Template {self.common.id}: Kette", prompt)
+        self.assertIn("ueblich", prompt)
+        self.assertIn(f"Template {self.rare.id}: Zahnriemen", prompt)
+        self.assertIn("Sonderfall", prompt)
+
+    @patch("app_maintenance.api.ai_providers.requests.post")
+    def test_missing_lifetime_axis_is_omitted_not_shown_as_question_mark(
+        self, mock_post
+    ):
+        """
+        Frueher stand "4000.0 km / ? Tage" im Katalog — das "?" las sich wie ein
+        auszufuellendes Feld, und die Nachkommastelle war bedeutungslos.
+        """
+        mock_post.return_value = _gemini_json({"groups": []})
+        suggest_setup(self.bike, "Canyon", "Grail", 2022)
+
+        prompt = self._captured_system_prompt(mock_post)
+        self.assertIn("4000 km", prompt)
+        self.assertNotIn("4000.0", prompt)
+        self.assertNotIn("? Tage", prompt)
+        self.assertNotIn("? km", prompt)

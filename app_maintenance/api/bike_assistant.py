@@ -90,8 +90,31 @@ def _catalog_for_bike_type(bike_type: str) -> list[ComponentGroup]:
     return [group for group in groups if group.applies_to(bike_type)]
 
 
+def _format_lifetime(template) -> str:
+    """
+    Standard-Lebensdauer knapp und ohne Rauschen. Frueher stand hier
+    "2000.0 km / ? Tage": die Nachkommastelle ist bedeutungslos, und das "?"
+    liest sich wie ein auszufuellender Platzhalter statt wie "diese Achse gilt
+    fuer dieses Teil nicht".
+    """
+    parts = []
+    if template.warn_km:
+        parts.append(f"{template.warn_km:g} km")
+    if template.warn_days:
+        parts.append(f"{template.warn_days:g} Tage")
+    return " oder ".join(parts) if parts else "keine Vorgabe"
+
+
 def _catalog_prompt_block(groups: list[ComponentGroup], bike_type: str) -> str:
-    """Der erlaubte Katalog als Text — die KI darf nur diese IDs referenzieren."""
+    """
+    Der erlaubte Katalog als Text — die KI darf nur diese IDs referenzieren.
+
+    `default_in_group` steht bewusst mit drin: das ist die kuratierte Aussage,
+    ob ein Teil an so einem Rad ueblich oder ein Sonderfall ist. Das Frontend
+    nimmt `hint.include` der KI und ueberschreibt damit genau diesen Default
+    (siehe `AssemblyChecklistComponent`) — fehlt die Angabe im Prompt,
+    ueberstimmt also ein Rateergebnis eine gepflegte Vorgabe.
+    """
     lines = []
     for group in groups:
         lines.append(f"Baugruppe {group.id}: {group.name}")
@@ -103,12 +126,10 @@ def _catalog_prompt_block(groups: list[ComponentGroup], bike_type: str) -> str:
                 if template.maintenance_kind == MaintenanceKind.PART
                 else "Verbrauchsmaterial"
             )
-            lifetime = (
-                f"{template.warn_km or '?'} km / {template.warn_days or '?'} Tage"
-            )
+            usual = "ueblich" if template.default_in_group else "Sonderfall"
             lines.append(
-                f"  - Template {template.id}: {template.name} [{kind}, "
-                f"Standard-Lebensdauer {lifetime}]"
+                f"  - Template {template.id}: {template.name} "
+                f"[{kind}, {usual}, Standard: {_format_lifetime(template)}]"
             )
     return "\n".join(lines)
 
@@ -202,20 +223,52 @@ def suggest_setup(bike, manufacturer: str, model: str, year: int | None) -> dict
         "Du bist ein Fahrrad-Experte und hilfst einem Laien, sein Fahrrad in einer "
         "Wartungs-App anzulegen. Du bekommst Hersteller, Modell, Baujahr und einen "
         "KATALOG erlaubter Baugruppen und Komponenten-Templates mit ihren IDs.\n\n"
-        "Waehle daraus die Teile aus, die an diesem Fahrrad typischerweise verbaut sind, "
-        "und schlage je Teil Marke und Modellbezeichnung der ab Werk verbauten Komponente "
-        "vor. Du darfst AUSSCHLIESSLICH template_id-Werte aus dem Katalog verwenden — "
-        "erfinde keine neuen IDs, Baugruppen oder Komponenten.\n\n"
-        "Antworte ausschliesslich mit einem JSON-Objekt der Form:\n"
-        '{"groups": [{"group_id": 1, "parts": [{"template_id": 2, "include": true, '
-        '"brand": "Shimano", "model_name": "CN-M8100", "custom_warn_km": 4000, '
-        '"confidence": "high", "note": ""}], "intervals": [{"template_id": 9, '
-        '"include": true, "interval_km": 300, "interval_days": 30}]}]}\n\n'
-        "'confidence' ist 'high', wenn du die Serienausstattung dieses Modells sicher "
-        "kennst, 'medium' bei einer begruendeten Annahme, 'low' bei blossem Raten. "
-        "Bist du dir bei einem Teil sehr unsicher, setze include auf false statt zu raten. "
-        "Kennst du das Modell gar nicht, gib nur die typische Ausstattung fuer diesen "
-        "Fahrradtyp mit confidence 'low' zurueck."
+        "Waehle daraus die Teile aus, die an diesem Fahrrad tatsaechlich verbaut sind. "
+        "Du darfst AUSSCHLIESSLICH group_id- und template_id-Werte aus dem KATALOG "
+        "verwenden, und ein Template nur unter der Baugruppe, unter der es dort steht. "
+        "Ein Template, das im Katalog als 'Verschleissteil' gefuehrt wird, gehoert nach "
+        "'parts', eines mit 'Verbrauchsmaterial' nach 'intervals'. Erfundene, "
+        "vertauschte oder falsch einsortierte IDs werden serverseitig verworfen.\n\n"
+        "REGELN:\n"
+        "1. include beantwortet: ist dieses Teil an DIESEM Rad vorhanden und sinnvoll "
+        "zu tracken? Das ist unabhaengig davon, ob du die Marke kennst. Ein Gravelbike "
+        "hat immer eine Kette (include true), auch wenn dir der Hersteller unbekannt "
+        "ist.\n"
+        "2. confidence beantwortet etwas anderes: wie sicher bist du bei Marke und "
+        "Modellbezeichnung? 'high' = du kennst die Serienausstattung dieses Modelljahrs "
+        "wirklich, 'medium' = begruendete Annahme aus Preisklasse und Baujahr, 'low' = "
+        "geraten. confidence sagt nichts ueber include aus.\n"
+        "3. Kennst du Marke oder Modellbezeichnung nicht, lass brand und model_name "
+        "LEER und setze confidence auf 'low'. Ein leeres Feld ist besser als ein "
+        "falscher Markenname, den der Nutzer ungeprueft uebernimmt.\n"
+        "4. Der Katalog markiert jedes Template als 'ueblich' oder 'Sonderfall'. Folge "
+        "dieser Vorgabe, solange du keinen konkreten Grund hast, davon abzuweichen: ein "
+        "'Sonderfall' bekommt include true nur, wenn dieses Modell ihn wirklich hat "
+        "(Umwerfer nur bei 2-fach-Kurbel, Zahnriemen nur bei Riemenantrieb, Di2/AXS-Akku "
+        "nur bei elektronischer Schaltung).\n"
+        "5. Einander ausschliessende Varianten: waehle hoechstens eine. Ein Rad wird auf "
+        "genau eine Art geschmiert (Kettenoel ODER Heisswachs ODER Tropfwachs) und hat "
+        "entweder Kette oder Zahnriemen. Tubeless-Dichtmilch nur, wenn das Modell ab "
+        "Werk tubeless faehrt.\n"
+        "6. custom_warn_km/custom_warn_days bzw. interval_km/interval_days nur setzen, "
+        "wenn dieses konkrete Teil deutlich vom Katalog-Standard abweicht. Sonst Feld "
+        "weglassen — der Standardwert ist gepflegt und besser als eine Schaetzung.\n"
+        "7. 'note' nur fuellen, wenn es eine echte Einschraenkung zu sagen gibt "
+        "(max. 100 Zeichen, deutsch). Sonst leerer String.\n"
+        "8. Gib fuer JEDE Baugruppe des Katalogs einen Eintrag zurueck, auch wenn darin "
+        "alle Teile include false haetten — der Nutzer laeuft im Stepper jede Baugruppe "
+        "durch.\n"
+        "9. Kennst du das Modell gar nicht, liefere die typische Ausstattung fuer diesen "
+        "Fahrradtyp: include nach der 'ueblich'-Markierung, brand und model_name leer, "
+        "confidence 'low'.\n\n"
+        "Antworte ausschliesslich mit einem JSON-Objekt dieser Form. Die IDs im Beispiel "
+        "sind PLATZHALTER, die nur das Format zeigen — verwende ausschliesslich die "
+        "echten IDs aus dem KATALOG:\n"
+        '{"groups": [{"group_id": 9001, "parts": [{"template_id": 9002, '
+        '"include": true, "brand": "Shimano", "model_name": "CN-HG601", '
+        '"confidence": "high", "note": ""}], "intervals": [{"template_id": 9003, '
+        '"include": true, "interval_km": 300, "confidence": "medium", '
+        '"note": ""}]}]}'
     )
     user_prompt = (
         f"Hersteller: {manufacturer}\n"
