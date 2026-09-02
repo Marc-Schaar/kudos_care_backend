@@ -108,9 +108,13 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `assembly` = physische Einheit, die man am Stück ab- und aufzieht (nur die beiden
   Laufradsätze); `area` = Teile am selben Ort, die unabhängig verschleißen (Bremsbeläge
   3.000 km neben Bremsscheibe 15.000 km neben Bremsflüssigkeit 730 Tage; Kette 2.000 km
-  neben Kurbel 30.000 km). `activate/` und `swap/` werden für `area` serverseitig mit
-  400 `not_an_assembly` abgelehnt und im Client gar nicht erst angeboten — dort wird pro
-  Zeile einzeln getauscht. Niemand hat ein zweites komplettes „Cockpit" im Keller.
+  neben Kurbel 30.000 km). **Nur `swap/`** (alle Teile erneuern) wird für `area`
+  serverseitig mit 400 `not_an_assembly` abgelehnt und im Client nicht angeboten — dort
+  wird pro Zeile einzeln getauscht. `activate/` hängt bewusst **nicht** an `kind`:
+  Wechseln ist nicht destruktiv und hat reale Fälle außerhalb der Laufräder — in den
+  Produktivdaten hat ein Rad zwei „Bremse hinten"-Instanzen (Carbon-Beläge geparkt,
+  Alu-Beläge aufgezogen), weil die Belagsmischung zum Laufradsatz passen muss. Eine
+  `kind`-Prüfung dort hätte genau diesen Wechsel blockiert. Niemand hat ein zweites komplettes „Cockpit" im Keller.
   **`MountPosition`** (`ComponentGroup.position`/`ComponentTemplate.position`) macht
   vorne/hinten zu einem Feld. Vorher stand die Seite nur im Freitext-Namen und wurde im
   Frontend-Diagramm per `display_name.includes('vorne')` wieder herausgelesen: ein
@@ -390,7 +394,20 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `ungrouped_conflict` ab statt in einen IntegrityError zu laufen.
   `POST intervals/<id>/log/` = "Erledigt".
   `POST bikes/<id>/slots/` (freies Einzel-Slot-Anlegen) entfällt für den Client — Slots
-  entstehen nur über den Baugruppen-Create; `GET` bleibt. Katalog + Zuordnung aller
+  entstehen nur über den Baugruppen-Create; `GET` bleibt.
+  **Einzeltausch im Slot** (`slots/<id>/mount|unmount`, neues Teil über
+  `slots/<id>/components/`) läuft über die Helfer `_unmount_current()` und `_remount()`.
+  Beide gehören zusammen und beheben zwei Fehler, die den Wechsel zwischen zwei Teilen
+  in einem Slot (z.B. zwei Bremsbelag-Sätze) unbrauchbar machten: (1) beim Ausbauen wurde
+  nur `retired_at` gesetzt, nie `distance_at_retire` — damit griff der Altbestands-
+  Fallback in `api/usage.py` („ausgebaut, aber ohne km-Stand → bis heute rechnen", für
+  Daten vor Migration `0018` gedacht) und das ausgebaute Teil sammelte unbegrenzt weiter
+  km (gemessen: nach 100 km ausgebaut, stand bei 150, als der Nachfolger 50 km gefahren
+  war). (2) Beim Wiedermontieren fehlte jede Buchführung über die Standzeit — eine
+  Komponente hat genau einen Einbaupunkt, der zurückgeholte Belag zählte die km des
+  anderen mit (180 statt 130). `_remount()` friert den bisherigen Verschleiß deshalb in
+  `carried_over_wear_km`/`carried_over_weather_wear_km` ein und setzt den Einbaupunkt auf
+  jetzt — dasselbe Muster wie `reuse_component_id` im Baugruppen-Create. Katalog + Zuordnung aller
   System-Templates zu Gruppen in Migration `0016`, Backfill bestehender Slots →
   `BikeAssembly`/`MaintenanceInterval` (erzwungen) in `0017`. Kassette gehört seit
   Migration `0020` zur Gruppe "Laufrad hinten" (nicht mehr "Antrieb") — sie sitzt physisch
@@ -605,6 +622,11 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   ungruppierten Slot wird abgelehnt), `MountPositionTests` (Regressionstest gegen die
   Migrations-Daten: Kassette ist fest `rear`, obwohl „hinten" nicht im Namen steht; nur
   die Laufradsätze sind `assembly`).
+- `app_maintenance/test_slot_swap_wear.py`: `SlotSwapWearTests` — Verschleiß beim
+  Einzeltausch, wenn sich zwei Teile einen Slot teilen. Ein ausgebautes Teil bleibt bei
+  seiner Zahl stehen, ein neu montiertes startet bei 0, und beim Hin-und-Herwechseln
+  zählt jeder Belag nur seine eigenen km (130/50 statt 180/80); mehrfaches Wechseln
+  addiert sich, statt sich zu überschreiben.
 - `app_maintenance/test_query_counts.py`: `QueryScalingTests` — Regressionstests gegen
   N+1. Bewusst **keine** festen Query-Zahlen (die wären bei jeder Serializer-Änderung rot),
   sondern die Invariante: dieselbe Route mit 3 und mit 15 Slots muss gleich viele Queries

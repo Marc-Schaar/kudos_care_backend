@@ -264,6 +264,71 @@ class ComponentSlotDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIVie
         )
 
 
+def _unmount_current(slot: ComponentSlot, on: datetime.date | None = None) -> None:
+    """
+    Baut das aktuell montierte Teil eines Slots aus — **mit** km-Stand.
+
+    `distance_at_retire` war hier nie gesetzt worden, nur `retired_at`. Damit
+    griff in `api/usage.py` der Altbestands-Fallback ("ausgebaut, aber ohne
+    erfassten km-Stand -> bis heute rechnen"), der eigentlich nur Daten von vor
+    Migration 0018 auffangen sollte. Folge: ein ausgebautes Teil sammelte
+    weiter km, als laege es noch am Rad — gemessen stand ein nach 100 km
+    ausgebauter Bremsbelag bei 150 km, nachdem der Nachfolger 50 km gefahren
+    war, und wuchs immer weiter.
+    """
+    on = on or datetime.date.today()
+    Component.objects.filter(slot=slot, is_mounted=True).update(
+        is_mounted=False,
+        retired_at=on,
+        distance_at_retire=slot.bike.total_distance_km,
+    )
+
+
+def _remount(component: Component, on: datetime.date | None = None) -> None:
+    """
+    Montiert ein Teil, das schon einmal am Rad war, ohne seinen bisherigen
+    Verschleiss zu verlieren oder die Standzeit mitzuzaehlen.
+
+    Eine Komponente hat genau einen Einbaupunkt — die Pause, in der ein anderes
+    Teil im Slot sass, ist an ihr nirgends erfasst. Ohne die Einfrierung zaehlte
+    ein zurueckgeholter Bremsbelag die Kilometer des anderen mit (gemessen: 180
+    statt 130 km). Deshalb dasselbe Muster wie bei `reuse_component_id` im
+    Baugruppen-Create: bisherigen Verschleiss in `carried_over_*` festhalten und
+    den Einbaupunkt auf jetzt setzen. `compute_wear()` bzw.
+    `WeatherWearService.recompute_component()` addieren den eingefrorenen Wert
+    danach auf die neu gefahrenen km drauf.
+    """
+    on = on or datetime.date.today()
+    bike_total = component.slot.bike.total_distance_km
+    already_ridden = component.installed_at is not None and (
+        component.retired_at is not None or not component.is_mounted
+    )
+
+    fields = ["is_mounted", "retired_at", "distance_at_retire"]
+    if already_ridden and bike_total is not None:
+        component.carried_over_wear_km = (component.carried_over_wear_km or 0.0) + (
+            component_active_km(component, bike_total) or 0.0
+        )
+        component.carried_over_weather_wear_km = (
+            component.carried_over_weather_wear_km or 0.0
+        ) + (component.weather_wear_km or 0.0)
+        component.weather_wear_km = None
+        component.installed_at = on
+        component.distance_at_install = bike_total
+        fields += [
+            "carried_over_wear_km",
+            "carried_over_weather_wear_km",
+            "weather_wear_km",
+            "installed_at",
+            "distance_at_install",
+        ]
+
+    component.is_mounted = True
+    component.retired_at = None
+    component.distance_at_retire = None
+    component.save(update_fields=fields)
+
+
 class SlotMountView(AthleteMixin, APIView):
     """
     POST /api/maintenance/slots/{pk}/mount/
@@ -282,13 +347,8 @@ class SlotMountView(AthleteMixin, APIView):
         new_comp = get_object_or_404(Component, pk=component_id, slot=slot)
 
         with transaction.atomic():
-            Component.objects.filter(slot=slot, is_mounted=True).update(
-                is_mounted=False,
-                retired_at=datetime.date.today(),
-            )
-            new_comp.is_mounted = True
-            new_comp.retired_at = None
-            new_comp.save()
+            _unmount_current(slot)
+            _remount(new_comp)
 
         return Response(ComponentSerializer(new_comp).data)
 
@@ -308,9 +368,8 @@ class SlotUnmountView(AthleteMixin, APIView):
                 {"error": "Keine montierte Komponente in diesem Slot."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        comp.is_mounted = False
-        comp.retired_at = datetime.date.today()
-        comp.save()
+        _unmount_current(slot)
+        comp.refresh_from_db()
         return Response(ComponentSerializer(comp).data)
 
 
@@ -337,10 +396,7 @@ class ComponentListView(AthleteMixin, generics.ListCreateAPIView):
         slot = self.get_slot()
         with transaction.atomic():
             if serializer.validated_data.get("is_mounted", True):
-                Component.objects.filter(slot=slot, is_mounted=True).update(
-                    is_mounted=False,
-                    retired_at=datetime.date.today(),
-                )
+                _unmount_current(slot)
             serializer.save(slot=slot)
 
 
@@ -1316,6 +1372,13 @@ class AssemblyActivateView(AthleteMixin, APIView):
     Instanz derselben `(bike, group)` wird dabei geparkt — nicht ausgemustert:
     ihre Komponenten bleiben montiert, sie sammelt ab jetzt nur keine km und
     keinen Wetter-Verschleiß mehr (siehe AssemblyUsagePeriod).
+
+    Anders als `swap/` haengt das **nicht** an `GroupKind`: Wechseln ist nicht
+    destruktiv, und es gibt reale Faelle ausserhalb der Laufraeder. In den
+    Produktivdaten hat ein Rad zwei "Bremse hinten"-Instanzen — Carbon-Belaege
+    (Yellow King) geparkt, Alu-Belaege (Die Blauen) aufgezogen — weil die
+    Belagsmischung zum Laufradsatz passen muss. Eine `kind`-Pruefung an dieser
+    Stelle haette genau diesen Wechsel blockiert.
     """
 
     def post(self, request, pk):
@@ -1325,17 +1388,6 @@ class AssemblyActivateView(AthleteMixin, APIView):
             bike__athlete=self.get_athlete(),
         )
         bike = assembly.bike
-
-        if assembly.group.kind != GroupKind.ASSEMBLY:
-            return Response(
-                {
-                    "error": f"'{assembly.group.name}' ist ein Bereich, keine "
-                    "Baugruppe — ein zweiter kompletter Satz davon ist kein "
-                    "realer Fall.",
-                    "code": "not_an_assembly",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         if assembly.is_retired:
             return Response(

@@ -170,13 +170,21 @@ class GroupKindTests(AssemblyTestBase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(res.data["code"], "not_an_assembly")
 
-    def test_area_cannot_be_activated(self):
+    def test_area_can_still_be_activated(self):
+        """
+        Wechseln ist nicht destruktiv und hat reale Fälle außerhalb der
+        Laufräder: in den Produktivdaten hängen an einem Rad zwei
+        "Bremse hinten"-Instanzen, weil die Belagsmischung (Carbon vs. Alu) zum
+        Laufradsatz passen muss. Nur `swap/` bleibt auf echte Baugruppen
+        beschränkt.
+        """
         assembly = BikeAssembly.objects.get(pk=self.area_assembly_id)
         assembly.status = AssemblyStatus.PARKED
         assembly.save()
         res = self.client.post(f"/api/maintenance/assemblies/{assembly.id}/activate/")
-        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(res.data["code"], "not_an_assembly")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        assembly.refresh_from_db()
+        self.assertEqual(assembly.status, AssemblyStatus.ACTIVE)
 
     def test_real_assembly_can_still_be_swapped(self):
         created = self.client.post(
