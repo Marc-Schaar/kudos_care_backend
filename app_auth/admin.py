@@ -1,4 +1,6 @@
 from django.contrib import admin
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from django.contrib.auth.models import User
 
 from .models import StravaProfile
 
@@ -15,7 +17,9 @@ class StravaProfileAdmin(admin.ModelAdmin):
         "last_sync_count",
     ]
     list_filter = ["email_notifications_enabled", "sync_status"]
-    search_fields = ["strava_athlete_id", "user__username", "user__email"]
+    # Bewusst NICHT nach user__email suchbar: eine Suche verrät die Adresse
+    # auch dann, wenn sie nirgends angezeigt wird (Treffer = Adresse existiert).
+    search_fields = ["strava_athlete_id", "user__username"]
     autocomplete_fields = ["user"]
     actions = ["send_welcome_email"]
 
@@ -96,3 +100,46 @@ class StravaProfileAdmin(admin.ModelAdmin):
         if not value:
             return "—"
         return f"…{value[-6:]}"
+
+
+# ── Django-User: Adresse aus dem Admin nehmen ────────────────────────────────
+# Djangos eingebauter UserAdmin zeigt die E-Mail in der Liste, im Formular und
+# in der Suche. Die App braucht sie ausschliesslich zum Versenden (siehe
+# app_notifications/services.py) — im Admin hat sie nichts zu suchen. Der Wert
+# bleibt in der Datenbank und wird weiter ueber `PATCH /api/strava/me/` gesetzt.
+admin.site.unregister(User)
+
+
+@admin.register(User)
+class UserWithoutEmailAdmin(BaseUserAdmin):
+    list_display = ["username", "is_staff", "is_active", "date_joined"]
+    search_fields = ["username"]
+    # `email` faellt sowohl aus der Anzeige als auch aus der Bearbeitung. Wer es
+    # im Notfall braucht, kommt ueber die Shell dran — dort ist der Zugriff
+    # nachvollziehbar und nicht beilaeufig.
+    fieldsets = [
+        (None, {"fields": ["username", "password"]}),
+        ("Name", {"fields": ["first_name", "last_name"]}),
+        (
+            "Berechtigungen",
+            {
+                "fields": [
+                    "is_active",
+                    "is_staff",
+                    "is_superuser",
+                    "groups",
+                    "user_permissions",
+                ]
+            },
+        ),
+        ("Zeitstempel", {"fields": ["last_login", "date_joined"]}),
+    ]
+    add_fieldsets = [
+        (
+            None,
+            {
+                "classes": ["wide"],
+                "fields": ["username", "password1", "password2"],
+            },
+        ),
+    ]

@@ -1,7 +1,10 @@
+import logging
+
 import requests
 from django.conf import settings
 from django.contrib.auth import login, logout
 from django.contrib.auth.models import User
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
@@ -16,6 +19,8 @@ from app_notifications.tasks import send_welcome_email_task
 
 from .serializers import StravaAuthSerializer, UserSettingsSerializer
 from .utils import sync_bikes_from_strava
+
+logger = logging.getLogger("my_app_debug")
 
 
 class StravaAuthCallbackView(APIView):
@@ -116,8 +121,9 @@ class LogoutView(APIView):
 
 class CurrentUserView(APIView):
     """
-    GET   /api/strava/me/  — Session-Check plus die im Frontend anzeigbaren Einstellungen.
-    PATCH /api/strava/me/  — E-Mail und Benachrichtigungs-Schalter aendern.
+    GET    /api/strava/me/  — Session-Check plus die im Frontend anzeigbaren Einstellungen.
+    PATCH  /api/strava/me/  — E-Mail und Benachrichtigungs-Schalter aendern.
+    DELETE /api/strava/me/?confirm=true — Konto und alle Daten loeschen.
 
     Der echte Name bleibt bewusst aussen vor (wird nicht persistiert, siehe
     StravaAuthCallbackView). `needs_email` treibt den Dialog beim naechsten Login:
@@ -184,3 +190,50 @@ class CurrentUserView(APIView):
 
         profile.refresh_from_db()
         return Response(self._payload(profile))
+
+    def delete(self, request):
+        """
+        Löscht das Konto samt aller Daten — Art. 17 DSGVO.
+
+        Es reicht, den `User` zu löschen: `StravaProfile` hängt per
+        OneToOne-CASCADE daran, `Bike` und `Ride` per FK-CASCADE am Profil, und
+        alles Weitere (Slots, Components, Nutzungszeiträume, Checks, Streams)
+        wiederum daran. Ein Profil ohne User wäre ein Datenrest ohne Zugang —
+        deshalb der Weg über den User und nicht über das Profil.
+
+        `?confirm=true` ist Pflicht. Ein versehentliches DELETE auf diese Route
+        löscht jahrelange Fahrthistorie unwiederbringlich; eine Bestätigung nur
+        im Client schützt nicht vor einem falsch abgesetzten Aufruf.
+        """
+        profile = self._profile(request)
+        if profile is None:
+            return Response(
+                {"error": "Nicht eingeloggt"}, status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        if request.query_params.get("confirm") != "true":
+            return Response(
+                {
+                    "error": "Löschen muss bestätigt werden (?confirm=true). Alle "
+                    "Fahrten, Bikes und Komponenten werden dabei entfernt.",
+                    "code": "confirmation_required",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = profile.user
+        athlete_id = profile.strava_athlete_id
+
+        with transaction.atomic():
+            if user is not None:
+                user.delete()
+            else:
+                # Altbestand ohne verknüpften User: dann das Profil direkt.
+                profile.delete()
+
+        logout(request)
+        request.session.flush()
+        # Bewusst nur die Athleten-Id, keine Adresse — Logs leben länger und
+        # sind breiter zugänglich als die Datenbank.
+        logger.info("Konto des Athleten %s auf Wunsch gelöscht.", athlete_id)
+        return Response(status=status.HTTP_204_NO_CONTENT)

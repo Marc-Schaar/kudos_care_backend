@@ -67,9 +67,12 @@ def send_templated_email(
         message.send()
         return True
     except Exception:
+        # Bewusst die Athleten-Id statt der Adresse: Logdateien leben länger,
+        # werden breiter gelesen und seltener gelöscht als die Datenbank —
+        # personenbezogene Daten gehören dort nicht hinein.
         logger.exception(
-            "E-Mail-Versand an %s (Template %s) fehlgeschlagen.",
-            user.email,
+            "E-Mail-Versand an Athlet %s (Template %s) fehlgeschlagen.",
+            profile.strava_athlete_id,
             template_name,
         )
         return False
