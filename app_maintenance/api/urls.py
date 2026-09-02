@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views import (
     AssemblyActivateView,
+    AssemblyAddItemView,
     AssemblyRetireView,
     AssemblySwapView,
     AssistantModelsView,
@@ -11,6 +12,7 @@ from .views import (
     BikeConditionReportView,
     BikeDetailView,
     BikeDistanceAtDateView,
+    BikeInstalledAtView,
     BikeListView,
     ComponentCheckInstructionsView,
     ComponentCheckView,
@@ -37,6 +39,11 @@ urlpatterns = [
         BikeDistanceAtDateView.as_view(),
         name="bike-distance-at",
     ),
+    path(
+        "maintenance/bikes/<int:bike_id>/installed-at/",
+        BikeInstalledAtView.as_view(),
+        name="bike-installed-at",
+    ),
     path("maintenance/groups/", ComponentGroupListView.as_view(), name="group-list"),
     # "Kudo" — KI-Assistent fuers Bike-Anlegen (siehe api/bike_assistant.py)
     path(
@@ -58,6 +65,11 @@ urlpatterns = [
         "maintenance/assemblies/<int:pk>/",
         BikeAssemblyDetailView.as_view(),
         name="assembly-detail",
+    ),
+    path(
+        "maintenance/assemblies/<int:pk>/items/",
+        AssemblyAddItemView.as_view(),
+        name="assembly-add-item",
     ),
     path(
         "maintenance/assemblies/<int:pk>/activate/",

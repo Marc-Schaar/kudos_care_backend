@@ -561,6 +561,80 @@ class BikeAssembly(models.Model):
             started_distance_km=min(install_km) if install_km else None,
         )
 
+    def sync_open_period_start(self) -> bool:
+        """
+        Zieht den Beginn der laufenden Nutzungsperiode auf den frühesten
+        Einbaupunkt der montierten Teile zurück. Gibt True zurück, wenn sich
+        etwas geändert hat.
+
+        Nötig, weil `api/usage.py` die km eines Teils gegen die Perioden seiner
+        Baugruppe schneidet: liegt der Periodenbeginn *nach* dem Einbau des
+        Teils, bleibt vom Fenster nichts übrig und das Teil zeigt 0 km. Genau
+        das passiert beim naheliegenden Ablauf „Baugruppe heute anlegen, danach
+        die Teile auf ihr echtes Einbaudatum korrigieren" — die Teile wandern
+        zurück, die Periode bliebe ohne diesen Aufruf stehen.
+
+        Nur der Beginn wird zurückgezogen, nie nach vorne geschoben: eine
+        Periode beschreibt, seit wann die Baugruppe am Rad ist, und ein später
+        eingebautes Einzelteil verkürzt das nicht.
+        """
+        period = self.open_period()
+        if period is None:
+            return False
+
+        mounted = [
+            c
+            for slot in self.slots.all()
+            for c in slot.components.all()
+            if c.is_mounted
+        ]
+        dates = [c.installed_at for c in mounted if c.installed_at]
+        kms = [
+            c.distance_at_install for c in mounted if c.distance_at_install is not None
+        ]
+        if not dates:
+            return False
+
+        earliest_at = min(dates)
+        earliest_km = min(kms) if kms else None
+
+        # Nicht vor das Ende der letzten abgeschlossenen Periode zurueckziehen.
+        # Sonst ueberlappt die offene Periode mit einer bereits erfassten, und
+        # `assembly_km_windows()` summiert denselben Zeitraum zweimal — an echten
+        # Daten gemessen: ein Laufradsatz stand danach bei 19.691 km, obwohl das
+        # Rad insgesamt erst 9.868 km hatte.
+        closed_ends = [
+            p.ended_at for p in self.periods.all() if p.pk != period.pk and p.ended_at
+        ]
+        if closed_ends:
+            floor_at = max(closed_ends)
+            if earliest_at < floor_at:
+                earliest_at = floor_at
+                floor_kms = [
+                    p.ended_distance_km
+                    for p in self.periods.all()
+                    if p.pk != period.pk
+                    and p.ended_at == floor_at
+                    and p.ended_distance_km is not None
+                ]
+                earliest_km = max(floor_kms) if floor_kms else earliest_km
+
+        fields = []
+        if earliest_at < period.started_at:
+            period.started_at = earliest_at
+            fields.append("started_at")
+        if earliest_km is not None and (
+            period.started_distance_km is None
+            or earliest_km < period.started_distance_km
+        ):
+            period.started_distance_km = earliest_km
+            fields.append("started_distance_km")
+
+        if not fields:
+            return False
+        period.save(update_fields=fields)
+        return True
+
     def clean(self):
         # Doppelt zum DB-Constraint (siehe Meta), aber mit verständlicher
         # Meldung statt IntegrityError — die API gibt sie als 400 weiter.

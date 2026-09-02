@@ -31,10 +31,12 @@ from app_maintenance.models import (
 from .ai_providers import generate_reviewed_text
 from .bike_assistant import suggest_models, suggest_setup
 from .serializers import (
+    AssemblyAddItemRequestSerializer,
     AssemblyCreateRequestSerializer,
     AssistantModelsRequestSerializer,
     AssistantSetupRequestSerializer,
     BikeAssemblySerializer,
+    BikeInstalledAtRequestSerializer,
     BikeListSerializer,
     BikeSerializer,
     ComponentCheckCreateSerializer,
@@ -264,6 +266,17 @@ class ComponentSlotDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIVie
         )
 
 
+def _sync_period_for(component: Component) -> None:
+    """
+    Zieht die Nutzungsperiode der Baugruppe zurueck, falls dieses Teil frueher
+    eingebaut wurde als die Periode laeuft (siehe
+    `BikeAssembly.sync_open_period_start`). Ohne Baugruppe gibt es nichts zu tun.
+    """
+    assembly = component.slot.assembly
+    if assembly is not None:
+        assembly.sync_open_period_start()
+
+
 def _unmount_current(slot: ComponentSlot, on: datetime.date | None = None) -> None:
     """
     Baut das aktuell montierte Teil eines Slots aus — **mit** km-Stand.
@@ -397,7 +410,8 @@ class ComponentListView(AthleteMixin, generics.ListCreateAPIView):
         with transaction.atomic():
             if serializer.validated_data.get("is_mounted", True):
                 _unmount_current(slot)
-            serializer.save(slot=slot)
+            component = serializer.save(slot=slot)
+            _sync_period_for(component)
 
 
 class ComponentDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
@@ -414,6 +428,17 @@ class ComponentDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
         return Component.objects.filter(
             slot__bike__athlete=self.get_athlete()
         ).select_related("slot__bike", "slot__template")
+
+    def perform_update(self, serializer):
+        """
+        Nach dem Zurückdatieren eines Einbaus die Nutzungsperiode nachziehen.
+
+        Ohne das zeigt das Teil 0 km: `api/usage.py` schneidet seine km gegen
+        die Perioden der Baugruppe, und die begann beim Anlegen der Baugruppe —
+        also nach dem korrigierten Einbaudatum.
+        """
+        component = serializer.save()
+        _sync_period_for(component)
 
 
 class ComponentCheckView(AthleteMixin, APIView):
@@ -1074,6 +1099,83 @@ def _validate_assembly_items(
     return None
 
 
+class BikeInstalledAtView(AthleteMixin, APIView):
+    """
+    POST /api/maintenance/bikes/{bike_id}/installed-at/
+    Body: { "installed_at": "YYYY-MM-DD", "assembly_id"?: 12 }
+
+    Setzt das Einbaudatum für **alle montierten Teile** auf einmal — wahlweise
+    fürs ganze Bike oder nur für eine Baugruppe.
+
+    Der Anlass: wer ein Bike anlegt, dessen Fahrten schon in der App sind, hat
+    beim Anlegen meist das heutige Datum stehen und korrigiert danach jedes Teil
+    einzeln. Das sind bei einem Rennrad schnell zwölf Dialoge — und solange die
+    Nutzungsperiode der Baugruppe nicht mitwandert, stehen die km trotzdem auf
+    null (siehe `BikeAssembly.sync_open_period_start`).
+
+    `distance_at_install` wird aus der Ride-Historie zum Stichtag abgeleitet
+    (`_odometer_at`), nicht vom Client übernommen — derselbe Wert, den auch der
+    Baugruppen-Assistent benutzt, damit Teile und Periode dieselbe Zahl sehen.
+    """
+
+    def post(self, request, bike_id):
+        bike = get_object_or_404(Bike, pk=bike_id, athlete=self.get_athlete())
+
+        body = BikeInstalledAtRequestSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        installed_at = body.validated_data["installed_at"]
+        assembly_id = body.validated_data.get("assembly_id")
+
+        if installed_at > datetime.date.today():
+            return Response(
+                {
+                    "error": "Das Einbaudatum darf nicht in der Zukunft liegen.",
+                    "code": "future_date",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        components = Component.objects.filter(
+            slot__bike=bike, is_mounted=True
+        ).select_related("slot__assembly")
+        if assembly_id is not None:
+            assembly = get_object_or_404(BikeAssembly, pk=assembly_id, bike=bike)
+            components = components.filter(slot__assembly=assembly)
+
+        odometer = _odometer_at(bike, installed_at)
+        assemblies: dict[int, BikeAssembly] = {}
+
+        with transaction.atomic():
+            updated = 0
+            for component in components:
+                component.installed_at = installed_at
+                component.distance_at_install = odometer
+                component.save(
+                    update_fields=["installed_at", "distance_at_install", "updated_at"]
+                )
+                updated += 1
+                asm = component.slot.assembly
+                if asm is not None:
+                    assemblies[asm.id] = asm
+
+            # Die Perioden erst nachziehen, wenn alle Teile stehen — sonst
+            # richtet sich der Beginn nach einem Zwischenstand.
+            for asm in assemblies.values():
+                if asm.installed_at is None or asm.installed_at > installed_at:
+                    asm.installed_at = installed_at
+                    asm.save(update_fields=["installed_at", "updated_at"])
+                asm.sync_open_period_start()
+
+        return Response(
+            {
+                "installed_at": installed_at,
+                "distance_at_install": odometer,
+                "components_updated": updated,
+                "assemblies_updated": len(assemblies),
+            }
+        )
+
+
 class ComponentGroupListView(AthleteMixin, generics.ListAPIView):
     """
     GET /api/maintenance/groups/?bike_type=gravel
@@ -1362,6 +1464,112 @@ def _retire_assembly(
     assembly.status = AssemblyStatus.RETIRED
     assembly.retired_at = on
     assembly.save(update_fields=["status", "retired_at", "updated_at"])
+
+
+class AssemblyAddItemView(AthleteMixin, APIView):
+    """
+    POST /api/maintenance/assemblies/{pk}/items/
+    Body: { "template_id": 19, "brand"?, "model_name"?, "installed_at"?,
+            "custom_warn_km"?, "interval_km"?, "interval_days"? }
+
+    Ergaenzt eine bestehende Baugruppe um ein einzelnes Element — das Gegenstueck
+    zum Assistenten, der nur beim Anlegen greift. Vorher liess sich eine
+    vergessene Kassette nur nachtragen, indem man die ganze Baugruppe neu anlegte.
+
+    Ob ein `ComponentSlot` (+ `Component`) oder ein `MaintenanceInterval`
+    entsteht, entscheidet `template.maintenance_kind` — dieselbe Regel wie beim
+    Anlegen, damit Verbrauchsmaterial nicht als Verschleissteil landet. Das
+    Template muss zur Gruppe gehoeren; geprueft wird serverseitig, nicht im
+    Client.
+    """
+
+    def post(self, request, pk):
+        assembly = get_object_or_404(
+            BikeAssembly.objects.select_related("group", "bike"),
+            pk=pk,
+            bike__athlete=self.get_athlete(),
+        )
+        bike = assembly.bike
+
+        body = AssemblyAddItemRequestSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        template = ComponentTemplate.objects.filter(
+            pk=data["template_id"], group=assembly.group
+        ).first()
+        if template is None:
+            return Response(
+                {
+                    "error": "Dieses Element gehört nicht zu "
+                    f"'{assembly.group.name}'.",
+                    "code": "template_not_in_group",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        installed_at = data.get("installed_at") or datetime.date.today()
+        odometer = _odometer_at(bike, installed_at)
+
+        if template.maintenance_kind == MaintenanceKind.CONSUMABLE:
+            if MaintenanceInterval.objects.filter(
+                assembly=assembly, template=template
+            ).exists():
+                return Response(
+                    {
+                        "error": f"'{template.name}' ist in dieser Baugruppe schon angelegt.",
+                        "code": "already_present",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            interval = MaintenanceInterval.objects.create(
+                bike=bike,
+                assembly=assembly,
+                template=template,
+                kind=_interval_kind_for_template(template),
+                label=template.name,
+                interval_km=data.get("interval_km") or template.warn_km,
+                interval_days=data.get("interval_days") or template.warn_days,
+                last_done_at=installed_at,
+                last_done_distance_km=odometer,
+            )
+            return Response(
+                MaintenanceIntervalSerializer(
+                    interval, context={"bike_total_km": bike.total_distance_km}
+                ).data,
+                status=status.HTTP_201_CREATED,
+            )
+
+        if ComponentSlot.objects.filter(assembly=assembly, template=template).exists():
+            return Response(
+                {
+                    "error": f"'{template.name}' ist in dieser Baugruppe schon angelegt.",
+                    "code": "already_present",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            slot = ComponentSlot.objects.create(
+                bike=bike, assembly=assembly, template=template
+            )
+            component = Component(
+                slot=slot,
+                brand=data.get("brand", ""),
+                model_name=data.get("model_name", ""),
+                installed_at=installed_at,
+                distance_at_install=odometer,
+                custom_warn_km=data.get("custom_warn_km"),
+                is_mounted=True,
+            )
+            component.save()
+            # Ein nachtraeglich ergaenztes Teil kann aelter sein als die laufende
+            # Periode — dann muss die mitwandern, sonst zeigt es 0 km.
+            assembly.sync_open_period_start()
+
+        return Response(
+            ComponentSerializer(component).data, status=status.HTTP_201_CREATED
+        )
 
 
 class AssemblyActivateView(AthleteMixin, APIView):

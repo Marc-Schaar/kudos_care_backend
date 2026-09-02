@@ -893,6 +893,31 @@ class AssemblyCreateRequestSerializer(serializers.Serializer):
     activate = serializers.BooleanField(required=False, allow_null=True, default=None)
 
 
+class AssemblyAddItemRequestSerializer(serializers.Serializer):
+    """Body fuer POST /maintenance/assemblies/{id}/items/."""
+
+    template_id = serializers.IntegerField()
+    brand = serializers.CharField(
+        max_length=100, required=False, allow_blank=True, default=""
+    )
+    model_name = serializers.CharField(
+        max_length=100, required=False, allow_blank=True, default=""
+    )
+    installed_at = serializers.DateField(required=False, allow_null=True)
+    custom_warn_km = serializers.FloatField(required=False, allow_null=True)
+    #: Nur fuer Verbrauchsmaterial; ohne Angabe gelten die Katalog-Werte.
+    interval_km = serializers.FloatField(required=False, allow_null=True)
+    interval_days = serializers.IntegerField(required=False, allow_null=True)
+
+
+class BikeInstalledAtRequestSerializer(serializers.Serializer):
+    """Body fuer POST /maintenance/bikes/{id}/installed-at/."""
+
+    installed_at = serializers.DateField()
+    #: Ohne assembly_id gilt das Datum fuer alle montierten Teile des Bikes.
+    assembly_id = serializers.IntegerField(required=False, allow_null=True)
+
+
 class AssistantModelsRequestSerializer(serializers.Serializer):
     """Body fuer POST /maintenance/assistant/models/ (Kudo, Schritt 1)."""
 

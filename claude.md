@@ -394,7 +394,25 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `ungrouped_conflict` ab statt in einen IntegrityError zu laufen.
   `POST intervals/<id>/log/` = "Erledigt".
   `POST bikes/<id>/slots/` (freies Einzel-Slot-Anlegen) entfällt für den Client — Slots
-  entstehen nur über den Baugruppen-Create; `GET` bleibt.
+  entstehen über den Baugruppen-Create oder `POST assemblies/<id>/items/`; `GET` bleibt.
+  **`POST assemblies/<id>/items/`** trägt ein einzelnes Element in eine bestehende
+  Baugruppe nach (der Assistent greift nur beim Anlegen; vorher musste man die ganze
+  Baugruppe neu bauen). `template.maintenance_kind` entscheidet, ob ein `ComponentSlot`
+  oder ein `MaintenanceInterval` entsteht; Template muss zur Gruppe gehören.
+  **`POST bikes/<id>/installed-at/`** setzt das Einbaudatum für **alle** montierten Teile
+  auf einmal, optional auf eine Baugruppe begrenzt. `distance_at_install` kommt aus
+  `_odometer_at()`, nicht vom Client — sonst sehen Teile und Nutzungsperiode
+  verschiedene Zahlen.
+  **`BikeAssembly.sync_open_period_start()`** zieht den Beginn der laufenden Periode auf
+  den frühesten Einbaupunkt der montierten Teile zurück und wird nach jedem Anlegen/
+  Ändern einer Komponente aufgerufen. Ohne das zeigte der naheliegende Ablauf
+  „Baugruppe heute anlegen, danach die Teile aufs echte Datum korrigieren" **0 km**:
+  `api/usage.py` schneidet die km gegen die Perioden, und die begann nach dem Einbau
+  (an Produktivdaten gesehen: Teile seit 30.03. bei 5 km, Periode ab 02.09. bei
+  1.208 km). Der Beginn wird nur zurückgezogen, nie nach vorne geschoben, und **nie vor
+  das Ende der letzten abgeschlossenen Periode** — sonst überlappen beide und
+  `assembly_km_windows()` summiert denselben Zeitraum zweimal (gemessen: 19.691 km an
+  einem Rad mit 9.868 km).
   **Einzeltausch im Slot** (`slots/<id>/mount|unmount`, neues Teil über
   `slots/<id>/components/`) läuft über die Helfer `_unmount_current()` und `_remount()`.
   Beide gehören zusammen und beheben zwei Fehler, die den Wechsel zwischen zwei Teilen
@@ -627,6 +645,13 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   seiner Zahl stehen, ein neu montiertes startet bei 0, und beim Hin-und-Herwechseln
   zählt jeder Belag nur seine eigenen km (130/50 statt 180/80); mehrfaches Wechseln
   addiert sich, statt sich zu überschreiben.
+- `app_maintenance/test_installed_at.py`: `BackdatedInstallTests` (rückdatiertes
+  Einbaudatum zieht die Nutzungsperiode mit; ein später eingebautes Teil verkürzt sie
+  nicht), `BulkInstalledAtTests` (`installed-at/` setzt alle Teile und Perioden, lässt
+  sich auf eine Baugruppe begrenzen, lehnt Zukunftsdaten ab), `AssemblyAddItemTests`
+  (Nachtragen von Teil bzw. Verbrauchsmaterial, Duplikat und gruppenfremdes Template
+  werden abgelehnt), `PeriodOverlapTests` (der Beginn stoppt am Ende der vorherigen
+  Periode — sonst steht die Baugruppe über der Gesamtleistung des Rads).
 - `app_maintenance/test_query_counts.py`: `QueryScalingTests` — Regressionstests gegen
   N+1. Bewusst **keine** festen Query-Zahlen (die wären bei jeder Serializer-Änderung rot),
   sondern die Invariante: dieselbe Route mit 3 und mit 15 Slots muss gleich viele Queries
