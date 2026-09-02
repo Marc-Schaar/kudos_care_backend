@@ -46,12 +46,28 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
 
 - **`app_auth`** — Strava-OAuth-Login. Model `StravaProfile` (1:1 zu Django `User`,
   speichert Access/Refresh-Token + Sync-Status). Endpoints: `POST /api/strava/auth/`,
-  `GET|PATCH /api/strava/me/`, `POST /api/strava/logout/`. `GET me/` liefert neben der
+  `GET|PATCH|DELETE /api/strava/me/`, `POST /api/strava/logout/`. `GET me/` liefert neben der
   `athlete_id` auch `email`, `email_notifications_enabled` und `needs_email`; `PATCH me/`
   (`UserSettingsSerializer`) schreibt beides — `email` an den Django-`User`, das Flag ans
   `StravaProfile`. Wird zum ersten Mal eine Adresse gesetzt und `welcome_email_sent_at`
   ist noch leer, wird die bei der Erstanmeldung ins Leere gelaufene Willkommens-Mail
-  nachgeholt. `api/utils.py` hat
+  nachgeholt.
+  `DELETE me/?confirm=true` löscht das Konto samt aller Daten (Art. 17 DSGVO): es reicht,
+  den `User` zu löschen — `StravaProfile` hängt per OneToOne-CASCADE daran, `Bike`/`Ride`
+  per FK-CASCADE am Profil, alles Weitere daran. Die Bestätigung im Query-String ist
+  Pflicht, weil ein versehentliches DELETE jahrelange Fahrthistorie entfernt.
+  **Die E-Mail-Adresse wird bewusst nicht gehasht** — sie existiert ausschließlich zum
+  Versenden (`app_notifications/services.py::send_templated_email`), an einen Hash lässt
+  sich nichts schicken, und für Adressen wäre er ohnehin in Minuten rückrechenbar.
+  Stattdessen ist sie dort entfernt, wo sie ohne Zweck sichtbar wäre: **nicht im Admin**
+  (`UserWithoutEmailAdmin` ersetzt Djangos `UserAdmin`; `StravaProfileAdmin` sucht nicht
+  über `user__email` — eine Suche verriete die Adresse auch ohne Anzeige, weil ein
+  Treffer sie bestätigt) und **nicht in Logs** (bei Versandfehlern steht die
+  Athleten-Id; Logdateien leben länger und werden breiter gelesen als die Datenbank).
+  Offen aus derselben Durchsicht: kein Datenexport (Art. 20), und die GPS-Tracks in
+  `Ride.track`/`RideStream.latlngs` sind ein deutlich sensiblerer Datensatz als jede
+  Adresse.
+  `api/utils.py` hat
   `get_valid_access_token()`/`strava_get()` als geteilten Strava-HTTP-Helper mit
   Token-Refresh + 401-Retry — von anderen Apps wiederverwendet.
 - **`app_dashboard`** — Ride-Ingestion, Geodaten, Wetter/Wind. Models `Ride` (PostGIS-Track,
@@ -724,6 +740,11 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   Nachholen der Willkommens-Mail beim ersten Setzen einer Adresse — und nur dann),
   `StravaAuthCallbackWelcomeEmailTests` (Willkommens-Mail-Trigger nur bei
   Erstanlage eines Profils, nicht bei Re-Login) — sonst keine weiteren Tests für `app_auth`.
+  `app_auth/test_privacy.py`: `AdminHidesEmailTests` (Adresse weder in `list_display`
+  noch in den Fieldsets noch in `search_fields`), `EmailStaysOutOfLogsTests` (ein
+  fehlgeschlagener Versand loggt die Athleten-Id statt der Adresse),
+  `AccountDeletionTests` (Bestätigung ist Pflicht, Löschen entfernt User, Profil, Bikes,
+  Rides und Komponenten, Session ist danach weg, fremde Athleten bleiben unberührt).
   Keine Tests für `app_strava_webhook`.
 
 ---
