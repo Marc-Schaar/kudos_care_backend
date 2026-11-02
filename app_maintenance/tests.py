@@ -1,11 +1,14 @@
 from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
+from app_dashboard.models import Ride
 from app_maintenance.api.serializers import compute_wear
+from app_maintenance.api.services import WeatherWearService
 from app_maintenance.models import (
     Bike,
     BikeType,
@@ -13,6 +16,7 @@ from app_maintenance.models import (
     ComponentCategory,
     ComponentSlot,
     ComponentTemplate,
+    WeatherSensitivityCoefficient,
 )
 
 
@@ -52,7 +56,6 @@ class ComponentCheckTests(APITestCase):
             category=ComponentCategory.BRAKES,
             warn_days=warn_days,
             supports_condition_estimate=supports_condition_estimate,
-            is_system=False,
         )
         slot = ComponentSlot.objects.create(bike=self.bike, template=template)
         component = Component.objects.create(
@@ -60,7 +63,6 @@ class ComponentCheckTests(APITestCase):
             brand="Shimano",
             installed_at=date.today() - timedelta(days=100),
             custom_warn_days=custom_warn_days,
-            is_mounted=True,
         )
         return template, slot, component
 
@@ -72,8 +74,7 @@ class ComponentCheckTests(APITestCase):
             {
                 "brand": "Shimano",
                 "model_name": "XT",
-                "installed_at": date.today().isoformat(),
-                "is_mounted": False,
+                "mount": False,
                 "custom_warn_days": 30,
             },
         )
@@ -149,11 +150,21 @@ class ComponentCheckTests(APITestCase):
         """Regression: 'Freigeben' muss auch die Wetter-Achse zuruecksetzen, sonst
         bleibt die Komponente trotz Freigabe als ueberfaellig markiert, weil
         warn_status_weather_km sonst immer den vollen Verlauf seit Einbau nutzt."""
-        _, _, component = self._make_slot_with_component(warn_days=3650)
-        component.installed_at = date.today() - timedelta(days=5)
+        _, slot, component = self._make_slot_with_component(warn_days=3650)
         component.custom_warn_km = 100
-        component.weather_wear_km = 150
         component.save()
+        Ride.objects.create(
+            strava_id=8810,
+            name="Lange Fahrt",
+            distance=150_000,
+            start_date=timezone.now() - timedelta(days=2),
+            athlete=self.profile,
+            bike=self.bike,
+        )
+        WeatherSensitivityCoefficient.objects.get_or_create(
+            category=ComponentCategory.BRAKES
+        )
+        WeatherWearService.recompute_component(component)
 
         pre_check = self.client.get(f"/api/maintenance/components/{component.id}/")
         self.assertEqual(pre_check.data["warn_status_overall"], "critical")
@@ -189,30 +200,28 @@ class ComputeWearAsOfProjectionTests(APITestCase):
             name="Kette",
             category=ComponentCategory.DRIVETRAIN,
             warn_days=10,
-            is_system=False,
         )
         self.slot = ComponentSlot.objects.create(bike=self.bike, template=self.template)
         self.component = Component.objects.create(
             slot=self.slot,
             brand="KMC",
             installed_at=date.today() - timedelta(days=5),
-            is_mounted=True,
         )
 
     def test_as_of_projects_days_axis_into_the_future(self):
         # Heute: 5 von 10 Tagen -> ok.
-        today_wear = compute_wear(self.component, None)
+        today_wear = compute_wear(self.component)
         self.assertEqual(today_wear["warn_status_overall"], "ok")
 
         # In 10 Tagen: 15 von 10 Tagen -> critical, obwohl heute noch alles ok ist.
         future = date.today() + timedelta(days=10)
-        projected_wear = compute_wear(self.component, None, as_of=future)
+        projected_wear = compute_wear(self.component, as_of=future)
         self.assertEqual(projected_wear["wear_days"], 15)
         self.assertEqual(projected_wear["warn_status_days"], "critical")
         self.assertEqual(projected_wear["warn_status_overall"], "critical")
 
     def test_as_of_defaults_to_today(self):
         self.assertEqual(
-            compute_wear(self.component, None),
-            compute_wear(self.component, None, as_of=date.today()),
+            compute_wear(self.component),
+            compute_wear(self.component, as_of=date.today()),
         )

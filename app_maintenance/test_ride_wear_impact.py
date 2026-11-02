@@ -19,6 +19,7 @@ from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
 from app_dashboard.models import Ride
+from app_maintenance.api import lifecycle
 from app_maintenance.api.services import (
     WeatherWearCalculator,
     ride_wear_breakdown,
@@ -30,6 +31,7 @@ from app_maintenance.models import (
     Component,
     ComponentCategory,
     ComponentSlot,
+    ComponentStatus,
     ComponentTemplate,
     WeatherSensitivityCoefficient,
 )
@@ -80,8 +82,6 @@ class RideWearBreakdownTests(APITestCase):
         self.component = Component.objects.create(
             slot=self.slot,
             installed_at=date.today() - timedelta(days=200),
-            distance_at_install=0,
-            is_mounted=True,
         )
 
     def _ride(self, weather, distance_m=20_000, days_ago=5, strava_id=1):
@@ -123,17 +123,14 @@ class RideWearBreakdownTests(APITestCase):
 
     def test_component_installed_after_the_ride_is_excluded(self):
         ride = self._ride(RAINY, days_ago=5, strava_id=5)
-        self.component.installed_at = date.today() - timedelta(days=1)
-        self.component.save()
+        lifecycle.set_installed_on(self.component, date.today() - timedelta(days=1))
 
         breakdown = ride_wear_breakdown(ride)
         self.assertEqual(breakdown["component_count"], 0)
 
     def test_component_retired_before_the_ride_is_excluded(self):
         ride = self._ride(RAINY, days_ago=5, strava_id=6)
-        self.component.is_mounted = False
-        self.component.retired_at = date.today() - timedelta(days=30)
-        self.component.save()
+        lifecycle.retire_component(self.component, on=date.today() - timedelta(days=30))
 
         breakdown = ride_wear_breakdown(ride)
         self.assertEqual(breakdown["component_count"], 0)
@@ -144,16 +141,17 @@ class RideWearBreakdownTests(APITestCase):
         Verschleiss abbekommen — auch wenn es heute nicht mehr am Rad ist.
         """
         ride = self._ride(RAINY, days_ago=20, strava_id=7)
-        self.component.is_mounted = False
-        self.component.retired_at = date.today() - timedelta(days=2)
-        self.component.save()
+        lifecycle.retire_component(self.component, on=date.today() - timedelta(days=2))
 
         breakdown = ride_wear_breakdown(ride)
         self.assertEqual(breakdown["component_count"], 1)
 
     def test_never_mounted_spare_is_excluded(self):
         """Ersatzteil im Regal: nie montiert, nie ausgebaut — darf nicht mitzaehlen."""
-        Component.objects.filter(pk=self.component.pk).update(is_mounted=False)
+        self.component.periods.all().delete()
+        Component.objects.filter(pk=self.component.pk).update(
+            status=ComponentStatus.SPARE
+        )
         ride = self._ride(RAINY, strava_id=8)
 
         breakdown = ride_wear_breakdown(ride)
@@ -267,8 +265,7 @@ class ActivityWearImpactViewTests(RideWearBreakdownTests):
 
         # Nutzer korrigiert nachtraeglich das Einbaudatum -> Aufschluesselung kann
         # sich geaendert haben, der Text muss neu erzaehlt werden.
-        self.component.installed_at = date.today() - timedelta(days=300)
-        self.component.save()
+        lifecycle.set_installed_on(self.component, date.today() - timedelta(days=300))
 
         mock_post.return_value = self._gemini_response("Zweite Fassung.")
         response = self.client.get(f"/api/activities/{ride.id}/wear-impact/")

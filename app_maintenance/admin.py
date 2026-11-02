@@ -8,6 +8,7 @@ from .models import (
     ComponentGroup,
     ComponentSlot,
     ComponentTemplate,
+    ComponentUsagePeriod,
     MaintenanceInterval,
     MaintenanceLog,
     WeatherSensitivityCoefficient,
@@ -51,7 +52,7 @@ class BikeAssemblyAdmin(admin.ModelAdmin):
 class MaintenanceLogInline(admin.TabularInline):
     model = MaintenanceLog
     extra = 0
-    fields = ["done_at", "done_distance_km", "note"]
+    fields = ["done_at", "note"]
     ordering = ["-done_at", "-id"]
 
 
@@ -117,9 +118,9 @@ class ComponentInline(admin.TabularInline):
     fields = [
         "brand",
         "model_name",
-        "is_mounted",
+        "status",
         "installed_at",
-        "distance_at_install",
+        "prior_km",
     ]
     show_change_link = True
 
@@ -136,13 +137,18 @@ class ComponentSlotAdmin(admin.ModelAdmin):
         return obj.display_name
 
 
+class ComponentUsagePeriodInline(admin.TabularInline):
+    model = ComponentUsagePeriod
+    extra = 0
+    fields = ["started_at", "ended_at"]
+
+
 class ComponentCheckInline(admin.TabularInline):
     model = ComponentCheck
     extra = 0
     fields = [
         "checked_at",
         "condition_pct",
-        "checked_at_distance_km",
         "snooze_km",
         "snooze_days",
         "note",
@@ -155,14 +161,14 @@ class ComponentAdmin(admin.ModelAdmin):
     list_display = [
         "__str__",
         "installed_at",
-        "is_mounted",
-        "distance_at_install",
+        "status",
+        "prior_km",
         "weather_wear_km",
     ]
-    list_filter = ["is_mounted", "slot__bike__bike_type", "slot__template__category"]
+    list_filter = ["status", "slot__bike__bike_type", "slot__template__category"]
     search_fields = ["brand", "model_name", "slot__bike__name", "slot__template__name"]
     raw_id_fields = ["slot"]
-    inlines = [ComponentCheckInline]
+    inlines = [ComponentUsagePeriodInline, ComponentCheckInline]
 
     fieldsets = [
         (
@@ -172,10 +178,10 @@ class ComponentAdmin(admin.ModelAdmin):
                     "slot",
                     "brand",
                     "model_name",
-                    "is_mounted",
+                    "status",
                     "installed_at",
                     "retired_at",
-                    "distance_at_install",
+                    "prior_km",
                     "notes",
                 ]
             },
@@ -225,7 +231,6 @@ class ComponentCheckAdmin(admin.ModelAdmin):
         "component",
         "checked_at",
         "condition_pct",
-        "checked_at_distance_km",
         "snooze_km",
         "snooze_days",
     ]

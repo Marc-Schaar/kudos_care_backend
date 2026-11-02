@@ -16,9 +16,9 @@ from app_maintenance.api.services import (
     WeatherWearService,
 )
 from app_maintenance.api.tasks import recompute_weather_wear_for_bike
+from app_maintenance.api.usage import start_of_day
 from app_maintenance.models import (
     AssemblyStatus,
-    AssemblyUsagePeriod,
     Bike,
     BikeAssembly,
     BikeType,
@@ -26,9 +26,12 @@ from app_maintenance.models import (
     ComponentCategory,
     ComponentGroup,
     ComponentSlot,
+    ComponentStatus,
     ComponentTemplate,
+    GroupKind,
     WeatherSensitivityCoefficient,
 )
+from app_maintenance.testing import MaintenanceTestCase
 
 
 def _make_profile(user, strava_athlete_id=54321):
@@ -140,14 +143,12 @@ class WeatherWearServiceTests(APITestCase):
             name="Kette",
             category=ComponentCategory.DRIVETRAIN,
             warn_km=2000,
-            is_system=False,
         )
         self.slot = ComponentSlot.objects.create(bike=self.bike, template=self.template)
         self.component = Component.objects.create(
             slot=self.slot,
             brand="KMC",
             installed_at=date.today() - timedelta(days=30),
-            is_mounted=True,
         )
 
     def test_rides_without_weather_data_fall_back_to_raw_distance(self):
@@ -216,19 +217,14 @@ class WeatherWearServiceTests(APITestCase):
         self.assertEqual(self.component.weather_wear_ride_count, 1)
         self.assertIsNotNone(self.component.weather_wear_computed_at)
 
-    def test_recompute_component_adds_carried_over_weather_wear(self):
-        """
-        Ein reaktiviertes Teil (siehe `_build_assembly_from_request`,
-        `reuse_component_id`) friert seine bisherige Wetter-Last in
-        `carried_over_weather_wear_km` ein — recompute_component() darf sie
-        nicht überschreiben, sondern muss sie draufaddieren.
-        """
-        self.component.carried_over_weather_wear_km = 42.0
-        self.component.save(update_fields=["carried_over_weather_wear_km"])
+    def test_recompute_component_adds_prior_weather_wear(self):
+        """Die Vorgeschichte des Teils darf nicht überschrieben werden, sondern kommt drauf."""
+        self.component.prior_weather_km = 42.0
+        self.component.save(update_fields=["prior_weather_km"])
 
         Ride.objects.create(
             strava_id=1005,
-            name="Fahrt nach Reaktivierung",
+            name="Fahrt",
             distance=10000,
             start_date=timezone.now() - timedelta(days=1),
             athlete=self.profile,
@@ -237,6 +233,15 @@ class WeatherWearServiceTests(APITestCase):
         WeatherWearService.recompute_component(self.component)
         self.component.refresh_from_db()
         self.assertEqual(self.component.weather_wear_km, 52.0)
+
+    def test_recompute_without_new_numbers_keeps_the_timestamp(self):
+        """Daran hängt die Staleness der KI-Erklärung, und die kostet einen AI-Call."""
+        WeatherWearService.recompute_component(self.component)
+        first = Component.objects.get(pk=self.component.pk).weather_wear_computed_at
+        component = Component.objects.get(pk=self.component.pk)
+        WeatherWearService.recompute_component(component)
+        component.refresh_from_db()
+        self.assertEqual(component.weather_wear_computed_at, first)
 
 
 class RecomputeWeatherWearForBikeTaskTests(APITestCase):
@@ -332,14 +337,12 @@ class ComponentWeatherExplanationViewTests(APITestCase):
             name="Kette",
             category=ComponentCategory.DRIVETRAIN,
             warn_km=2000,
-            is_system=False,
         )
         self.slot = ComponentSlot.objects.create(bike=self.bike, template=self.template)
         self.component = Component.objects.create(
             slot=self.slot,
             brand="KMC",
             installed_at=date.today() - timedelta(days=30),
-            is_mounted=True,
         )
 
     def _url(self, refresh=False):
@@ -478,14 +481,12 @@ class ComponentCheckInstructionsViewTests(APITestCase):
             name="Kette",
             category=ComponentCategory.DRIVETRAIN,
             warn_days=10,
-            is_system=False,
         )
         self.slot = ComponentSlot.objects.create(bike=self.bike, template=self.template)
         self.component = Component.objects.create(
             slot=self.slot,
             brand="KMC",
             installed_at=date.today() - timedelta(days=30),
-            is_mounted=True,
         )
 
     def _url(self, refresh=False):
@@ -574,15 +575,12 @@ class BikeConditionReportViewTests(APITestCase):
             name="Kette",
             category=ComponentCategory.DRIVETRAIN,
             warn_km=2000,
-            is_system=False,
         )
         self.slot = ComponentSlot.objects.create(bike=self.bike, template=self.template)
         self.component = Component.objects.create(
             slot=self.slot,
             brand="KMC",
             installed_at=date.today() - timedelta(days=30),
-            distance_at_install=0,
-            is_mounted=True,
         )
 
     def _url(self, refresh=False):
@@ -590,7 +588,7 @@ class BikeConditionReportViewTests(APITestCase):
         return url + "?refresh=true" if refresh else url
 
     def test_no_mounted_components_returns_404(self):
-        self.component.is_mounted = False
+        self.component.status = ComponentStatus.SPARE
         self.component.save()
         response = self.client.get(self._url())
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -642,77 +640,42 @@ class BikeConditionReportViewTests(APITestCase):
         )
 
 
-class WeatherWearParkedAssemblyTests(APITestCase):
+class WeatherWearParkedAssemblyTests(MaintenanceTestCase):
     """
     Fahrten, die in eine Parkphase der Baugruppe fallen, duerfen den
-    Wetter-Verschleiss nicht erhoehen â€” der Laufradsatz lag im Keller.
+    Wetter-Verschleiss nicht erhoehen — der Laufradsatz lag im Keller.
     """
 
     def setUp(self):
-        self.user = get_user_model().objects.create_user(
-            username="parked-athlete", password="pw"
-        )
-        self.profile = _make_profile(self.user, strava_athlete_id=778899)
-        self.bike = Bike.objects.create(
-            athlete=self.profile,
-            strava_bike_id="pb1",
-            name="Winterrad",
-            bike_type=BikeType.ROAD,
-        )
+        super().setUp()
         self.group = ComponentGroup.objects.create(
-            name="Laufrad vorne", category=ComponentCategory.WHEELS
+            name="Laufrad-T", category=ComponentCategory.WHEELS, kind=GroupKind.ASSEMBLY
         )
         self.template = ComponentTemplate.objects.create(
-            name="Reifen vorne",
+            name="Reifen-T",
             category=ComponentCategory.WHEELS,
             warn_km=5000,
-            is_system=False,
             group=self.group,
         )
         self.assembly = BikeAssembly.objects.create(
-            bike=self.bike,
-            group=self.group,
-            installed_at=date.today() - timedelta(days=90),
+            bike=self.bike, group=self.group, installed_at=self.days_ago(90)
         )
         self.slot = ComponentSlot.objects.create(
             bike=self.bike, assembly=self.assembly, template=self.template
         )
         self.component = Component.objects.create(
-            slot=self.slot,
-            installed_at=date.today() - timedelta(days=90),
-            distance_at_install=0.0,
-            is_mounted=True,
-        )
-
-    def _ride(self, strava_id, km, days_ago):
-        return Ride.objects.create(
-            strava_id=strava_id,
-            name=f"Fahrt {strava_id}",
-            distance=km * 1000,
-            start_date=timezone.now() - timedelta(days=days_ago),
-            athlete=self.profile,
-            bike=self.bike,
-            weather_data=None,
+            slot=self.slot, installed_at=self.days_ago(90)
         )
 
     def test_rides_during_the_parked_gap_are_excluded(self):
-        # Aufgezogen Tag -90 bis -60, dann geparkt, seit Tag -10 wieder drauf.
-        AssemblyUsagePeriod.objects.create(
-            assembly=self.assembly,
-            started_at=date.today() - timedelta(days=90),
-            started_distance_km=0.0,
-            ended_at=date.today() - timedelta(days=60),
-            ended_distance_km=40.0,
-        )
-        AssemblyUsagePeriod.objects.create(
-            assembly=self.assembly,
-            started_at=date.today() - timedelta(days=10),
-            started_distance_km=90.0,
-        )
+        # Aufgezogen Tag -90 bis -60, dann im Keller, seit Tag -10 wieder drauf.
+        period = self.component.periods.get()
+        period.close(start_of_day(self.days_ago(60)))
+        self.component.periods.create(started_at=start_of_day(self.days_ago(10)))
 
-        self._ride(2001, 40, days_ago=70)  # innerhalb der ersten Periode
-        self._ride(2002, 50, days_ago=30)  # waehrend der Parkphase
-        self._ride(2003, 25, days_ago=5)  # innerhalb der zweiten Periode
+        self.ride(40, days_ago=70)  # innerhalb der ersten Periode
+        self.ride(50, days_ago=30)  # waehrend der Parkphase
+        self.ride(25, days_ago=5)  # innerhalb der zweiten Periode
 
         weather_wear_km, ride_count = WeatherWearService.calculate_weather_wear_km(
             self.component
@@ -720,10 +683,9 @@ class WeatherWearParkedAssemblyTests(APITestCase):
         self.assertEqual(ride_count, 2, "Die Fahrt aus der Parkphase zaehlt nicht mit.")
         self.assertEqual(weather_wear_km, 65.0)
 
-    def test_without_periods_all_rides_since_install_still_count(self):
-        """Altbestand ohne Nutzungszeitraeume rechnet unveraendert weiter."""
-        self._ride(2101, 40, days_ago=70)
-        self._ride(2102, 50, days_ago=30)
+    def test_all_rides_since_install_count_without_a_gap(self):
+        self.ride(40, days_ago=70)
+        self.ride(50, days_ago=30)
 
         weather_wear_km, ride_count = WeatherWearService.calculate_weather_wear_km(
             self.component
@@ -731,18 +693,13 @@ class WeatherWearParkedAssemblyTests(APITestCase):
         self.assertEqual(ride_count, 2)
         self.assertEqual(weather_wear_km, 90.0)
 
-    def test_recompute_bike_skips_parked_assemblies(self):
-        AssemblyUsagePeriod.objects.create(
-            assembly=self.assembly,
-            started_at=date.today() - timedelta(days=90),
-            started_distance_km=0.0,
-            ended_at=date.today() - timedelta(days=60),
-            ended_distance_km=40.0,
-        )
+    def test_parked_assembly_collects_nothing_new(self):
+        self.ride(40, days_ago=70)
         self.assembly.status = AssemblyStatus.PARKED
         self.assembly.save()
+        self.component.sync_usage_period()
 
-        self.assertEqual(WeatherWearService.recompute_bike(self.bike), 0)
-        self.assertEqual(
-            WeatherWearService.recompute_bike(self.bike, include_parked=True), 1
-        )
+        self.ride(50)
+        WeatherWearService.recompute_bike(self.bike)
+        self.component.refresh_from_db()
+        self.assertEqual(self.component.weather_wear_km, 40.0)

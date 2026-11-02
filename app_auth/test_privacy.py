@@ -107,7 +107,7 @@ class AccountDeletionTests(APITestCase):
             name="Kette-Del", category=ComponentCategory.DRIVETRAIN, warn_km=3000
         )
         slot = ComponentSlot.objects.create(bike=self.bike, template=template)
-        Component.objects.create(slot=slot, brand="X", is_mounted=True)
+        Component.objects.create(slot=slot, brand="X")
 
     def test_deletion_requires_explicit_confirmation(self):
         res = self.client.delete("/api/strava/me/")

@@ -153,14 +153,12 @@ class ComponentWarningDigestTestsBase(APITestCase):
             name=name,
             category=ComponentCategory.DRIVETRAIN,
             warn_days=warn_days,
-            is_system=False,
         )
         slot = ComponentSlot.objects.create(bike=bike, template=template)
         component = Component.objects.create(
             slot=slot,
             brand="Test",
             installed_at=date.today() - timedelta(days=installed_days_ago),
-            is_mounted=True,
         )
         return slot, component
 

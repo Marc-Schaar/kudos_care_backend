@@ -46,9 +46,15 @@ class StravaSyncService:
             data = resp.json()
 
             for bike_info in data.get("bikes", []):
+                # Der Name wird nur beim ersten Mal übernommen: sonst setzt jeder Sync
+                # zurück, was der Nutzer in der App umbenannt hat.
                 Bike.objects.update_or_create(
                     strava_bike_id=bike_info["id"],
-                    defaults={"name": bike_info.get("name"), "athlete": profile},
+                    defaults={"athlete": profile},
+                    create_defaults={
+                        "athlete": profile,
+                        "name": bike_info.get("name") or "Unbenanntes Rad",
+                    },
                 )
             logger.info(
                 f"Bikes für {profile.strava_athlete_id} erfolgreich synchronisiert."
@@ -232,8 +238,10 @@ class StravaImportService:
             }
             ride.save()
 
-            if ride.bike_id:
-                recompute_weather_wear_for_bike.delay(ride.bike_id)
+        # Auch ohne Wetterdaten (Rolle, kein GPS): die Fahrt zählt für die Teile, und
+        # auch für welche, die inzwischen im Regal liegen.
+        if ride.bike_id:
+            recompute_weather_wear_for_bike.delay(ride.bike_id)
 
         if stream_data:
             RideStream.objects.update_or_create(

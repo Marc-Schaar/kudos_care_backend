@@ -2,10 +2,10 @@ import datetime
 import logging
 
 from django.db import transaction
+from django.db.models import Prefetch, ProtectedError
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, status
-from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -13,36 +13,40 @@ from rest_framework.views import APIView
 from app_auth.models import StravaProfile
 from app_maintenance.models import (
     AssemblyStatus,
-    AssemblyUsagePeriod,
     Bike,
     BikeAssembly,
     Component,
     ComponentCheck,
     ComponentGroup,
     ComponentSlot,
+    ComponentStatus,
     ComponentTemplate,
     GroupKind,
     MaintenanceInterval,
     MaintenanceIntervalKind,
     MaintenanceKind,
-    MaintenanceLog,
 )
 
+from . import lifecycle
 from .ai_providers import generate_reviewed_text
 from .bike_assistant import suggest_models, suggest_setup
 from .serializers import (
+    AssemblyActionSerializer,
     AssemblyAddItemRequestSerializer,
     AssemblyCreateRequestSerializer,
+    AssemblyLinksSerializer,
     AssistantModelsRequestSerializer,
     AssistantSetupRequestSerializer,
     BikeAssemblySerializer,
     BikeInstalledAtRequestSerializer,
     BikeListSerializer,
     BikeSerializer,
+    ComponentActionSerializer,
     ComponentCheckCreateSerializer,
+    ComponentCreateSerializer,
     ComponentGroupSerializer,
+    ComponentMoveSerializer,
     ComponentSerializer,
-    ComponentSlotListSerializer,
     ComponentSlotSerializer,
     ComponentTemplateSerializer,
     MaintenanceIntervalCreateSerializer,
@@ -52,12 +56,13 @@ from .serializers import (
     compute_wear,
 )
 from .services import (
+    WeatherWearService,
     bike_condition_report_is_stale,
     build_bike_condition_report_prompt,
     build_check_instructions_prompt,
     build_weather_explanation_prompt,
 )
-from .usage import component_active_km
+from .usage import RideLedger, moment_for, ride_clock_now
 
 logger = logging.getLogger("my_app_debug")
 
@@ -76,6 +81,19 @@ class AthleteMixin:
         return get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
 
 
+#: Was die Bike-Serializer lesen. `rides` gehört bewusst NICHT dazu: die
+#: Gesamtdistanz kommt über `with_total_distance()` als Annotation, und die km der
+#: Teile aus dem `RideLedger` — ein Prefetch würde jede Fahrt samt LineString-Geometrie
+#: und weather_data-JSON laden, ohne dass ein Serializer sie anfasst.
+BIKE_PREFETCH = (
+    "slots__template__group",
+    "slots__assembly",
+    "slots__components__checks",
+    "slots__components__periods",
+    "intervals__assembly__periods",
+)
+
+
 class BikeListView(AthleteMixin, generics.ListCreateAPIView):
     """
     GET  /api/maintenance/bikes/   → alle Bikes des Users
@@ -83,19 +101,10 @@ class BikeListView(AthleteMixin, generics.ListCreateAPIView):
     """
 
     def get_queryset(self):
-        # `rides` wird bewusst NICHT geprefetcht: die Gesamtdistanz kommt über
-        # `with_total_distance()` als Annotation: ein Prefetch würde jede Fahrt
-        # samt LineString-Geometrie und weather_data-JSON laden, ohne dass ein
-        # Serializer sie anfasst.
         return (
             Bike.objects.filter(athlete=self.get_athlete())
             .with_total_distance()
-            .prefetch_related(
-                "slots__template__group",
-                "slots__components__checks",
-                "slots__assembly__periods",
-                "intervals",
-            )
+            .prefetch_related(*BIKE_PREFETCH)
         )
 
     def get_serializer_class(self):
@@ -121,58 +130,26 @@ class BikeDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
     http_method_names = ["get", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
-        # Siehe BikeListView: Gesamtdistanz als Annotation statt Ride-Prefetch.
         return (
             Bike.objects.filter(athlete=self.get_athlete())
             .with_total_distance()
-            .prefetch_related(
-                "slots__template__group",
-                "slots__components__checks",
-                "slots__assembly__periods",
-                "intervals__logs",
-            )
+            .prefetch_related(*BIKE_PREFETCH, "intervals__logs")
         )
-
-
-class BikeDistanceAtDateView(AthleteMixin, APIView):
-    """
-    GET /api/maintenance/bikes/{bike_id}/distance-at/?date=YYYY-MM-DD
-
-    Liefert den km-Stand des Bikes zum angegebenen Datum (Summe der
-    Ride-Distanzen bis inkl. diesem Tag; Fahrten mit einem anderen Bike
-    zählen nicht mit). Basis für die automatische Vorbefüllung von
-    Component.distance_at_install anhand des Einbaudatums.
-    """
-
-    def get(self, request, bike_id):
-        bike = get_object_or_404(Bike, pk=bike_id, athlete=self.get_athlete())
-        date_param = request.query_params.get("date")
-        if not date_param:
-            return Response(
-                {"error": "date fehlt (Format: YYYY-MM-DD)."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            as_of = datetime.date.fromisoformat(date_param)
-        except ValueError:
-            return Response(
-                {"error": "date muss im Format YYYY-MM-DD sein."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        return Response({"distance_km": bike.distance_km_up_to(as_of)})
 
 
 class ComponentTemplateListView(AthleteMixin, generics.ListCreateAPIView):
     """
     GET  /api/maintenance/templates/?bike_type=mtb&category=brakes
     POST /api/maintenance/templates/   → eigene Vorlage anlegen
+
+    Eigene Vorlagen gehören ihrem Anleger: vorher standen sie ohne Besitzer in einem
+    gemeinsamen Topf und waren für alle sichtbar und änderbar.
     """
 
     serializer_class = ComponentTemplateSerializer
 
     def get_queryset(self):
-        qs = ComponentTemplate.objects.all()
+        qs = ComponentTemplate.objects.visible_to(self.get_athlete())
         category = self.request.query_params.get("category")
         if category:
             qs = qs.filter(category=category)
@@ -187,31 +164,49 @@ class ComponentTemplateListView(AthleteMixin, generics.ListCreateAPIView):
         return qs
 
     def perform_create(self, serializer):
-        serializer.save(is_system=False)
+        serializer.save(is_system=False, owner=self.get_athlete())
 
 
 class ComponentTemplateDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
     """
     GET    /api/maintenance/templates/{id}/
-    PATCH  /api/maintenance/templates/{id}/   → nur eigene (is_system=False)
-    DELETE /api/maintenance/templates/{id}/   → nur eigene
+    PATCH  /api/maintenance/templates/{id}/   → nur eigene
+    DELETE /api/maintenance/templates/{id}/   → nur eigene, und nur wenn unbenutzt
     """
 
     serializer_class = ComponentTemplateSerializer
     http_method_names = ["get", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
-        # GET darf alle sehen; PATCH/DELETE nur eigene
+        athlete = self.get_athlete()
         if self.request.method == "GET":
-            return ComponentTemplate.objects.all()
-        return ComponentTemplate.objects.filter(is_system=False)
+            return ComponentTemplate.objects.visible_to(athlete)
+        return ComponentTemplate.objects.filter(owner=athlete)
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            return Response(
+                {
+                    "error": "Diese Vorlage wird noch von einem Teil benutzt.",
+                    "code": "template_in_use",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
 
-class ComponentSlotListView(AthleteMixin, generics.ListCreateAPIView):
+# ── Plätze (Slots) ───────────────────────────────────────────────────────────────
+
+
+class ComponentSlotListView(AthleteMixin, generics.ListAPIView):
     """
-    GET  /api/maintenance/bikes/{bike_id}/slots/?category=brakes&warn=true
-    POST /api/maintenance/bikes/{bike_id}/slots/
+    GET /api/maintenance/bikes/{bike_id}/slots/?category=brakes&warn=true
+
+    Angelegt wird ein Platz über `assemblies/{id}/items/`, nicht hier.
     """
+
+    serializer_class = ComponentSlotSerializer
 
     def get_bike(self):
         return get_object_or_404(
@@ -222,19 +217,12 @@ class ComponentSlotListView(AthleteMixin, generics.ListCreateAPIView):
         qs = (
             ComponentSlot.objects.filter(bike=self.get_bike())
             .select_related("template__group", "bike")
-            .prefetch_related("components__checks")
+            .prefetch_related("components__checks", "components__periods")
         )
         category = self.request.query_params.get("category")
         if category:
             qs = qs.filter(template__category=category)
         return qs
-
-    def get_serializer_class(self):
-        return (
-            ComponentSlotSerializer
-            if self.request.method == "POST"
-            else ComponentSlotListSerializer
-        )
 
     def list(self, request, *args, **kwargs):
         response = super().list(request, *args, **kwargs)
@@ -244,15 +232,12 @@ class ComponentSlotListView(AthleteMixin, generics.ListCreateAPIView):
             ]
         return response
 
-    def perform_create(self, serializer):
-        serializer.save(bike=self.get_bike())
-
 
 class ComponentSlotDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
     """
     GET    /api/maintenance/slots/{id}/
-    PATCH  /api/maintenance/slots/{id}/
-    DELETE /api/maintenance/slots/{id}/
+    PATCH  /api/maintenance/slots/{id}/   → custom_name
+    DELETE /api/maintenance/slots/{id}/?confirm=true → Platz samt aller seiner Teile
     """
 
     serializer_class = ComponentSlotSerializer
@@ -261,157 +246,78 @@ class ComponentSlotDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIVie
     def get_queryset(self):
         return (
             ComponentSlot.objects.filter(bike__athlete=self.get_athlete())
-            .select_related("bike", "template")
-            .prefetch_related("components")
+            .select_related("bike", "template__group")
+            .prefetch_related("components__checks", "components__periods")
         )
 
-
-def _sync_period_for(component: Component) -> None:
-    """
-    Zieht die Nutzungsperiode der Baugruppe zurueck, falls dieses Teil frueher
-    eingebaut wurde als die Periode laeuft (siehe
-    `BikeAssembly.sync_open_period_start`). Ohne Baugruppe gibt es nichts zu tun.
-    """
-    assembly = component.slot.assembly
-    if assembly is not None:
-        assembly.sync_open_period_start()
-
-
-def _unmount_current(slot: ComponentSlot, on: datetime.date | None = None) -> None:
-    """
-    Baut das aktuell montierte Teil eines Slots aus — **mit** km-Stand.
-
-    `distance_at_retire` war hier nie gesetzt worden, nur `retired_at`. Damit
-    griff in `api/usage.py` der Altbestands-Fallback ("ausgebaut, aber ohne
-    erfassten km-Stand -> bis heute rechnen"), der eigentlich nur Daten von vor
-    Migration 0018 auffangen sollte. Folge: ein ausgebautes Teil sammelte
-    weiter km, als laege es noch am Rad — gemessen stand ein nach 100 km
-    ausgebauter Bremsbelag bei 150 km, nachdem der Nachfolger 50 km gefahren
-    war, und wuchs immer weiter.
-    """
-    on = on or datetime.date.today()
-    Component.objects.filter(slot=slot, is_mounted=True).update(
-        is_mounted=False,
-        retired_at=on,
-        distance_at_retire=slot.bike.total_distance_km,
-    )
-
-
-def _remount(component: Component, on: datetime.date | None = None) -> None:
-    """
-    Montiert ein Teil, das schon einmal am Rad war, ohne seinen bisherigen
-    Verschleiss zu verlieren oder die Standzeit mitzuzaehlen.
-
-    Eine Komponente hat genau einen Einbaupunkt — die Pause, in der ein anderes
-    Teil im Slot sass, ist an ihr nirgends erfasst. Ohne die Einfrierung zaehlte
-    ein zurueckgeholter Bremsbelag die Kilometer des anderen mit (gemessen: 180
-    statt 130 km). Deshalb dasselbe Muster wie bei `reuse_component_id` im
-    Baugruppen-Create: bisherigen Verschleiss in `carried_over_*` festhalten und
-    den Einbaupunkt auf jetzt setzen. `compute_wear()` bzw.
-    `WeatherWearService.recompute_component()` addieren den eingefrorenen Wert
-    danach auf die neu gefahrenen km drauf.
-    """
-    on = on or datetime.date.today()
-    bike_total = component.slot.bike.total_distance_km
-    already_ridden = component.installed_at is not None and (
-        component.retired_at is not None or not component.is_mounted
-    )
-
-    fields = ["is_mounted", "retired_at", "distance_at_retire"]
-    if already_ridden and bike_total is not None:
-        component.carried_over_wear_km = (component.carried_over_wear_km or 0.0) + (
-            component_active_km(component, bike_total) or 0.0
-        )
-        component.carried_over_weather_wear_km = (
-            component.carried_over_weather_wear_km or 0.0
-        ) + (component.weather_wear_km or 0.0)
-        component.weather_wear_km = None
-        component.installed_at = on
-        component.distance_at_install = bike_total
-        fields += [
-            "carried_over_wear_km",
-            "carried_over_weather_wear_km",
-            "weather_wear_km",
-            "installed_at",
-            "distance_at_install",
-        ]
-
-    component.is_mounted = True
-    component.retired_at = None
-    component.distance_at_retire = None
-    component.save(update_fields=fields)
-
-
-class SlotMountView(AthleteMixin, APIView):
-    """
-    POST /api/maintenance/slots/{pk}/mount/
-    Body: { "component_id": 42 }
-
-    Montiert eine vorhandene Komponente; baut die bisherige atomar aus.
-    """
-
-    def post(self, request, pk):
-        slot = get_object_or_404(ComponentSlot, pk=pk, bike__athlete=self.get_athlete())
-        component_id = request.data.get("component_id")
-        if not component_id:
-            return Response(
-                {"error": "component_id fehlt."}, status=status.HTTP_400_BAD_REQUEST
+    def destroy(self, request, *args, **kwargs):
+        slot = self.get_object()
+        parts = slot.components.count()
+        if parts and request.query_params.get("confirm") != "true":
+            return _confirm_required(
+                f"Damit verschwinden {parts} Teil(e) samt ihres Verlaufs.", parts
             )
-        new_comp = get_object_or_404(Component, pk=component_id, slot=slot)
-
-        with transaction.atomic():
-            _unmount_current(slot)
-            _remount(new_comp)
-
-        return Response(ComponentSerializer(new_comp).data)
+        slot.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class SlotUnmountView(AthleteMixin, APIView):
-    """
-    POST /api/maintenance/slots/{pk}/unmount/
-
-    Baut die aktuell montierte Komponente aus.
-    """
-
-    def post(self, request, pk):
-        slot = get_object_or_404(ComponentSlot, pk=pk, bike__athlete=self.get_athlete())
-        comp = slot.mounted_component
-        if comp is None:
-            return Response(
-                {"error": "Keine montierte Komponente in diesem Slot."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        _unmount_current(slot)
-        comp.refresh_from_db()
-        return Response(ComponentSerializer(comp).data)
+def _confirm_required(message: str, parts: int) -> Response:
+    """Endgültiges Löschen braucht `?confirm=true`, wie beim Konto (app_auth)."""
+    return Response(
+        {"error": message, "code": "confirm_required", "parts": parts},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
 
 
 # ── Components ───────────────────────────────────────────────────────────────────
+
+
+def _component_queryset(athlete: StravaProfile):
+    return (
+        Component.objects.filter(slot__bike__athlete=athlete)
+        .select_related("slot__bike", "slot__template__group", "slot__assembly__group")
+        .prefetch_related("periods", "checks")
+    )
 
 
 class ComponentListView(AthleteMixin, generics.ListCreateAPIView):
     """
     GET  /api/maintenance/slots/{slot_id}/components/
     POST /api/maintenance/slots/{slot_id}/components/
+
+    POST legt ein neues Teil an. Mit `mount` (Default) wird es gleich aufgezogen und
+    das bisherige Teil wandert ins Regal, ohne bleibt es selbst im Regal.
     """
 
     serializer_class = ComponentSerializer
 
     def get_slot(self):
         return get_object_or_404(
-            ComponentSlot, pk=self.kwargs["slot_id"], bike__athlete=self.get_athlete()
+            ComponentSlot.objects.select_related("assembly", "template", "bike"),
+            pk=self.kwargs["slot_id"],
+            bike__athlete=self.get_athlete(),
         )
 
     def get_queryset(self):
-        return self.get_slot().components.all()
+        return _component_queryset(self.get_athlete()).filter(
+            slot_id=self.kwargs["slot_id"]
+        )
 
-    def perform_create(self, serializer):
+    def create(self, request, *args, **kwargs):
         slot = self.get_slot()
-        with transaction.atomic():
-            if serializer.validated_data.get("is_mounted", True):
-                _unmount_current(slot)
-            component = serializer.save(slot=slot)
-            _sync_period_for(component)
+        body = ComponentCreateSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = dict(body.validated_data)
+        mount = data.pop("mount")
+        on = data.pop("installed_at", None)
+
+        component = lifecycle.add_component(slot, mount=mount, on=on, **data)
+        return Response(
+            ComponentSerializer(
+                _component_queryset(self.get_athlete()).get(pk=component.pk)
+            ).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class ComponentDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
@@ -419,32 +325,113 @@ class ComponentDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
     GET    /api/maintenance/components/{id}/
     PATCH  /api/maintenance/components/{id}/
     DELETE /api/maintenance/components/{id}/
+
+    Der Zustand ändert sich über mount/unmount/retire/restore. Ein korrigiertes
+    `installed_at` verschiebt auch, ab wann die km zählen.
     """
 
     serializer_class = ComponentSerializer
     http_method_names = ["get", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
-        return Component.objects.filter(
-            slot__bike__athlete=self.get_athlete()
-        ).select_related("slot__bike", "slot__template")
+        return _component_queryset(self.get_athlete())
 
     def perform_update(self, serializer):
-        """
-        Nach dem Zurückdatieren eines Einbaus die Nutzungsperiode nachziehen.
+        data = serializer.validated_data
+        new_installed_at = data.pop("installed_at", None)
+        prior_changed = "prior_km" in data
+        prior_km = data.pop("prior_km", None)
 
-        Ohne das zeigt das Teil 0 km: `api/usage.py` schneidet seine km gegen
-        die Perioden der Baugruppe, und die begann beim Anlegen der Baugruppe —
-        also nach dem korrigierten Einbaudatum.
-        """
-        component = serializer.save()
-        _sync_period_for(component)
+        with transaction.atomic():
+            component = serializer.save()
+            if new_installed_at is not None:
+                lifecycle.set_installed_on(component, new_installed_at)
+            if prior_changed:
+                lifecycle.set_prior_km(component, prior_km)
 
 
-class ComponentCheckView(AthleteMixin, APIView):
+class ComponentActionView(AthleteMixin, APIView):
+    """Gemeinsamer Rahmen der Aktionen auf einem Teil — gelesen wird danach frisch."""
+
+    def get_component(self, pk: int) -> Component:
+        return get_object_or_404(_component_queryset(self.get_athlete()), pk=pk)
+
+    def respond(self, pk: int) -> Response:
+        return Response(ComponentSerializer(self.get_component(pk)).data)
+
+    def on_date(self, request) -> datetime.date | None:
+        body = ComponentActionSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        return body.validated_data.get("on")
+
+
+class ComponentMountView(ComponentActionView):
+    """
+    POST /api/maintenance/components/{pk}/mount/   Body: { "on"?: "YYYY-MM-DD" }
+
+    Zieht dieses Teil auf und nimmt das bisherige ab. Ab hier zählen die km für dieses
+    Teil, das abgenommene bleibt bei seiner Zahl stehen.
+    """
+
+    def post(self, request, pk):
+        lifecycle.mount_component(self.get_component(pk), on=self.on_date(request))
+        return self.respond(pk)
+
+
+class ComponentUnmountView(ComponentActionView):
+    """POST /api/maintenance/components/{pk}/unmount/ — abnehmen, liegt danach im Regal."""
+
+    def post(self, request, pk):
+        lifecycle.unmount_component(self.get_component(pk), on=self.on_date(request))
+        return self.respond(pk)
+
+
+class ComponentRetireView(ComponentActionView):
+    """POST /api/maintenance/components/{pk}/retire/ — verschlissen oder entsorgt."""
+
+    def post(self, request, pk):
+        lifecycle.retire_component(self.get_component(pk), on=self.on_date(request))
+        return self.respond(pk)
+
+
+class ComponentRestoreView(ComponentActionView):
+    """POST /api/maintenance/components/{pk}/restore/ — zurück ins Regal."""
+
+    def post(self, request, pk):
+        lifecycle.restore_component(self.get_component(pk))
+        return self.respond(pk)
+
+
+class ComponentMoveView(ComponentActionView):
+    """
+    POST /api/maintenance/components/{pk}/move/
+    Body: { "slot_id": 12, "mount"?: true, "on"?: "YYYY-MM-DD" }
+
+    Zieht ein Teil auf einen anderen Platz gleicher Art um, z.B. einen Reifen auf ein
+    anderes Laufrad.
+    """
+
+    def post(self, request, pk):
+        component = self.get_component(pk)
+        body = ComponentMoveSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+        target = get_object_or_404(
+            ComponentSlot.objects.select_related("assembly"),
+            pk=data["slot_id"],
+            bike=component.slot.bike,
+        )
+        lifecycle.move_component(
+            component, target, mount=data["mount"], on=data.get("on")
+        )
+        return self.respond(pk)
+
+
+class ComponentCheckView(ComponentActionView):
     """
     POST /api/maintenance/components/{pk}/check/
     Body: { "condition_pct"?: 0-100, "snooze_km"?: float, "snooze_days"?: int, "note"?: str }
+    DELETE → nimmt die letzte Prüfung zurück.
 
     Protokolliert eine Prüfung/Freigabe der Komponente ("Freigeben"). Der
     Warn-Status wird danach ab diesem Zeitpunkt neu berechnet — mit dem
@@ -453,23 +440,45 @@ class ComponentCheckView(AthleteMixin, APIView):
     """
 
     def post(self, request, pk):
-        component = get_object_or_404(
-            Component, pk=pk, slot__bike__athlete=self.get_athlete()
-        )
+        component = self.get_component(pk)
         serializer = ComponentCheckCreateSerializer(
             data=request.data, context={"component": component}
         )
         serializer.is_valid(raise_exception=True)
 
-        ComponentCheck.objects.create(
-            component=component,
-            checked_at=datetime.date.today(),
-            checked_at_distance_km=component.slot.bike.total_distance_km,
-            checked_at_weather_wear_km=component.weather_wear_km,
-            **serializer.validated_data,
-        )
+        # Auf den neuesten Stand bringen: von hier an zählt die Wetter-Achse neu, die
+        # Baseline darf also keine Fahrten seit dem letzten Import verschlucken.
+        WeatherWearService.recompute_component(component)
 
-        return Response(ComponentSerializer(component).data)
+        with transaction.atomic():
+            ComponentCheck.objects.create(
+                component=component,
+                checked_at=ride_clock_now().date(),
+                baseline_at=ride_clock_now(),
+                checked_at_weather_wear_km=component.weather_wear_km,
+                **serializer.validated_data,
+            )
+            # Wird das Teil später wieder kritisch, soll wieder eine Mail kommen. Der
+            # Dedupe vergleicht nur mit dem zuletzt gemeldeten Status, und der stünde
+            # sonst noch auf dem Wert von vor der Freigabe.
+            component.last_warn_notified_status = ""
+            component.save(update_fields=["last_warn_notified_status", "updated_at"])
+
+        return self.respond(pk)
+
+    def delete(self, request, pk):
+        component = self.get_component(pk)
+        check = component.checks.order_by("-id").first()
+        if check is None:
+            return Response(
+                {
+                    "error": "Es gibt keine Prüfung zum Zurücknehmen.",
+                    "code": "no_check",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        check.delete()
+        return self.respond(pk)
 
 
 class ComponentWeatherExplanationView(AthleteMixin, APIView):
@@ -514,7 +523,7 @@ class ComponentWeatherExplanationView(AthleteMixin, APIView):
                 }
             )
 
-        wear = compute_wear(component, component.slot.bike.total_distance_km)
+        wear = compute_wear(component)
         system_prompt, user_prompt = build_weather_explanation_prompt(component, wear)
         explanation = generate_reviewed_text(system_prompt, user_prompt)
 
@@ -562,7 +571,7 @@ class ComponentCheckInstructionsView(AthleteMixin, APIView):
             Component, pk=pk, slot__bike__athlete=self.get_athlete()
         )
 
-        wear = compute_wear(component, component.slot.bike.total_distance_km)
+        wear = compute_wear(component)
 
         force_refresh = request.query_params.get("refresh") == "true"
         is_stale = component.check_instructions_status != wear["warn_status_overall"]
@@ -626,14 +635,15 @@ class BikeConditionReportView(AthleteMixin, APIView):
         slots = (
             ComponentSlot.objects.on_bike(bike)
             .select_related("template")
-            .prefetch_related("components", "assembly__periods")
+            .prefetch_related("components__periods", "components__checks")
         )
+        ledger = RideLedger.for_bike(bike.pk)
         component_summaries = []
         for slot in slots:
             comp = slot.mounted_component
             if comp is None:
                 continue
-            wear = compute_wear(comp, bike.total_distance_km)
+            wear = compute_wear(comp, ledger)
             component_summaries.append(
                 {
                     "name": slot.display_name,
@@ -713,126 +723,23 @@ def _interval_kind_for_template(template: ComponentTemplate) -> str:
     return MaintenanceIntervalKind.CUSTOM
 
 
-def _odometer_at(bike: Bike, day: datetime.date) -> float | None:
-    """
-    Km-Stand des Bikes an einem Tag — Baseline für eine Nutzungsperiode. Bei
-    rückdatiertem Einbau ("den Satz fahre ich seit letztem Monat") wird der
-    damalige Stand aus der Ride-Historie genommen, sonst zählte die Zeit davor
-    nicht mit. Gleiche Quelle wie `total_distance_km` (Summe der Ride-Distanzen),
-    die beiden Werte sind daher direkt vergleichbar.
-    """
-    total = bike.total_distance_km
-    if total is None:
-        return None
-    if day >= datetime.date.today():
-        return total
-    return min(bike.distance_km_up_to(day), total)
-
-
-def _park_assembly(assembly: BikeAssembly, on: datetime.date | None = None) -> None:
-    """
-    Baugruppe abziehen, ohne sie auszumustern: laufende Nutzungsperiode schließen,
-    `status=PARKED`, `retired_at` bleibt None. Die Komponenten bleiben
-    `is_mounted=True` — sie sitzen ja weiter auf dem Laufradsatz, nur der Satz ist
-    nicht mehr am Rad. Vor dem Parken wird der Wetter-Verschleiß ein letztes Mal
-    final berechnet, danach ändert er sich nicht mehr.
-    """
-    from .services import WeatherWearService
-
-    on = on or datetime.date.today()
-    # Baugruppen aus der Zeit vor den Nutzungsperioden (bzw. aus seed_dev_data/
-    # Admin) haben noch keine — die wird hier rückwirkend angelegt, sonst liesse
-    # sich das Abziehen gar nicht festhalten und der Satz sammelte weiter km.
-    period = assembly.ensure_open_period()
-    if period is not None:
-        period.close(on, assembly.bike.total_distance_km)
-
-    assembly.status = AssemblyStatus.PARKED
-    assembly.save(update_fields=["status", "updated_at"])
-
-    for component in Component.objects.filter(
-        slot__assembly=assembly, is_mounted=True
-    ).select_related("slot__template", "slot__assembly"):
-        try:
-            WeatherWearService.recompute_component(component)
-        except Exception:
-            logger.exception(
-                "Finale Wetter-Verschleiss-Berechnung fuer Komponente %s fehlgeschlagen.",
-                component.pk,
-            )
-
-
-def _mount_assembly(assembly: BikeAssembly, on: datetime.date | None = None) -> None:
-    """
-    Baugruppe aufziehen: aktiv setzen und eine neue Nutzungsperiode öffnen. Der
-    Aufrufer muss vorher sicherstellen, dass keine andere Instanz derselben
-    `(bike, group)` mehr aktiv ist (siehe `BikeAssembly.clean()`).
-    """
-    on = on or datetime.date.today()
-    assembly.status = AssemblyStatus.ACTIVE
-    assembly.retired_at = None
-    assembly.save(update_fields=["status", "retired_at", "updated_at"])
-
-    if assembly.open_period() is None:
-        AssemblyUsagePeriod.objects.create(
-            assembly=assembly,
-            started_at=on,
-            started_distance_km=_odometer_at(assembly.bike, on),
-        )
-
-
-def _active_sibling(bike: Bike, group: ComponentGroup) -> BikeAssembly | None:
-    """Die aktuell aufgezogene Instanz derselben Baugruppe an diesem Bike."""
-    return (
-        BikeAssembly.objects.filter(bike=bike, group=group)
-        .active()
-        .select_related("bike", "group")
-        .first()
-    )
-
-
 def _spare_components_for_bike(bike: Bike) -> list[Component]:
     """
-    Alle ausgebauten, noch nicht wiederverwendeten Components dieses Bikes —
-    Grundlage für den "vorhandene Komponente übernehmen"-Vorschlag bei
-    ausgebauten Teilen (im Unterschied zu `ungrouped_slots`, die noch
-    *montierte*, nur noch nicht gruppierte Alt-Teile abdecken). Ein Teil bleibt
-    beim Ausbau immer an seinem alten Slot hängen (`is_mounted=False`),
-    unabhängig davon, ob dessen Baugruppe noch aktiv/geparkt/ausgemustert ist —
-    ein zurückgelegter Laufradsatz-Teil ist genauso ein Kandidat wie einer aus
-    einer längst ausgemusterten Baugruppe.
+    Alle Teile im Regal — Grundlage für den "vorhandenes Teil übernehmen"-Vorschlag.
+    Ein Teil bleibt beim Abnehmen an seinem Platz hängen, auch wenn dessen Baugruppe
+    längst ausgemustert ist; dann braucht es einen neuen Platz (`orphaned`).
 
-    Bewusst **keine** Reduktion auf einen Kandidaten je Template mehr: bei
-    einem länger genutzten Slot können mehrere frühere Teile gleichzeitig
-    ausgebaut sein (z.B. drei historische Felgen auf einem seit Jahren
-    bestehenden, inzwischen ausgemusterten Slot), und keine Datums-Heuristik
-    errät zuverlässig "die eine richtige" — das führte zu falschen
-    Vorschlägen (mal gewann ein am selben Tag angelegtes Test-Artefakt, mal
-    ein uralter Platzhalter-Eintrag). Der Client zeigt bei mehreren Treffern
-    je Template eine Auswahl an, sortiert hier nur als sinnvoller Default
-    (zuletzt ausgebaut zuerst).
+    Bewusst **keine** Reduktion auf einen Kandidaten je Template: keine
+    Datums-Heuristik errät zuverlässig "den einen richtigen" Reifen. Der Client zeigt
+    bei mehreren Treffern eine Auswahl, sortiert ist nur als sinnvoller Default.
     """
     return list(
-        Component.objects.filter(slot__bike=bike, is_mounted=False)
-        .select_related("slot__template__group", "slot__assembly", "slot__bike")
-        .order_by("-retired_at", "-id")
+        Component.objects.spare()
+        .filter(slot__bike=bike)
+        .select_related("slot__template__group", "slot__assembly__group", "slot__bike")
+        .prefetch_related("periods")
+        .order_by("-updated_at", "-id")
     )
-
-
-def _carry_over_slots(assembly: BikeAssembly | None) -> dict[int, ComponentSlot]:
-    """
-    Montierte Slots einer Baugruppe, nach Template — die Kandidaten, die beim
-    Teile-Erneuern uebernommen statt weggeworfen werden.
-    """
-    if assembly is None:
-        return {}
-    return {
-        slot.template_id: slot
-        for slot in ComponentSlot.objects.filter(assembly=assembly).select_related(
-            "template"
-        )
-        if slot.mounted_component is not None
-    }
 
 
 def _build_assembly_from_request(
@@ -840,48 +747,22 @@ def _build_assembly_from_request(
     group: ComponentGroup,
     data: dict,
     activate: bool = True,
-    carry_over_from: BikeAssembly | None = None,
 ) -> BikeAssembly:
     """
     Legt eine BikeAssembly + ihre Slots/Components + MaintenanceIntervals atomar an.
     Erwartet bereits validierte Daten (AssemblyCreateRequestSerializer) und
-    vorab-geprüfte Template-Zugehörigkeit zur Gruppe. Wiederverwendet das
-    Unmount-dann-Mount-Muster aus SlotMountView.
+    vorab-geprüfte Template-Zugehörigkeit zur Gruppe.
 
     `activate=False` legt die Instanz geparkt an (zweiter Laufradsatz, der erst
-    später aufgezogen wird) — dann gibt es auch noch keine Nutzungsperiode.
+    später aufgezogen wird) — dann sammeln ihre Teile auch noch keine km.
 
-    Ein Part-Item mit `existing_slot_id` übernimmt eine bereits vorhandene,
-    ungruppierte Component (samt Verlauf) statt eine neue anzulegen — dafür
-    wird nur der Slot umgehängt (`slot.assembly = assembly`), nicht kopiert.
-    `reuse_component_id` deckt den verwandten Fall eines bereits *ausgebauten*
-    Teils ab (z.B. der zurückgelegte Laufradsatz aus dem Keller): die Component
-    zieht in einen frisch angelegten Slot dieser Baugruppe um und wird wieder
-    montiert (`is_mounted=True`, `retired_at`/`distance_at_retire`
-    zurückgesetzt). Anders als bei `existing_slot_id` (durchgehend derselbe
-    physische Einbau, nie ausgebaut) bleibt hier `installed_at`/
-    `distance_at_install` unangetastet, und der Periodenbeginn wird **nicht**
-    darauf zurückdatiert — die Standzeit zwischen Ausbau und Wiedermontage soll
-    ja nicht als gefahrene km zählen (sonst würde km, die zwischenzeitlich ein
-    anderer Laufradsatz gefahren ist, hier mitgezählt). Der davor real
-    aufgelaufene Verschleiß geht dabei aber **nicht** verloren: er wird in
-    `Component.carried_over_wear_km`/`carried_over_weather_wear_km` eingefroren
-    (component_active_km() sieht nur die Perioden der aktuellen Baugruppe) und
-    von `compute_wear()` bzw. `WeatherWearService.recompute_component()` auf den
-    künftig neu berechneten Wert addiert — die km-Achse macht also am
-    eingefrorenen Stand weiter, nicht bei 0. Die Tage-Achse altert ohnehin
-    unverändert seit dem ursprünglichen `installed_at` weiter, exakt wie bei
-    einer geparkten statt ausgebauten Baugruppe. Für `existing_slot_id` gilt
-    dagegen: damit der Verlauf des übernommenen Teils dabei nicht verloren geht
-    (die Nutzungsperiode sonst erst ab heute zählen würde, siehe api/usage.py),
-    wird der Periodenbeginn dort auf das früheste Einbaudatum/km unter den
-    übernommenen Teilen zurückdatiert — neu angelegte Teile bleiben unangetastet
-    beim gemeinsamen `installed_at`.
+    Ein Part-Item mit `existing_slot_id` übernimmt einen bereits vorhandenen,
+    ungruppierten Platz samt montiertem Teil und Verlauf; `reuse_component_id` holt
+    ein Teil aus dem Regal auf einen neuen Platz dieser Baugruppe. In beiden Fällen
+    bleibt die Geschichte des Teils stehen, denn sie hängt an seinen Zeiträumen.
     """
-    installed_at = data.get("installed_at") or datetime.date.today()
-    # Bei rückdatiertem Einbau der damalige km-Stand, damit Baugruppen-Periode und
-    # Komponenten-Baseline dieselbe Zahl benutzen und nicht auseinanderlaufen.
-    bike_total_km = _odometer_at(bike, installed_at)
+    installed_at = data.get("installed_at") or ride_clock_now().date()
+    at = moment_for(installed_at)
 
     with transaction.atomic():
         assembly = BikeAssembly(
@@ -891,50 +772,26 @@ def _build_assembly_from_request(
             installed_at=installed_at,
             status=(AssemblyStatus.ACTIVE if activate else AssemblyStatus.PARKED),
         )
-        assembly.save()
+        assembly.save(usage_at=at)
 
-        allowed_parts = {
+        templates = {
             t.id: t
-            for t in group.templates.filter(maintenance_kind=MaintenanceKind.PART)
+            for t in group.templates.visible_to(bike.athlete).filter(
+                maintenance_kind__in=[
+                    MaintenanceKind.PART,
+                    MaintenanceKind.CONSUMABLE,
+                ]
+            )
         }
-        allowed_consumables = {
-            t.id: t
-            for t in group.templates.filter(maintenance_kind=MaintenanceKind.CONSUMABLE)
-        }
-
-        # Frühestes Einbaudatum/km unter den übernommenen Bestandsteilen —
-        # bestimmt den Periodenbeginn (siehe Docstring oben).
-        period_started_at = installed_at
-        period_started_km = bike_total_km
-
-        # Beim Teile-Erneuern sind die *nicht* angehakten Teile die, die dranbleiben
-        # sollen. Vorher fielen sie ersatzlos weg: die alte Instanz wurde komplett
-        # ausgemustert und die neue nur aus den angehakten Zeilen aufgebaut — wer
-        # an einem Antrieb nur die Kette erneuerte, verlor Kurbel und Tretlager
-        # vom Rad. Jetzt zieht ihr Slot in die neue Instanz um, mit Verlauf.
-        carry_over = _carry_over_slots(carry_over_from)
 
         for item in data.get("parts", []):
             if not item["include"]:
-                keep = carry_over.get(item["template_id"])
-                if keep is not None:
-                    keep.assembly = assembly
-                    keep.save(update_fields=["assembly"])
-                    mounted = keep.mounted_component
-                    if mounted is not None and mounted.installed_at is not None:
-                        if mounted.installed_at < period_started_at:
-                            period_started_at = mounted.installed_at
-                        if mounted.distance_at_install is not None and (
-                            period_started_km is None
-                            or mounted.distance_at_install < period_started_km
-                        ):
-                            period_started_km = mounted.distance_at_install
                 continue
-            template = allowed_parts[item["template_id"]]
+            template = templates[item["template_id"]]
 
             existing_slot_id = item.get("existing_slot_id")
             if existing_slot_id:
-                slot = ComponentSlot.objects.prefetch_related("components").get(
+                slot = ComponentSlot.objects.get(
                     pk=existing_slot_id,
                     bike=bike,
                     assembly__isnull=True,
@@ -942,90 +799,42 @@ def _build_assembly_from_request(
                 )
                 slot.assembly = assembly
                 slot.save(update_fields=["assembly"])
-
                 mounted = slot.mounted_component
-                if mounted is not None and mounted.installed_at is not None:
-                    if mounted.installed_at < period_started_at:
-                        period_started_at = mounted.installed_at
-                    if mounted.distance_at_install is not None and (
-                        period_started_km is None
-                        or mounted.distance_at_install < period_started_km
-                    ):
-                        period_started_km = mounted.distance_at_install
+                if mounted is not None:
+                    first = mounted.periods.order_by("started_at").first()
+                    if first is not None:
+                        assembly.pull_first_period_back(first.started_at)
+                    mounted.slot = slot
+                    mounted.sync_usage_period(at)
                 continue
 
             reuse_component_id = item.get("reuse_component_id")
             if reuse_component_id:
-                component = Component.objects.select_for_update().get(
-                    pk=reuse_component_id,
-                    slot__bike=bike,
-                    slot__template=template,
-                    is_mounted=False,
-                )
-                # Verschleiß VOR dem Umhängen einfrieren — component_active_km()
-                # rechnet nur über die Perioden der Baugruppe, an der die Component
-                # gerade noch hängt (die alte); danach wäre diese Geschichte für
-                # component_active_km() unsichtbar. compute_wear() addiert
-                # carried_over_wear_km auf den künftig neu berechneten Wert drauf,
-                # WeatherWearService.recompute_component() analog für die
-                # Wetter-Achse (siehe Docstring/Kommentare dort).
-                component.carried_over_wear_km = (
-                    component.carried_over_wear_km or 0.0
-                ) + (component_active_km(component, bike.total_distance_km) or 0.0)
-                component.carried_over_weather_wear_km = (
-                    component.carried_over_weather_wear_km or 0.0
-                ) + (component.weather_wear_km or 0.0)
-
+                component = Component.objects.select_related(
+                    "slot__template", "slot__assembly"
+                ).get(pk=reuse_component_id, slot__bike=bike, slot__template=template)
                 slot = ComponentSlot.objects.create(
                     bike=bike, assembly=assembly, template=template
                 )
-                component.slot = slot
-                component.is_mounted = True
-                component.retired_at = None
-                component.distance_at_retire = None
-                component.save(
-                    update_fields=[
-                        "slot",
-                        "is_mounted",
-                        "retired_at",
-                        "distance_at_retire",
-                        "carried_over_wear_km",
-                        "carried_over_weather_wear_km",
-                    ]
-                )
-                # Periodenbeginn bewusst NICHT zurückdatiert (siehe Docstring) —
-                # die neue Nutzungsperiode zählt km ab jetzt, der eingefrorene
-                # Altverschleiß wird stattdessen in compute_wear() draufaddiert.
+                lifecycle.move_component(component, slot, on=installed_at)
                 continue
 
             slot, _ = ComponentSlot.objects.get_or_create(
                 assembly=assembly, template=template, defaults={"bike": bike}
             )
-            Component.objects.filter(slot=slot, is_mounted=True).update(
-                is_mounted=False, retired_at=datetime.date.today()
-            )
-            Component(
-                slot=slot,
+            lifecycle.add_component(
+                slot,
+                on=installed_at,
                 brand=item.get("brand", ""),
                 model_name=item.get("model_name", ""),
-                installed_at=installed_at,
-                distance_at_install=bike_total_km,
                 custom_warn_km=item.get("custom_warn_km"),
                 custom_warn_days=item.get("custom_warn_days"),
-                is_mounted=True,
-            ).save()
-
-        if activate:
-            AssemblyUsagePeriod.objects.create(
-                assembly=assembly,
-                started_at=period_started_at,
-                started_distance_km=period_started_km,
             )
 
         for item in data.get("intervals", []):
             if not item["include"]:
                 continue
-            template = allowed_consumables[item["template_id"]]
+            template = templates[item["template_id"]]
             MaintenanceInterval.objects.create(
                 bike=bike,
                 assembly=assembly,
@@ -1035,7 +844,7 @@ def _build_assembly_from_request(
                 interval_km=item.get("interval_km") or template.warn_km,
                 interval_days=item.get("interval_days") or template.warn_days,
                 last_done_at=installed_at,
-                last_done_distance_km=bike_total_km,
+                km_baseline_at=at,
             )
 
     return assembly
@@ -1047,15 +856,13 @@ def _validate_assembly_items(
     """
     Prüft, dass alle referenzierten Templates zur Gruppe + richtigen Art gehören,
     und dass jede referenzierte `existing_slot_id` (vorhandene, montierte
-    Komponente übernehmen) bzw. `reuse_component_id` (ausgebautes Teil
-    reaktivieren) wirklich zu diesem Bike und Template passt.
+    Komponente übernehmen) bzw. `reuse_component_id` (Teil aus dem Regal holen)
+    wirklich zu diesem Bike und Template passt.
     """
-    part_ids = {
-        t.id for t in group.templates.filter(maintenance_kind=MaintenanceKind.PART)
-    }
+    templates = group.templates.visible_to(bike.athlete)
+    part_ids = {t.id for t in templates.filter(maintenance_kind=MaintenanceKind.PART)}
     consumable_ids = {
-        t.id
-        for t in group.templates.filter(maintenance_kind=MaintenanceKind.CONSUMABLE)
+        t.id for t in templates.filter(maintenance_kind=MaintenanceKind.CONSUMABLE)
     }
     for item in data.get("parts", []):
         if item["template_id"] not in part_ids:
@@ -1082,12 +889,15 @@ def _validate_assembly_items(
                 return f"Vorhandene Komponente {existing_slot_id} hat kein montiertes Teil."
 
         if reuse_component_id:
-            component = Component.objects.filter(
-                pk=reuse_component_id,
-                slot__bike=bike,
-                slot__template_id=item["template_id"],
-                is_mounted=False,
-            ).first()
+            component = (
+                Component.objects.filter(
+                    pk=reuse_component_id,
+                    slot__bike=bike,
+                    slot__template_id=item["template_id"],
+                )
+                .exclude(status=ComponentStatus.MOUNTED)
+                .first()
+            )
             if component is None:
                 return (
                     f"Ausgebautes Teil {reuse_component_id} wurde nicht gefunden — "
@@ -1105,17 +915,11 @@ class BikeInstalledAtView(AthleteMixin, APIView):
     Body: { "installed_at": "YYYY-MM-DD", "assembly_id"?: 12 }
 
     Setzt das Einbaudatum für **alle montierten Teile** auf einmal — wahlweise
-    fürs ganze Bike oder nur für eine Baugruppe.
+    für alles, was am Rad ist, oder nur für eine Baugruppe.
 
     Der Anlass: wer ein Bike anlegt, dessen Fahrten schon in der App sind, hat
     beim Anlegen meist das heutige Datum stehen und korrigiert danach jedes Teil
-    einzeln. Das sind bei einem Rennrad schnell zwölf Dialoge — und solange die
-    Nutzungsperiode der Baugruppe nicht mitwandert, stehen die km trotzdem auf
-    null (siehe `BikeAssembly.sync_open_period_start`).
-
-    `distance_at_install` wird aus der Ride-Historie zum Stichtag abgeleitet
-    (`_odometer_at`), nicht vom Client übernommen — derselbe Wert, den auch der
-    Baugruppen-Assistent benutzt, damit Teile und Periode dieselbe Zahl sehen.
+    einzeln. Das sind bei einem Rennrad schnell zwölf Dialoge.
     """
 
     def post(self, request, bike_id):
@@ -1126,54 +930,28 @@ class BikeInstalledAtView(AthleteMixin, APIView):
         installed_at = body.validated_data["installed_at"]
         assembly_id = body.validated_data.get("assembly_id")
 
-        if installed_at > datetime.date.today():
-            return Response(
-                {
-                    "error": "Das Einbaudatum darf nicht in der Zukunft liegen.",
-                    "code": "future_date",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        components = Component.objects.filter(
-            slot__bike=bike, is_mounted=True
-        ).select_related("slot__assembly")
+        assembly = None
         if assembly_id is not None:
             assembly = get_object_or_404(BikeAssembly, pk=assembly_id, bike=bike)
-            components = components.filter(slot__assembly=assembly)
 
-        odometer = _odometer_at(bike, installed_at)
-        assemblies: dict[int, BikeAssembly] = {}
-
-        with transaction.atomic():
-            updated = 0
-            for component in components:
-                component.installed_at = installed_at
-                component.distance_at_install = odometer
-                component.save(
-                    update_fields=["installed_at", "distance_at_install", "updated_at"]
-                )
-                updated += 1
-                asm = component.slot.assembly
-                if asm is not None:
-                    assemblies[asm.id] = asm
-
-            # Die Perioden erst nachziehen, wenn alle Teile stehen — sonst
-            # richtet sich der Beginn nach einem Zwischenstand.
-            for asm in assemblies.values():
-                if asm.installed_at is None or asm.installed_at > installed_at:
-                    asm.installed_at = installed_at
-                    asm.save(update_fields=["installed_at", "updated_at"])
-                asm.sync_open_period_start()
-
+        components, assemblies = lifecycle.set_installed_on_bulk(
+            bike, installed_at, assembly
+        )
         return Response(
             {
                 "installed_at": installed_at,
-                "distance_at_install": odometer,
-                "components_updated": updated,
-                "assemblies_updated": len(assemblies),
+                "components_updated": components,
+                "assemblies_updated": assemblies,
             }
         )
+
+
+def _group_templates_prefetch(athlete: StravaProfile) -> Prefetch:
+    """Der Katalog zeigt jedem nur die gemeinsamen und die eigenen Vorlagen."""
+    return Prefetch(
+        "templates",
+        queryset=ComponentTemplate.objects.visible_to(athlete).select_related("group"),
+    )
 
 
 class ComponentGroupListView(AthleteMixin, generics.ListAPIView):
@@ -1192,11 +970,30 @@ class ComponentGroupListView(AthleteMixin, generics.ListAPIView):
         return ctx
 
     def get_queryset(self):
-        qs = ComponentGroup.objects.prefetch_related("templates")
+        qs = ComponentGroup.objects.prefetch_related(
+            _group_templates_prefetch(self.get_athlete())
+        )
         bike_type = self.request.query_params.get("bike_type")
         if bike_type:
             qs = [g for g in qs if g.applies_to(bike_type)]
         return qs
+
+
+def _assembly_prefetch(athlete: StravaProfile) -> tuple:
+    return (
+        Prefetch("group__templates", queryset=_visible_templates(athlete)),
+        "slots__template__group",
+        "slots__components__checks",
+        "slots__components__periods",
+        "intervals__logs",
+        "periods",
+        "linked_assemblies",
+        "linked_components",
+    )
+
+
+def _visible_templates(athlete: StravaProfile):
+    return ComponentTemplate.objects.visible_to(athlete).select_related("group")
 
 
 class BikeAssemblyListView(AthleteMixin, APIView):
@@ -1204,27 +1001,18 @@ class BikeAssemblyListView(AthleteMixin, APIView):
     GET  /api/maintenance/bikes/{bike_id}/assemblies/
     POST /api/maintenance/bikes/{bike_id}/assemblies/
 
-    GET liefert die aktiven Baugruppen des Bikes (inkl. Slots mit Wear +
-    Intervall-Status), die geparkten Alternativen (`parked_assemblies` — z.B. der
-    Winter-LRS im Keller), die noch nicht zugeordneten Alt-Slots
-    (`ungrouped_slots`, nach Kategorie), die ausgebauten Ersatzteile
-    (`spare_components`, für den "vorhandene Komponente übernehmen"-Vorschlag)
-    und die zum Bike-Typ passenden Katalog-Gruppen (`available_groups`).
-    `available_groups` enthält bewusst auch Gruppen mit bereits aktiver
-    Instanz (`has_active_instance: true`) — ein zweiter Satz (Sommer-/
-    Winter-LRS) soll sich anlegen lassen, POST parkt ihn dann automatisch statt
-    die aktive Instanz zu verdrängen (siehe `_active_sibling` weiter unten).
+    GET liefert in einem Rutsch alles, was die Bike-Seite braucht: die Baugruppen am
+    Rad (`assemblies`, inkl. Plätze, Teile und Intervalle), die geparkten Alternativen
+    (`parked_assemblies`), die ausgemusterten (`retired_assemblies`), die noch nicht
+    zugeordneten Alt-Plätze (`ungrouped_slots`), die Teile im Regal
+    (`spare_components`) und die anlegbaren Katalog-Gruppen (`available_groups`). Ein
+    Bereich mit vorhandener Instanz fehlt dort: dort ergänzt man Teile, statt eine
+    zweite Bremse anzulegen. Ein Laufrad bleibt wählbar (`has_active_instance`), weil
+    ein zweiter Satz der Normalfall ist; POST parkt ihn dann statt den ersten zu
+    verdrängen.
+
     POST legt eine neue Baugruppe komplett an (ein Dialog = eine Baugruppe).
     """
-
-    ASSEMBLY_PREFETCH = (
-        "group__templates",
-        "slots__template__group",
-        "slots__bike",
-        "slots__components__checks",
-        "intervals__logs",
-        "periods",
-    )
 
     def get_bike(self) -> Bike:
         return get_object_or_404(
@@ -1233,62 +1021,59 @@ class BikeAssemblyListView(AthleteMixin, APIView):
 
     def get(self, request, bike_id):
         bike = self.get_bike()
-        context = {"bike_total_km": bike.total_distance_km}
+        athlete = self.get_athlete()
+        # Ein gemeinsamer Context, damit die Fahrten nur einmal geladen werden.
+        context: dict = {}
 
         assemblies = (
             BikeAssembly.objects.filter(bike=bike)
-            .active()
             .select_related("group")
-            .prefetch_related(*self.ASSEMBLY_PREFETCH)
+            .prefetch_related(*_assembly_prefetch(athlete))
         )
-        assembly_data = BikeAssemblySerializer(
-            assemblies, many=True, context=context
-        ).data
 
-        # Abgezogen, aber nicht entsorgt — die Alternativen, zwischen denen der
-        # Wechsel-Dialog auswählen lässt.
-        parked = (
-            BikeAssembly.objects.filter(bike=bike)
-            .parked()
-            .select_related("group")
-            .prefetch_related(*self.ASSEMBLY_PREFETCH)
-        )
-        parked_data = BikeAssemblySerializer(
-            parked, many=True, context=dict(context)
-        ).data
+        def serialized(queryset):
+            return BikeAssemblySerializer(queryset, many=True, context=context).data
 
         ungrouped = (
             ComponentSlot.objects.filter(bike=bike, assembly__isnull=True)
             .select_related("template__group", "bike")
-            .prefetch_related("components__checks")
+            .prefetch_related("components__checks", "components__periods")
         )
-        ungrouped_data = ComponentSlotListSerializer(
-            ungrouped, many=True, context=dict(context)
-        ).data
 
-        spare_data = SpareComponentSerializer(
-            _spare_components_for_bike(bike), many=True
-        ).data
-
-        used_group_ids = set(assemblies.values_list("group_id", flat=True))
+        active_data = serialized(assemblies.active())
+        used_group_ids = set(assemblies.active().values_list("group_id", flat=True))
+        taken_areas = set(
+            assemblies.exclude(status=AssemblyStatus.RETIRED)
+            .filter(group__kind=GroupKind.AREA)
+            .values_list("group_id", flat=True)
+        )
         available = [
             g
-            for g in ComponentGroup.objects.prefetch_related("templates")
-            if g.applies_to(bike.bike_type)
+            for g in ComponentGroup.objects.prefetch_related(
+                _group_templates_prefetch(athlete)
+            )
+            if g.applies_to(bike.bike_type) and g.pk not in taken_areas
         ]
-        available_data = ComponentGroupSerializer(
-            available,
-            many=True,
-            context={"bike_type": bike.bike_type, "used_group_ids": used_group_ids},
-        ).data
 
         return Response(
             {
-                "assemblies": assembly_data,
-                "parked_assemblies": parked_data,
-                "ungrouped_slots": ungrouped_data,
-                "spare_components": spare_data,
-                "available_groups": available_data,
+                "assemblies": active_data,
+                "parked_assemblies": serialized(assemblies.parked()),
+                "retired_assemblies": serialized(assemblies.retired()),
+                "ungrouped_slots": ComponentSlotSerializer(
+                    ungrouped, many=True, context=context
+                ).data,
+                "spare_components": SpareComponentSerializer(
+                    _spare_components_for_bike(bike), many=True, context=context
+                ).data,
+                "available_groups": ComponentGroupSerializer(
+                    available,
+                    many=True,
+                    context={
+                        "bike_type": bike.bike_type,
+                        "used_group_ids": used_group_ids,
+                    },
+                ).data,
             }
         )
 
@@ -1314,6 +1099,23 @@ class BikeAssemblyListView(AthleteMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if group.kind == GroupKind.AREA:
+            existing = (
+                BikeAssembly.objects.filter(bike=bike, group=group)
+                .exclude(status=AssemblyStatus.RETIRED)
+                .first()
+            )
+            if existing is not None:
+                return Response(
+                    {
+                        "error": f"'{group.name}' gibt es an diesem Rad schon. Ergänze "
+                        "die Teile dort.",
+                        "code": "area_exists",
+                        "assembly_id": existing.pk,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         err = _validate_assembly_items(bike, group, data)
         if err:
             return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
@@ -1322,21 +1124,21 @@ class BikeAssemblyListView(AthleteMixin, APIView):
         # aber immer nur eine ist aufgezogen. Ohne explizites `activate` wird die
         # neue Instanz geparkt angelegt, solange die Gruppe belegt ist — die
         # bestehende soll nicht ungefragt verdrängt werden.
-        current = _active_sibling(bike, group)
+        current = lifecycle.active_sibling(bike, group)
         requested = data.get("activate")
         activate = (current is None) if requested is None else bool(requested)
 
         with transaction.atomic():
-            if activate and current is not None:
-                _park_assembly(current)
             assembly = _build_assembly_from_request(
-                bike, group, data, activate=activate
+                bike, group, data, activate=activate and current is None
             )
+            if data.get("linked_assembly_ids"):
+                lifecycle.set_links(assembly, data["linked_assembly_ids"], [])
+            if activate and current is not None:
+                lifecycle.activate_assembly(assembly, on=data.get("installed_at"))
 
         return Response(
-            BikeAssemblySerializer(
-                assembly, context={"bike_total_km": bike.total_distance_km}
-            ).data,
+            BikeAssemblySerializer(BikeAssembly.objects.get(pk=assembly.pk)).data,
             status=status.HTTP_201_CREATED,
         )
 
@@ -1344,126 +1146,41 @@ class BikeAssemblyListView(AthleteMixin, APIView):
 class BikeAssemblyDetailView(AthleteMixin, generics.RetrieveUpdateDestroyAPIView):
     """
     GET    /api/maintenance/assemblies/{pk}/
-    PATCH  /api/maintenance/assemblies/{pk}/   → name / installed_at
+    PATCH  /api/maintenance/assemblies/{pk}/   → name
+    DELETE /api/maintenance/assemblies/{pk}/?confirm=true
 
     Der Zustand (`status`) ist hier bewusst **nicht** schreibbar: ein Wechsel
-    muss über activate/retire/swap laufen, weil sonst die
-    `AssemblyUsagePeriod`-Buchführung ausbliebe und ein abgezogener Satz
-    weiter km sammeln würde.
-    DELETE /api/maintenance/assemblies/{pk}/ → **löst die Gruppierung auf**,
-    ohne Teile wegzuwerfen (siehe `perform_destroy`).
+    muss über activate/retire/restore laufen, sonst stimmten die Nutzungszeiträume
+    nicht mehr.
+
+    DELETE löscht endgültig, samt aller Teile und ihres Verlaufs — wer die Geschichte
+    behalten will, mustert aus. Deshalb die Pflicht-Bestätigung: vorher löste DELETE
+    nur die Gruppierung auf und hängte dabei auch die Teile eines Laufrads aus dem
+    Keller als "am Rad" zurück.
     """
 
     serializer_class = BikeAssemblySerializer
     http_method_names = ["get", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
+        athlete = self.get_athlete()
         return (
-            BikeAssembly.objects.filter(bike__athlete=self.get_athlete())
+            BikeAssembly.objects.filter(bike__athlete=athlete)
             .select_related("group", "bike")
-            .prefetch_related(
-                "group__templates",
-                "slots__template__group",
-                "slots__bike",
-                "slots__components__checks",
-                "intervals__logs",
-                "periods",
-            )
+            .prefetch_related(*_assembly_prefetch(athlete))
         )
 
-    def perform_destroy(self, instance: BikeAssembly):
-        """
-        Löst nur die Gruppierung auf — die Teile bleiben am Rad.
-
-        Vorher cascadierte das Löschen über Slots, Components, Intervalle und
-        Nutzungszeiträume: die Baugruppe wegzuwerfen hiess, die Teile samt
-        ihrer kompletten Verschleiss-Historie wegzuwerfen. Das ist fast nie
-        gemeint — wer eine Gruppierung loswerden will, will die Kette nicht
-        verlieren.
-
-        Slots und Intervalle werden stattdessen entkoppelt (`assembly = None`)
-        und tauchen danach unter "Ohne Baugruppe" wieder auf. Nur die
-        `BikeAssembly` selbst und ihre Nutzungszeiträume verschwinden — beide
-        beschreiben die Gruppierung, nicht die Teile.
-        """
-        conflicts = _ungrouped_template_conflicts(instance)
-        if conflicts:
-            raise ValidationError(
-                {
-                    "error": (
-                        "Auflösen nicht möglich: für "
-                        + ", ".join(sorted(conflicts))
-                        + " gibt es bereits einen Slot ohne Baugruppe. Bitte den "
-                        "dort zuerst auflösen oder das Teil ausbauen."
-                    ),
-                    "code": "ungrouped_conflict",
-                }
+    def destroy(self, request, *args, **kwargs):
+        assembly = self.get_object()
+        parts = Component.objects.filter(slot__assembly=assembly).count()
+        if parts and request.query_params.get("confirm") != "true":
+            return _confirm_required(
+                f"Damit verschwinden {parts} Teil(e) samt ihres Verlaufs. Zum "
+                "Aufbewahren der Geschichte stattdessen ausmustern.",
+                parts,
             )
-
-        with transaction.atomic():
-            ComponentSlot.objects.filter(assembly=instance).update(assembly=None)
-            MaintenanceInterval.objects.filter(assembly=instance).update(assembly=None)
-            instance.delete()
-
-
-def _ungrouped_template_conflicts(assembly: BikeAssembly) -> set[str]:
-    """
-    Templates, die beim Auflösen mit einem bestehenden ungruppierten Slot
-    kollidieren würden.
-
-    `ComponentSlot` erlaubt je (bike, template) nur **einen** Slot ohne
-    Baugruppe (`uniq_bike_template_ungrouped`). Hat das Bike also schon einen
-    ungruppierten Slot desselben Templates, liesse sich der Slot der Baugruppe
-    nicht danebenhängen — statt in einen IntegrityError zu laufen, wird der
-    Fall vorher erkannt und als 400 mit Klartext beantwortet.
-    """
-    template_ids = set(
-        ComponentSlot.objects.filter(assembly=assembly).values_list(
-            "template_id", flat=True
-        )
-    )
-    if not template_ids:
-        return set()
-    clashing = ComponentSlot.objects.filter(
-        bike=assembly.bike,
-        assembly__isnull=True,
-        template_id__in=template_ids,
-    ).select_related("template")
-    return {slot.template.name for slot in clashing}
-
-
-def _retire_assembly(
-    assembly: BikeAssembly,
-    on: datetime.date | None = None,
-    keep_slot_ids: "set[int] | None" = None,
-) -> None:
-    """
-    Baugruppe endgültig ausmustern (verkauft/entsorgt) — im Unterschied zum
-    Parken werden hier auch die Komponenten ausgebaut. `distance_at_retire` hält
-    den km-Stand fest, damit ein später erneuter Blick auf die Historie das Teil
-    korrekt abschneiden kann (siehe api/usage.py).
-
-    `keep_slot_ids` verschont einzelne Slots vom Ausbauen. Gebraucht beim
-    Teile-Erneuern (`AssemblySwapView`): dort werden die *nicht* angehakten
-    Teile in die neue Instanz übernommen statt weggeworfen — sie dürfen also
-    nicht als ausgebaut markiert werden.
-    """
-    on = on or datetime.date.today()
-    period = assembly.ensure_open_period()
-    if period is not None:
-        period.close(on, assembly.bike.total_distance_km)
-
-    components = Component.objects.filter(slot__assembly=assembly, is_mounted=True)
-    if keep_slot_ids:
-        components = components.exclude(slot_id__in=keep_slot_ids)
-    components.update(
-        is_mounted=False,
-        retired_at=on,
-        distance_at_retire=assembly.bike.total_distance_km,
-    )
-    assembly.status = AssemblyStatus.RETIRED
-    assembly.retired_at = on
-    assembly.save(update_fields=["status", "retired_at", "updated_at"])
+        assembly.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AssemblyAddItemView(AthleteMixin, APIView):
@@ -1484,10 +1201,11 @@ class AssemblyAddItemView(AthleteMixin, APIView):
     """
 
     def post(self, request, pk):
+        athlete = self.get_athlete()
         assembly = get_object_or_404(
             BikeAssembly.objects.select_related("group", "bike"),
             pk=pk,
-            bike__athlete=self.get_athlete(),
+            bike__athlete=athlete,
         )
         bike = assembly.bike
 
@@ -1495,9 +1213,20 @@ class AssemblyAddItemView(AthleteMixin, APIView):
         body.is_valid(raise_exception=True)
         data = body.validated_data
 
-        template = ComponentTemplate.objects.filter(
-            pk=data["template_id"], group=assembly.group
-        ).first()
+        if assembly.is_retired:
+            return Response(
+                {
+                    "error": f"'{assembly.display_name}' ist ausgemustert.",
+                    "code": "assembly_retired",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        template = (
+            ComponentTemplate.objects.visible_to(athlete)
+            .filter(pk=data["template_id"], group=assembly.group)
+            .first()
+        )
         if template is None:
             return Response(
                 {
@@ -1508,8 +1237,7 @@ class AssemblyAddItemView(AthleteMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        installed_at = data.get("installed_at") or datetime.date.today()
-        odometer = _odometer_at(bike, installed_at)
+        installed_at = data.get("installed_at") or ride_clock_now().date()
 
         if template.maintenance_kind == MaintenanceKind.CONSUMABLE:
             if MaintenanceInterval.objects.filter(
@@ -1531,12 +1259,10 @@ class AssemblyAddItemView(AthleteMixin, APIView):
                 interval_km=data.get("interval_km") or template.warn_km,
                 interval_days=data.get("interval_days") or template.warn_days,
                 last_done_at=installed_at,
-                last_done_distance_km=odometer,
+                km_baseline_at=moment_for(installed_at),
             )
             return Response(
-                MaintenanceIntervalSerializer(
-                    interval, context={"bike_total_km": bike.total_distance_km}
-                ).data,
+                MaintenanceIntervalSerializer(interval).data,
                 status=status.HTTP_201_CREATED,
             )
 
@@ -1553,175 +1279,134 @@ class AssemblyAddItemView(AthleteMixin, APIView):
             slot = ComponentSlot.objects.create(
                 bike=bike, assembly=assembly, template=template
             )
-            component = Component(
-                slot=slot,
+            component = lifecycle.add_component(
+                slot,
+                on=data.get("installed_at"),
                 brand=data.get("brand", ""),
                 model_name=data.get("model_name", ""),
-                installed_at=installed_at,
-                distance_at_install=odometer,
                 custom_warn_km=data.get("custom_warn_km"),
-                is_mounted=True,
             )
-            component.save()
-            # Ein nachtraeglich ergaenztes Teil kann aelter sein als die laufende
-            # Periode — dann muss die mitwandern, sonst zeigt es 0 km.
-            assembly.sync_open_period_start()
 
         return Response(
             ComponentSerializer(component).data, status=status.HTTP_201_CREATED
         )
 
 
-class AssemblyActivateView(AthleteMixin, APIView):
-    """
-    POST /api/maintenance/assemblies/{pk}/activate/
+def _plan_data(plan: lifecycle.ActivationPlan) -> dict:
+    """Der Wechsel in Worten — für die Vorschau und die Meldung danach."""
+    return {
+        "activate": [
+            {"id": a.pk, "name": a.display_name, "group_name": a.group.name}
+            for a in plan.activate
+        ],
+        "park": [
+            {"id": a.pk, "name": a.display_name, "group_name": a.group.name}
+            for a in plan.park
+        ],
+        "mount": [
+            {
+                "component_id": m.component.pk,
+                "label": m.component.label,
+                "slot_name": m.component.slot.display_name,
+                "replaces": m.replaces.label if m.replaces else None,
+            }
+            for m in plan.mount
+        ],
+        "unpaired": [
+            {
+                "component_id": component.pk,
+                "label": component.label,
+                "slot_name": component.slot.display_name,
+                "from_assembly": assembly.display_name,
+            }
+            for component, assembly in plan.unpaired
+        ],
+    }
 
-    Zieht eine geparkte Baugruppe auf (Winter-LRS montieren). Die bislang aktive
-    Instanz derselben `(bike, group)` wird dabei geparkt — nicht ausgemustert:
-    ihre Komponenten bleiben montiert, sie sammelt ab jetzt nur keine km und
-    keinen Wetter-Verschleiß mehr (siehe AssemblyUsagePeriod).
 
-    Anders als `swap/` haengt das **nicht** an `GroupKind`: Wechseln ist nicht
-    destruktiv, und es gibt reale Faelle ausserhalb der Laufraeder. In den
-    Produktivdaten hat ein Rad zwei "Bremse hinten"-Instanzen — Carbon-Belaege
-    (Yellow King) geparkt, Alu-Belaege (Die Blauen) aufgezogen — weil die
-    Belagsmischung zum Laufradsatz passen muss. Eine `kind`-Pruefung an dieser
-    Stelle haette genau diesen Wechsel blockiert.
-    """
+class AssemblyActionView(AthleteMixin, APIView):
+    """Gemeinsamer Rahmen der Aktionen auf einer Baugruppe."""
 
-    def post(self, request, pk):
-        assembly = get_object_or_404(
+    def get_assembly(self, pk: int) -> BikeAssembly:
+        return get_object_or_404(
             BikeAssembly.objects.select_related("group", "bike"),
             pk=pk,
             bike__athlete=self.get_athlete(),
         )
-        bike = assembly.bike
 
-        if assembly.is_retired:
-            return Response(
-                {
-                    "error": f"'{assembly.display_name}' ist ausgemustert und kann "
-                    "nicht wieder aufgezogen werden.",
-                    "code": "retired",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+    def serialized(self, pk: int) -> dict:
+        return dict(BikeAssemblySerializer(self.get_assembly(pk)).data)
 
-        if assembly.is_active:
-            return Response(
-                BikeAssemblySerializer(
-                    assembly, context={"bike_total_km": bike.total_distance_km}
-                ).data
-            )
-
-        with transaction.atomic():
-            current = _active_sibling(bike, assembly.group)
-            if current is not None:
-                _park_assembly(current)
-            _mount_assembly(assembly)
-
-        # Bewusst kein Celery-Recompute: der abgezogene Satz wurde in
-        # `_park_assembly()` final durchgerechnet, und der neu aufgezogene hat
-        # seit seinem letzten Abziehen keine Fahrt mitgemacht — seine Zahlen
-        # stehen also schon richtig. Der nächste Ride-Import rechnet ohnehin neu.
-        return Response(
-            BikeAssemblySerializer(
-                assembly, context={"bike_total_km": bike.total_distance_km}
-            ).data
-        )
+    def action_body(self, request) -> dict:
+        body = AssemblyActionSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        return body.validated_data
 
 
-class AssemblyRetireView(AthleteMixin, APIView):
+class AssemblyActivateView(AssemblyActionView):
+    """
+    GET  /api/maintenance/assemblies/{pk}/activate/ → was alles mitwechseln würde
+    POST /api/maintenance/assemblies/{pk}/activate/ → Body: { "on"?: "YYYY-MM-DD" }
+
+    Zieht eine geparkte Baugruppe auf (Carbon-Laufrad statt Alu). Das gekoppelte andere
+    Laufrad und die gekoppelten Teile (Bremsbeläge) wechseln mit, der bisher aufgezogene
+    Satz wird geparkt und behält seine Teile. Die Vorschau nutzt dieselbe Rechnung wie
+    die Ausführung, kann also nichts anderes versprechen, als dann passiert.
+    """
+
+    def get(self, request, pk):
+        return Response(_plan_data(lifecycle.plan_activation(self.get_assembly(pk))))
+
+    def post(self, request, pk):
+        assembly = self.get_assembly(pk)
+        on = self.action_body(request).get("on")
+        plan = lifecycle.activate_assembly(assembly, on=on)
+        return Response({**self.serialized(pk), "plan": _plan_data(plan)})
+
+
+class AssemblyRetireView(AssemblyActionView):
     """
     POST /api/maintenance/assemblies/{pk}/retire/
+    Body: { "on"?: "YYYY-MM-DD", "with_linked"?: true }
 
-    Mustert eine Baugruppe endgültig aus (verkauft/entsorgt). Anders als beim
-    Parken werden die Komponenten ausgebaut; die Instanz bleibt als Historie
-    erhalten, taucht aber nicht mehr in der Wechsel-Auswahl auf.
+    Mustert eine Baugruppe aus (verkauft/entsorgt), mit `with_linked` den ganzen Satz.
+    Die montierten Teile werden mit ausgemustert, die Instanz bleibt als Historie
+    erhalten.
     """
 
     def post(self, request, pk):
-        assembly = get_object_or_404(
-            BikeAssembly.objects.select_related("group", "bike"),
-            pk=pk,
-            bike__athlete=self.get_athlete(),
+        body = self.action_body(request)
+        lifecycle.retire_assembly(
+            self.get_assembly(pk), on=body.get("on"), with_linked=body["with_linked"]
         )
-        bike = assembly.bike
-
-        with transaction.atomic():
-            _retire_assembly(assembly)
-
-        return Response(
-            BikeAssemblySerializer(
-                assembly, context={"bike_total_km": bike.total_distance_km}
-            ).data
-        )
+        return Response(self.serialized(pk))
 
 
-class AssemblySwapView(AthleteMixin, APIView):
-    """
-    POST /api/maintenance/assemblies/{pk}/swap/
-
-    "Teile erneuern": die alte Instanz wird ausgemustert (Komponenten ausgebaut),
-    eine neue aktive Instanz derselben `group` wird mit frischen Komponenten/
-    Intervallen angelegt. Body identisch zu POST /bikes/{id}/assemblies/
-    (group_id optional, wird aus der alten Instanz übernommen).
-
-    Nicht zu verwechseln mit `activate/`: dort wird zwischen zwei *bestehenden*
-    Sätzen gewechselt, hier wird der alte Satz durch neue Teile ersetzt.
-    """
+class AssemblyRestoreView(AssemblyActionView):
+    """POST /api/maintenance/assemblies/{pk}/restore/ — holt sie aus der Historie zurück."""
 
     def post(self, request, pk):
-        old = get_object_or_404(
-            BikeAssembly.objects.select_related("group", "bike"),
-            pk=pk,
-            bike__athlete=self.get_athlete(),
-        )
-        bike = old.bike
-        group = old.group
+        lifecycle.restore_assembly(self.get_assembly(pk))
+        return Response(self.serialized(pk))
 
-        body = AssemblyCreateRequestSerializer(data=request.data)
+
+class AssemblyLinksView(AssemblyActionView):
+    """
+    PUT /api/maintenance/assemblies/{pk}/links/
+    Body: { "assembly_ids": [8], "component_ids": [42] }
+
+    Legt fest, was beim Aufziehen mitwechselt. Ersetzt die bisherige Auswahl.
+    """
+
+    def put(self, request, pk):
+        body = AssemblyLinksSerializer(data=request.data)
         body.is_valid(raise_exception=True)
-        data = body.validated_data
-
-        if group.kind != GroupKind.ASSEMBLY:
-            return Response(
-                {
-                    "error": f"'{group.name}' ist ein Bereich, keine Baugruppe — "
-                    "die Teile darin verschleißen unabhängig und werden einzeln "
-                    "getauscht.",
-                    "code": "not_an_assembly",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        err = _validate_assembly_items(bike, group, data)
-        if err:
-            return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Nicht angehakte Teile bleiben am Rad: ihre Slots dürfen beim Ausmustern
-        # der alten Instanz nicht ausgebaut werden, sie ziehen gleich um.
-        keep = {
-            slot.id
-            for template_id, slot in _carry_over_slots(old).items()
-            if not any(
-                item["template_id"] == template_id and item["include"]
-                for item in data.get("parts", [])
-            )
-        }
-
-        with transaction.atomic():
-            _retire_assembly(old, keep_slot_ids=keep)
-            new_assembly = _build_assembly_from_request(
-                bike, group, data, carry_over_from=old
-            )
-
-        return Response(
-            BikeAssemblySerializer(
-                new_assembly, context={"bike_total_km": bike.total_distance_km}
-            ).data,
-            status=status.HTTP_201_CREATED,
+        lifecycle.set_links(
+            self.get_assembly(pk),
+            body.validated_data["assembly_ids"],
+            body.validated_data["component_ids"],
         )
+        return Response(self.serialized(pk))
 
 
 class MaintenanceIntervalListCreateView(AthleteMixin, APIView):
@@ -1739,6 +1424,7 @@ class MaintenanceIntervalListCreateView(AthleteMixin, APIView):
         if data.get("assembly"):
             assembly = get_object_or_404(BikeAssembly, pk=data["assembly"], bike=bike)
 
+        last_done_at = data.get("last_done_at") or ride_clock_now().date()
         interval = MaintenanceInterval.objects.create(
             bike=bike,
             assembly=assembly,
@@ -1746,14 +1432,12 @@ class MaintenanceIntervalListCreateView(AthleteMixin, APIView):
             label=data["label"],
             interval_km=data.get("interval_km"),
             interval_days=data.get("interval_days"),
-            last_done_at=data.get("last_done_at") or datetime.date.today(),
-            last_done_distance_km=bike.total_distance_km,
+            last_done_at=last_done_at,
+            km_baseline_at=moment_for(last_done_at),
             notes=data.get("notes", ""),
         )
         return Response(
-            MaintenanceIntervalSerializer(
-                interval, context={"bike_total_km": bike.total_distance_km}
-            ).data,
+            MaintenanceIntervalSerializer(interval).data,
             status=status.HTTP_201_CREATED,
         )
 
@@ -1773,51 +1457,41 @@ class MaintenanceIntervalDetailView(
     def get_queryset(self):
         return (
             MaintenanceInterval.objects.filter(bike__athlete=self.get_athlete())
-            .select_related("bike")
-            .prefetch_related("logs")
+            .select_related("bike", "assembly")
+            .prefetch_related("logs", "assembly__periods")
         )
 
 
 class MaintenanceIntervalLogView(AthleteMixin, APIView):
     """
-    POST /api/maintenance/intervals/{pk}/log/
-    Body: { "done_at"?: "YYYY-MM-DD", "done_distance_km"?: float, "note"?: str }
+    POST   /api/maintenance/intervals/{pk}/log/  Body: { "done_at"?, "note"? }
+    DELETE /api/maintenance/intervals/{pk}/log/  → nimmt den letzten Eintrag zurück
 
     "Erledigt / Erneuert": setzt die km-/Tage-Baseline zurück und hängt einen
     MaintenanceLog an.
     """
 
-    def post(self, request, pk):
-        interval = get_object_or_404(
-            MaintenanceInterval, pk=pk, bike__athlete=self.get_athlete()
+    def get_interval(self, pk: int) -> MaintenanceInterval:
+        return get_object_or_404(
+            MaintenanceInterval.objects.select_related("assembly"),
+            pk=pk,
+            bike__athlete=self.get_athlete(),
         )
+
+    def post(self, request, pk):
+        interval = self.get_interval(pk)
         body = MaintenanceIntervalLogRequestSerializer(data=request.data)
         body.is_valid(raise_exception=True)
         data = body.validated_data
-
-        done_at = data.get("done_at") or datetime.date.today()
-        done_km = data.get("done_distance_km")
-        if done_km is None:
-            done_km = interval.bike.total_distance_km
-
-        with transaction.atomic():
-            MaintenanceLog.objects.create(
-                interval=interval,
-                done_at=done_at,
-                done_distance_km=done_km,
-                note=data.get("note", ""),
-            )
-            interval.last_done_at = done_at
-            interval.last_done_distance_km = done_km
-            interval.save(
-                update_fields=["last_done_at", "last_done_distance_km", "updated_at"]
-            )
-
-        return Response(
-            MaintenanceIntervalSerializer(
-                interval, context={"bike_total_km": interval.bike.total_distance_km}
-            ).data
+        lifecycle.log_interval_done(
+            interval, done_on=data.get("done_at"), note=data.get("note", "")
         )
+        return Response(MaintenanceIntervalSerializer(interval).data)
+
+    def delete(self, request, pk):
+        interval = self.get_interval(pk)
+        lifecycle.undo_interval_log(interval)
+        return Response(MaintenanceIntervalSerializer(interval).data)
 
 
 # ── "Kudo" — KI-Assistent fuers Bike-Anlegen ─────────────────────────────────

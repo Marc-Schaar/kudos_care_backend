@@ -10,7 +10,9 @@ from app_maintenance.models import (
     ComponentCheck,
     ComponentGroup,
     ComponentSlot,
+    ComponentStatus,
     ComponentTemplate,
+    ComponentUsagePeriod,
     MaintenanceInterval,
     MaintenanceIntervalKind,
     MaintenanceKind,
@@ -20,7 +22,13 @@ from app_maintenance.models import (
     worst_of,
 )
 
-from .usage import component_active_km
+from .usage import (
+    RideLedger,
+    assembly_windows,
+    component_km,
+    moment_for,
+    ride_clock_now,
+)
 
 
 def bike_total_km(context: dict, bike: Bike) -> float | None:
@@ -31,17 +39,24 @@ def bike_total_km(context: dict, bike: Bike) -> float | None:
     diesen Cache liest jeder Slot und jedes Intervall es erneut; in der
     Bike-Liste waren das gemessen 18 identische `SUM`-Queries pro Bike.
 
-    Views, die genau ein Bike serialisieren, legen den Wert vorab als
-    `context["bike_total_km"]` ab (siehe `BikeAssemblySerializer` und
-    `api/views.py`); dieser Schlüssel hat Vorrang. Sonst wird je Bike-PK
-    gecacht, damit ein Context über mehrere Bikes hinweg nicht die Zahl des
-    falschen Bikes zurückgibt.
+    Wird je Bike-PK gecacht, damit ein Context über mehrere Bikes hinweg nicht die
+    Zahl des falschen Bikes zurückgibt.
     """
-    if "bike_total_km" in context:
-        return context["bike_total_km"]
     key = f"_bike_km_{bike.pk}"
     if key not in context:
         context[key] = bike.total_distance_km
+    return context[key]
+
+
+def ride_ledger(context: dict, bike_id: int) -> RideLedger:
+    """
+    Die Fahrten eines Bikes — einmal je Request und Bike geladen, nicht je Teil. Die
+    Anzahl der Teile darf die Anzahl der Queries nicht beeinflussen (siehe
+    test_query_counts.py).
+    """
+    key = f"_ride_ledger_{bike_id}"
+    if key not in context:
+        context[key] = RideLedger.for_bike(bike_id)
     return context[key]
 
 
@@ -63,104 +78,73 @@ def slots_on_bike(bike: Bike) -> list[ComponentSlot]:
 
 
 def compute_wear(
-    component: Component, bike_total_km: float | None, as_of: date | None = None
+    component: Component, ledger: RideLedger | None = None, as_of: date | None = None
 ) -> dict:
     """
-    Berechnet Verschleiß und Warn-Status für eine montierte Komponente.
-    Gibt ein Dict zurück das direkt im Serializer verwendet wird.
+    Berechnet Verschleiß und Warn-Status einer Komponente. Gibt ein Dict zurück das
+    direkt im Serializer verwendet wird.
 
-    `wear_km`/`wear_days` sind informative Totalwerte seit Einbau. Der
-    Warn-Status wird dagegen — falls eine Prüfung (ComponentCheck) vorliegt —
-    ab dem Zeitpunkt der letzten Prüfung neu berechnet ("Freigeben"), mit dem
-    dabei angegebenen Snooze-Intervall (falls keins angegeben wurde, gilt ab
-    der Prüfung wieder die normale empfohlene/individuelle Lebensdauer).
+    `wear_km`/`wear_days` sind informative Totalwerte seit dem ersten Einbau. Der
+    Warn-Status wird dagegen — falls eine Prüfung (ComponentCheck) vorliegt — ab dem
+    Zeitpunkt der letzten Prüfung neu berechnet ("Freigeben"), mit dem dabei
+    angegebenen Snooze-Intervall (falls keins angegeben wurde, gilt ab der Prüfung
+    wieder die normale empfohlene/individuelle Lebensdauer).
 
-    Die km-Achse rechnet über `api/usage.py` nur die Abschnitte, in denen die
-    Baugruppe tatsächlich am Rad war — ein abgezogener Laufradsatz sammelt keine
-    km, während das Bike auf dem anderen Satz weiterfährt. Die Tage-Achse zählt
-    bewusst durchgehend weiter (Gummi/Dichtmilch altern auch im Keller).
+    Die km kommen aus den Fahrten in den Nutzungszeiträumen des Teils (siehe
+    api/usage.py) — Zeiten im Regal oder auf einem abgezogenen Laufrad zählen nicht.
+    Die Tage-Achse zählt bewusst durchgehend weiter (Gummi/Dichtmilch altern auch im
+    Keller) und bleibt erst beim Ausmustern stehen.
+
+    `wear_ratio` ist der verbrauchte Anteil der Lebensdauer auf der schlechtesten
+    Achse — damit lassen sich Teile untereinander und gegen Intervalle sortieren.
 
     `as_of` erlaubt eine Projektion auf ein zukünftiges Datum (siehe
     app_notifications — "voraussichtlich unsafe bei nächster Fahrt"): nur die
-    Tage-Achse wird dadurch wirklich projiziert, `bike_total_km` bleibt der
-    übergebene (heutige) Wert, da zukünftige Distanz nicht bekannt ist. Default
-    (None) = heute, identisch zum bisherigen Verhalten.
+    Tage-Achse wird dadurch wirklich projiziert, die km bleiben beim heutigen Stand,
+    da zukünftige Distanz nicht bekannt ist. Default (None) = heute.
     """
     as_of = as_of or date.today()
+    if component.is_retired and component.retired_at:
+        as_of = min(as_of, component.retired_at)
+    ledger = ledger or RideLedger.for_bike(component.slot.bike_id)
     warn_km = component.effective_warn_km
     warn_days = component.effective_warn_days
 
-    result = {
-        "wear_km": None,
-        "wear_days": None,
-        "warn_status_km": WarnLevel.UNKNOWN,
-        "warn_status_days": WarnLevel.UNKNOWN,
-        "warn_status_weather_km": WarnLevel.UNKNOWN,
-        "warn_status_overall": WarnLevel.UNKNOWN,
-    }
-
-    # ── km-Verschleiß (informativ, seit Einbau, ohne Parkzeiten) ──────────────
-    # + carried_over_wear_km: km, die vor einem früheren Ausbau schon aufgelaufen
-    # waren (siehe Component.carried_over_wear_km) — component_active_km() sieht
-    # nur die Perioden der *aktuellen* Baugruppe, eine reaktivierte Komponente
-    # würde sonst wieder bei 0 anfangen.
-    active_km = component_active_km(component, bike_total_km)
-    carried_km = component.carried_over_wear_km
-    if active_km is None and carried_km is None:
-        result["wear_km"] = None
-    else:
-        result["wear_km"] = round((active_km or 0.0) + (carried_km or 0.0), 1)
-
-    # ── Tage-Verschleiß (informativ, seit Einbau) ─────────────────────────────
-    if component.installed_at:
-        result["wear_days"] = (as_of - component.installed_at).days
+    wear_km = round(component_km(component, ledger) + (component.prior_km or 0.0), 1)
+    # max(): direkt nach Mitternacht kann der Server (UTC) noch beim Vortag sein.
+    wear_days = (
+        max((as_of - component.installed_at).days, 0)
+        if component.installed_at
+        else None
+    )
 
     # ── Status-Baseline: letzte Prüfung falls vorhanden, sonst Einbau ────────
     latest_check = component.checks.first()
-
     if latest_check is not None:
-        km_since_check = (
-            component_active_km(
-                component,
-                bike_total_km,
-                since_km=latest_check.checked_at_distance_km,
-            )
-            if latest_check.checked_at_distance_km is not None
-            else None
+        km_for_status = component_km(
+            component, ledger, since=latest_check.baseline_moment()
         )
-        if km_since_check is not None:
-            threshold_km = latest_check.snooze_km or warn_km
-            if threshold_km:
-                result["warn_status_km"] = warn_status_from_ratio(
-                    km_since_check / threshold_km
-                )
-            else:
-                result["warn_status_km"] = WarnLevel.OK
-
-        days_since_check = (as_of - latest_check.checked_at).days
+        days_for_status = max((as_of - latest_check.checked_at).days, 0)
+        threshold_km = latest_check.snooze_km or warn_km
         threshold_days = latest_check.snooze_days or warn_days
-        if threshold_days:
-            result["warn_status_days"] = warn_status_from_ratio(
-                days_since_check / threshold_days
-            )
-        else:
-            result["warn_status_days"] = WarnLevel.OK
     else:
-        if result["wear_km"] is not None:
-            if warn_km:
-                result["warn_status_km"] = warn_status_from_ratio(
-                    result["wear_km"] / warn_km
-                )
-            else:
-                result["warn_status_km"] = WarnLevel.OK
+        km_for_status = wear_km
+        days_for_status = wear_days
+        threshold_km = warn_km
+        threshold_days = warn_days
 
-        if result["wear_days"] is not None:
-            if warn_days:
-                result["warn_status_days"] = warn_status_from_ratio(
-                    result["wear_days"] / warn_days
-                )
-            else:
-                result["warn_status_days"] = WarnLevel.OK
+    def axis_status(
+        value: float | None, threshold: float | None
+    ) -> tuple[str, float | None]:
+        if value is None:
+            return WarnLevel.UNKNOWN, None
+        if not threshold:
+            return WarnLevel.OK, None
+        ratio = value / threshold
+        return warn_status_from_ratio(ratio), ratio
+
+    status_km, ratio_km = axis_status(km_for_status, threshold_km)
+    status_days, ratio_days = axis_status(days_for_status, threshold_days)
 
     # ── Wetter-gewichteter km-Verschleiß ──────────────────────────────────────
     # component.weather_wear_km wird asynchron von WeatherWearService befüllt
@@ -170,34 +154,43 @@ def compute_wear(
     # Baseline (checked_at_weather_wear_km) gerechnet, sonst bleibt eine
     # Freigabe für diese Achse wirkungslos und die Komponente erscheint trotz
     # "Freigeben" weiter als überfällig.
+    weather_km_for_status = None
     if component.weather_wear_km is not None:
-        if (
-            latest_check is not None
-            and latest_check.checked_at_weather_wear_km is not None
-        ):
-            weather_km_since_check = (
-                component.weather_wear_km - latest_check.checked_at_weather_wear_km
-            )
-        else:
-            weather_km_since_check = component.weather_wear_km
+        baseline = latest_check.checked_at_weather_wear_km if latest_check else None
+        weather_km_for_status = component.weather_wear_km - (baseline or 0.0)
+    status_weather, ratio_weather = axis_status(weather_km_for_status, warn_km)
 
-        if warn_km:
-            result["warn_status_weather_km"] = warn_status_from_ratio(
-                weather_km_since_check / warn_km
-            )
-        else:
-            result["warn_status_weather_km"] = WarnLevel.OK
+    ratios = [r for r in (ratio_km, ratio_days, ratio_weather) if r is not None]
 
-    # ── Gesamt-Status = schlechtester Einzelwert ──────────────────────────────
-    result["warn_status_overall"] = worst_of(
-        [
-            result["warn_status_km"],
-            result["warn_status_days"],
-            result["warn_status_weather_km"],
-        ]
-    )
+    return {
+        "wear_km": wear_km,
+        "wear_days": wear_days,
+        "wear_ratio": round(max(ratios), 3) if ratios else None,
+        "warn_status_km": status_km,
+        "warn_status_days": status_days,
+        "warn_status_weather_km": status_weather,
+        # Gesamt-Status = schlechtester Einzelwert
+        "warn_status_overall": worst_of([status_km, status_days, status_weather]),
+    }
 
-    return result
+
+def bike_warn_status(context: dict, bike: Bike) -> str:
+    """
+    Die Ampel eines Bikes: schlechtester Wert über alles, was gerade wirklich am Rad
+    ist. Teile und Intervalle einer geparkten oder ausgemusterten Baugruppe zählen
+    nicht — die überfällige Dichtmilch eines längst entsorgten Laufrads färbte das Rad
+    sonst dauerhaft rot.
+    """
+    ledger = ride_ledger(context, bike.pk)
+    statuses: list[str] = []
+    for slot in slots_on_bike(bike):
+        comp = slot.mounted_component
+        if comp is not None:
+            statuses.append(compute_wear(comp, ledger)["warn_status_overall"])
+    for interval in bike.intervals.all():
+        if interval.is_on_bike:
+            statuses.append(interval.status(ledger))
+    return worst_of(statuses)
 
 
 class ComponentTemplateSerializer(serializers.ModelSerializer[ComponentTemplate]):
@@ -226,11 +219,12 @@ class ComponentTemplateSerializer(serializers.ModelSerializer[ComponentTemplate]
             "supports_condition_estimate",
             "maintenance_kind",
             "default_in_group",
+            "follows_wheel",
             "notes",
             "group",
             "group_name",
         ]
-        read_only_fields = ["is_system"]
+        read_only_fields = ["is_system", "follows_wheel"]
 
 
 class ComponentCheckSerializer(serializers.ModelSerializer[ComponentCheck]):
@@ -241,7 +235,6 @@ class ComponentCheckSerializer(serializers.ModelSerializer[ComponentCheck]):
         fields = [
             "id",
             "checked_at",
-            "checked_at_distance_km",
             "checked_at_weather_wear_km",
             "condition_pct",
             "snooze_km",
@@ -250,33 +243,67 @@ class ComponentCheckSerializer(serializers.ModelSerializer[ComponentCheck]):
         ]
 
 
+class ComponentUsagePeriodSerializer(serializers.ModelSerializer[ComponentUsagePeriod]):
+    """Ein Einsatz des Teils — das, was der Verlauf zeigt."""
+
+    km = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ComponentUsagePeriod
+        fields = ["id", "started_at", "ended_at", "km"]
+
+    def get_km(self, obj: ComponentUsagePeriod) -> float:
+        ledger = self.context.get("ledger")
+        if ledger is None:
+            return 0.0
+        return round(ledger.km_between(obj.started_at, obj.ended_at), 1)
+
+
 class ComponentSerializer(serializers.ModelSerializer[Component]):
+    """
+    Ein Teil, egal ob montiert, im Regal oder ausgemustert. `status` ist hier bewusst
+    read-only: ein Wechsel muss über mount/unmount/retire/restore laufen, sonst bliebe
+    der Nutzungszeitraum offen und das Teil sammelte weiter km.
+    """
+
+    label = serializers.CharField(read_only=True)
+    is_mounted = serializers.BooleanField(read_only=True)
+    effective_warn_km = serializers.FloatField(read_only=True)
+    effective_warn_days = serializers.IntegerField(read_only=True)
+    condition_pct = serializers.SerializerMethodField()
     wear_km = serializers.SerializerMethodField()
     wear_days = serializers.SerializerMethodField()
+    wear_ratio = serializers.SerializerMethodField()
     warn_status_km = serializers.SerializerMethodField()
     warn_status_days = serializers.SerializerMethodField()
     warn_status_weather_km = serializers.SerializerMethodField()
     warn_status_overall = serializers.SerializerMethodField()
     last_check = serializers.SerializerMethodField()
+    periods = serializers.SerializerMethodField()
 
     class Meta:
         model = Component
         fields = [
             "id",
             "slot",
+            "label",
             "brand",
             "model_name",
-            "distance_at_install",
+            "status",
+            "is_mounted",
             "installed_at",
             "retired_at",
-            "is_mounted",
+            "prior_km",
             "notes",
             "custom_warn_km",
             "custom_warn_days",
+            "effective_warn_km",
+            "effective_warn_days",
             "created_at",
             "updated_at",
             "wear_km",
             "wear_days",
+            "wear_ratio",
             "warn_status_km",
             "warn_status_days",
             "weather_wear_km",
@@ -284,10 +311,14 @@ class ComponentSerializer(serializers.ModelSerializer[Component]):
             "weather_wear_ride_count",
             "warn_status_weather_km",
             "warn_status_overall",
+            "condition_pct",
             "last_check",
+            "periods",
         ]
         read_only_fields = [
             "slot",
+            "status",
+            "retired_at",
             "created_at",
             "updated_at",
             "weather_wear_km",
@@ -295,19 +326,37 @@ class ComponentSerializer(serializers.ModelSerializer[Component]):
             "weather_wear_ride_count",
         ]
 
+    def validate_installed_at(self, value):
+        if value is not None and value > ride_clock_now().date():
+            raise serializers.ValidationError(
+                "Das Einbaudatum darf nicht in der Zukunft liegen."
+            )
+        return value
+
+    def _ledger(self, obj: Component) -> RideLedger:
+        return ride_ledger(cast(dict, self.context), obj.slot.bike_id)
+
+    def get_condition_pct(self, obj: Component) -> int | None:
+        latest_check = obj.checks.first()
+        return latest_check.condition_pct if latest_check else None
+
     def get_last_check(self, obj):
         latest_check = obj.checks.first()
         if latest_check is None:
             return None
         return ComponentCheckSerializer(latest_check).data
 
+    def get_periods(self, obj: Component):
+        return ComponentUsagePeriodSerializer(
+            obj.periods.all(), many=True, context={"ledger": self._ledger(obj)}
+        ).data
+
     def _get_wear(self, obj: Component) -> dict:
         """Wear-Dict einmal berechnen und im Serializer-Context cachen."""
         context = cast(dict, self.context)
         cache_key = f"_wear_{obj.pk}"
         if cache_key not in context:
-            bike = obj.slot.bike
-            context[cache_key] = compute_wear(obj, bike_total_km(context, bike))
+            context[cache_key] = compute_wear(obj, self._ledger(obj))
         return context[cache_key]
 
     def get_wear_km(self, obj):
@@ -315,6 +364,9 @@ class ComponentSerializer(serializers.ModelSerializer[Component]):
 
     def get_wear_days(self, obj):
         return self._get_wear(obj)["wear_days"]
+
+    def get_wear_ratio(self, obj):
+        return self._get_wear(obj)["wear_ratio"]
 
     def get_warn_status_km(self, obj):
         return self._get_wear(obj)["warn_status_km"]
@@ -328,24 +380,41 @@ class ComponentSerializer(serializers.ModelSerializer[Component]):
     def get_warn_status_overall(self, obj):
         return self._get_wear(obj)["warn_status_overall"]
 
-    def validate(self, attrs):
-        """Stellt sicher dass is_mounted=True nicht doppelt vergeben wird."""
-        is_mounted = attrs.get(
-            "is_mounted", getattr(self.instance, "is_mounted", False)
-        )
-        slot = attrs.get("slot", getattr(self.instance, "slot", None))
 
-        if is_mounted and slot:
-            qs = Component.objects.filter(slot=slot, is_mounted=True)
-            if self.instance:
-                qs = qs.exclude(pk=self.instance.pk)
-            if qs.exists():
-                raise serializers.ValidationError(
-                    {
-                        "is_mounted": "In diesem Slot ist bereits eine Komponente montiert."
-                    }
-                )
-        return attrs
+class ComponentCreateSerializer(serializers.Serializer):
+    """Body für POST /slots/{id}/components/."""
+
+    brand = serializers.CharField(
+        max_length=100, required=False, allow_blank=True, default=""
+    )
+    model_name = serializers.CharField(
+        max_length=100, required=False, allow_blank=True, default=""
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+    custom_warn_km = serializers.FloatField(
+        required=False, allow_null=True, min_value=0
+    )
+    custom_warn_days = serializers.IntegerField(
+        required=False, allow_null=True, min_value=0
+    )
+    prior_km = serializers.FloatField(required=False, allow_null=True, min_value=0)
+    # Gleich aufziehen (und das bisherige Teil abnehmen) oder nur ins Regal legen.
+    mount = serializers.BooleanField(required=False, default=True)
+    # Seit wann das Teil dran ist; ohne Angabe ab jetzt. Nur mit `mount` relevant.
+    installed_at = serializers.DateField(required=False, allow_null=True)
+
+
+class ComponentActionSerializer(serializers.Serializer):
+    """Body für mount/unmount/retire: optional, an welchem Tag das passiert ist."""
+
+    on = serializers.DateField(required=False, allow_null=True)
+
+
+class ComponentMoveSerializer(ComponentActionSerializer):
+    """Body für POST /components/{id}/move/."""
+
+    slot_id = serializers.IntegerField()
+    mount = serializers.BooleanField(required=False, default=True)
 
 
 class ComponentCheckCreateSerializer(serializers.Serializer):
@@ -376,56 +445,11 @@ class ComponentCheckCreateSerializer(serializers.Serializer):
         return attrs
 
 
-class ComponentMountSerializer(serializers.Serializer):
-    """
-    Vereinfachter Serializer für die mount/unmount-Aktionen.
-    POST /slots/{id}/mount/   → montiert eine vorhandene Component
-    POST /slots/{id}/unmount/ → baut die montierte Komponente aus
-    """
-
-    component_id = serializers.IntegerField(required=False)
-
-
 class ComponentSlotSerializer(serializers.ModelSerializer[ComponentSlot]):
-    display_name = serializers.CharField(read_only=True)
-    template_detail = ComponentTemplateSerializer(source="template", read_only=True)
-    mounted_component = serializers.SerializerMethodField()
-    components = ComponentSerializer(many=True, read_only=True)
-
-    warn_status = serializers.SerializerMethodField()
-
-    class Meta:
-        model = ComponentSlot
-        fields = [
-            "id",
-            "bike",
-            "template",
-            "template_detail",
-            "custom_name",
-            "display_name",
-            "warn_status",
-            "mounted_component",
-            "components",
-        ]
-        read_only_fields = ["bike", "display_name"]
-
-    def get_mounted_component(self, obj: ComponentSlot):
-        comp = obj.mounted_component
-        if comp is None:
-            return None
-        return ComponentSerializer(comp, context=self.context).data
-
-    def get_warn_status(self, obj: ComponentSlot) -> str:
-        comp = obj.mounted_component
-        if comp is None:
-            return WarnLevel.UNKNOWN
-        wear = compute_wear(comp, bike_total_km(cast(dict, self.context), obj.bike))
-        return wear["warn_status_overall"]
-
-
-class ComponentSlotListSerializer(serializers.ModelSerializer[ComponentSlot]):
     """
-    Kompakte Variante für Listen — ohne verschachtelte Components.
+    Ein Platz am Rad mit allem, was dort je saß: das montierte Teil, die Ersatzteile im
+    Regal und die ausgemusterten. Die Art des Platzes (`template`) steht fest und ist
+    nur beim Anlegen wählbar.
     """
 
     display_name = serializers.CharField(read_only=True)
@@ -436,96 +460,103 @@ class ComponentSlotListSerializer(serializers.ModelSerializer[ComponentSlot]):
     template_detail = ComponentTemplateSerializer(source="template", read_only=True)
     warn_status = serializers.SerializerMethodField()
     mounted_component = serializers.SerializerMethodField()
+    spare_components = serializers.SerializerMethodField()
+    retired_components = serializers.SerializerMethodField()
 
     class Meta:
         model = ComponentSlot
         fields = [
             "id",
             "bike",
+            "assembly",
             "template",
             "template_detail",
+            "custom_name",
             "display_name",
             "category",
             "category_display",
             "warn_status",
             "mounted_component",
+            "spare_components",
+            "retired_components",
         ]
+        read_only_fields = ["bike", "assembly", "template"]
 
-    def _get_wear(self, comp: Component, obj: ComponentSlot) -> dict:
-        """Wear-Dict einmal berechnen und im Serializer-Context cachen (wird von
-        get_warn_status und get_mounted_component gemeinsam genutzt)."""
-        context = cast(dict, self.context)
-        cache_key = f"_wear_{comp.pk}"
-        if cache_key not in context:
-            context[cache_key] = compute_wear(comp, bike_total_km(context, obj.bike))
-        return context[cache_key]
+    def _parts(self, obj: ComponentSlot, status: str):
+        parts = [c for c in obj.components.all() if c.status == status]
+        return ComponentSerializer(parts, many=True, context=self.context).data
 
     def get_warn_status(self, obj: ComponentSlot) -> str:
         comp = obj.mounted_component
         if comp is None:
             return WarnLevel.UNKNOWN
-        return self._get_wear(comp, obj)["warn_status_overall"]
+        return compute_wear(comp, ride_ledger(cast(dict, self.context), obj.bike_id))[
+            "warn_status_overall"
+        ]
 
     def get_mounted_component(self, obj: ComponentSlot):
         comp = obj.mounted_component
         if comp is None:
             return None
-        latest_check = comp.checks.first()
-        wear = self._get_wear(comp, obj)
-        return {
-            "id": comp.id,
-            "brand": comp.brand,
-            "model_name": comp.model_name,
-            "installed_at": comp.installed_at,
-            "condition_pct": latest_check.condition_pct if latest_check else None,
-            "wear_km": wear["wear_km"],
-            "wear_days": wear["wear_days"],
-            "effective_warn_km": comp.effective_warn_km,
-            "effective_warn_days": comp.effective_warn_days,
-            "warn_status_overall": wear["warn_status_overall"],
-            "weather_wear_km": comp.weather_wear_km,
-            "weather_wear_ride_count": comp.weather_wear_ride_count,
-            "warn_status_weather_km": wear["warn_status_weather_km"],
-        }
+        return ComponentSerializer(comp, context=self.context).data
+
+    def get_spare_components(self, obj: ComponentSlot):
+        return self._parts(obj, ComponentStatus.SPARE)
+
+    def get_retired_components(self, obj: ComponentSlot):
+        return self._parts(obj, ComponentStatus.RETIRED)
 
 
 class SpareComponentSerializer(serializers.ModelSerializer[Component]):
     """
-    Ein ausgebautes Teil als Übernahme-Vorschlag beim Baugruppe-Anlegen (siehe
-    `_spare_components_by_template`) — Pendant zu `ComponentSlotListSerializer`s
-    `mounted_component` für den Fall, dass das Teil gerade *nicht* montiert ist.
+    Ein Teil im Regal, mit seiner Herkunft — für die Übernahme auf einen anderen Platz
+    (`POST components/{id}/move/`). `orphaned` heißt: seine Baugruppe ist ausgemustert,
+    es braucht also einen neuen Platz, bevor es wieder aufgezogen werden kann.
     """
 
     template = serializers.IntegerField(source="slot.template_id", read_only=True)
+    slot_name = serializers.CharField(source="slot.display_name", read_only=True)
+    assembly = serializers.IntegerField(source="slot.assembly_id", read_only=True)
+    assembly_name = serializers.SerializerMethodField()
+    orphaned = serializers.SerializerMethodField()
     prior_wear_km = serializers.SerializerMethodField()
 
     class Meta:
         model = Component
         fields = [
             "id",
+            "slot",
+            "slot_name",
+            "assembly",
+            "assembly_name",
+            "orphaned",
             "template",
+            "label",
             "brand",
             "model_name",
+            "status",
             "installed_at",
             "retired_at",
-            "distance_at_retire",
             "prior_wear_km",
         ]
 
-    def get_prior_wear_km(self, obj: Component) -> float | None:
-        """
-        Bereits gefahrene km bis zum Ausbau — informativ für den Übernahme-
-        Vorschlag ("dieses Teil hat schon X km"). Wird bei tatsächlicher
-        Übernahme (`reuse_component_id`) 1:1 zu `carried_over_wear_km`
-        (plus bereits vorher eingefrorenem Altverschleiß, falls vorhanden).
-        """
-        if obj.distance_at_install is None or obj.distance_at_retire is None:
-            return obj.carried_over_wear_km
-        ridden = obj.distance_at_retire - obj.distance_at_install
-        return round(ridden + (obj.carried_over_wear_km or 0.0), 1)
+    def get_assembly_name(self, obj: Component) -> str | None:
+        assembly = obj.slot.assembly
+        return assembly.display_name if assembly else None
+
+    def get_orphaned(self, obj: Component) -> bool:
+        assembly = obj.slot.assembly
+        return assembly is not None and assembly.is_retired
+
+    def get_prior_wear_km(self, obj: Component) -> float:
+        """Bisher auf dem Teil gefahrene km ("dieses Teil hat schon X km")."""
+        ledger = ride_ledger(cast(dict, self.context), obj.slot.bike_id)
+        return round(component_km(obj, ledger) + (obj.prior_km or 0.0), 1)
 
 
 class BikeSerializer(serializers.ModelSerializer[Bike]):
+    """Ein Bike samt der Teile, die gerade am Rad sind."""
+
     bike_type_display = serializers.CharField(
         source="get_bike_type_display", read_only=True
     )
@@ -555,25 +586,12 @@ class BikeSerializer(serializers.ModelSerializer[Bike]):
         return bike_total_km(cast(dict, self.context), obj)
 
     def get_slots(self, obj: Bike):
-        return ComponentSlotListSerializer(
+        return ComponentSlotSerializer(
             slots_on_bike(obj), many=True, context=self.context
         ).data
 
     def get_warn_status(self, obj: Bike) -> str:
-        total_km = bike_total_km(cast(dict, self.context), obj)
-        statuses = []
-
-        for slot in slots_on_bike(obj):
-            comp = slot.mounted_component
-            if comp is None:
-                statuses.append(WarnLevel.UNKNOWN)
-                continue
-            statuses.append(compute_wear(comp, total_km)["warn_status_overall"])
-
-        for interval in obj.intervals.all():
-            statuses.append(interval.status(total_km))
-
-        return worst_of(statuses)
+        return bike_warn_status(cast(dict, self.context), obj)
 
 
 class BikeListSerializer(serializers.ModelSerializer[Bike]):
@@ -603,16 +621,7 @@ class BikeListSerializer(serializers.ModelSerializer[Bike]):
         return bike_total_km(cast(dict, self.context), obj)
 
     def get_warn_status(self, obj: Bike) -> str:
-        total_km = bike_total_km(cast(dict, self.context), obj)
-        statuses = []
-        for slot in slots_on_bike(obj):
-            comp = slot.mounted_component
-            if comp is None:
-                continue
-            statuses.append(compute_wear(comp, total_km)["warn_status_overall"])
-        for interval in obj.intervals.all():
-            statuses.append(interval.status(total_km))
-        return worst_of(statuses)
+        return bike_warn_status(cast(dict, self.context), obj)
 
 
 # ── Baugruppen (BikeAssembly) & Wartungs-Intervalle ───────────────────────────
@@ -621,19 +630,19 @@ class BikeListSerializer(serializers.ModelSerializer[Bike]):
 class MaintenanceLogSerializer(serializers.ModelSerializer[MaintenanceLog]):
     class Meta:
         model = MaintenanceLog
-        fields = ["id", "done_at", "done_distance_km", "note", "created_at"]
+        fields = ["id", "done_at", "note", "created_at"]
 
 
 class MaintenanceIntervalSerializer(serializers.ModelSerializer[MaintenanceInterval]):
     """
-    Intervall-Status ohne "Zustand". `status`/km_since/days_since brauchen den
-    aktuellen km-Stand des Bikes — wird über den Context (`bike_total_km`)
-    gereicht, Fallback ist `obj.bike.total_distance_km`.
+    Intervall-Status ohne "Zustand". Die km kommen aus den Fahrten seit der letzten
+    Erledigung (siehe api/usage.py), bei einer Baugruppe nur aus deren Zeiten am Rad.
     """
 
     status = serializers.SerializerMethodField()
     km_since = serializers.SerializerMethodField()
     days_since = serializers.SerializerMethodField()
+    usage_ratio = serializers.SerializerMethodField()
     last_log = serializers.SerializerMethodField()
 
     class Meta:
@@ -648,31 +657,45 @@ class MaintenanceIntervalSerializer(serializers.ModelSerializer[MaintenanceInter
             "interval_km",
             "interval_days",
             "last_done_at",
-            "last_done_distance_km",
             "notes",
             "status",
             "km_since",
             "days_since",
+            "usage_ratio",
             "last_log",
         ]
         read_only_fields = ["bike", "assembly", "template"]
 
-    def _bike_total_km(self, obj: MaintenanceInterval) -> float | None:
-        return bike_total_km(cast(dict, self.context), obj.bike)
+    def validate_last_done_at(self, value):
+        if value is not None and value > ride_clock_now().date():
+            raise serializers.ValidationError(
+                "Das Datum darf nicht in der Zukunft liegen."
+            )
+        return value
+
+    def update(self, instance, validated_data):
+        # Wer das Datum korrigiert, korrigiert auch, ab wann die km zählen.
+        if "last_done_at" in validated_data:
+            instance.km_baseline_at = moment_for(validated_data["last_done_at"])
+        return super().update(instance, validated_data)
+
+    def _ledger(self, obj: MaintenanceInterval) -> RideLedger:
+        return ride_ledger(cast(dict, self.context), obj.bike_id)
 
     def get_status(self, obj: MaintenanceInterval) -> str:
-        return obj.status(self._bike_total_km(obj))
+        return obj.status(self._ledger(obj))
 
-    def get_km_since(self, obj: MaintenanceInterval) -> float | None:
-        total = self._bike_total_km(obj)
-        if total is None or obj.last_done_distance_km is None:
-            return None
-        return round(total - obj.last_done_distance_km, 1)
+    def get_km_since(self, obj: MaintenanceInterval) -> float:
+        return obj.km_since_done(self._ledger(obj))
 
     def get_days_since(self, obj: MaintenanceInterval) -> int | None:
         if obj.last_done_at is None:
             return None
         return (date.today() - obj.last_done_at).days
+
+    def get_usage_ratio(self, obj: MaintenanceInterval) -> float | None:
+        ratio = obj.usage_ratio(self._ledger(obj))
+        return round(ratio, 3) if ratio is not None else None
 
     def get_last_log(self, obj: MaintenanceInterval):
         log = obj.logs.first()
@@ -739,20 +762,29 @@ class ComponentGroupSerializer(serializers.ModelSerializer[ComponentGroup]):
         return obj.id in used_group_ids
 
 
+class AssemblyPeriodSerializer(serializers.Serializer):
+    """Eine Zeit am Rad, für den Verlauf einer Baugruppe."""
+
+    started_at = serializers.DateTimeField()
+    ended_at = serializers.DateTimeField(allow_null=True)
+
+
 class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
     group_detail = ComponentGroupSerializer(source="group", read_only=True)
     display_name = serializers.CharField(read_only=True)
-    # Seit `status` das einzige Zustandsfeld ist, sind beide abgeleitete
-    # Properties. Sie bleiben im Response, weil das Frontend-Model sie
-    # voraussetzt; schreibbar war ohnehin nur `status`-freier Kram (siehe
-    # BikeAssemblyDetailView).
+    # Abgeleitete Properties aus `status`, damit der Client die Kodierung nicht
+    # nachbauen muss.
     is_active = serializers.BooleanField(read_only=True)
     is_parked = serializers.BooleanField(read_only=True)
+    is_retired = serializers.BooleanField(read_only=True)
     slots = serializers.SerializerMethodField()
     intervals = serializers.SerializerMethodField()
     assembly_km = serializers.SerializerMethodField()
     worst_status = serializers.SerializerMethodField()
     last_used_at = serializers.SerializerMethodField()
+    periods = serializers.SerializerMethodField()
+    linked_assembly_ids = serializers.SerializerMethodField()
+    linked_component_ids = serializers.SerializerMethodField()
 
     class Meta:
         model = BikeAssembly
@@ -768,42 +800,48 @@ class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
             "status",
             "is_active",
             "is_parked",
+            "is_retired",
             "last_used_at",
             "slots",
             "intervals",
             "assembly_km",
             "worst_status",
+            "periods",
+            "linked_assembly_ids",
+            "linked_component_ids",
             "created_at",
             "updated_at",
         ]
         # `status`/`retired_at` bewusst read-only: ein Zustandswechsel muss über
-        # activate/retire/swap laufen. Per PATCH gesetzt bliebe die
-        # AssemblyUsagePeriod offen und der abgezogene Satz sammelte weiter km.
+        # activate/retire/restore laufen, sonst bliebe die Nutzungsperiode offen
+        # und der abgezogene Satz sammelte weiter km. `installed_at` ändert man über
+        # `bikes/{id}/installed-at/`, weil es alle Teile mit verschiebt.
         read_only_fields = [
             "bike",
             "group",
+            "installed_at",
             "status",
             "retired_at",
             "created_at",
             "updated_at",
         ]
 
-    def _bike_total_km(self, obj: BikeAssembly) -> float | None:
-        return bike_total_km(cast(dict, self.context), obj.bike)
+    def _ledger(self, obj: BikeAssembly) -> RideLedger:
+        return ride_ledger(cast(dict, self.context), obj.bike_id)
 
     def get_slots(self, obj: BikeAssembly):
         slots = sorted(
             obj.slots.all(), key=lambda s: (s.template.category, s.template.name)
         )
-        return ComponentSlotListSerializer(slots, many=True, context=self.context).data
+        return ComponentSlotSerializer(slots, many=True, context=self.context).data
 
     def get_intervals(self, obj: BikeAssembly):
         return MaintenanceIntervalSerializer(
             obj.intervals.all(), many=True, context=self.context
         ).data
 
-    def get_assembly_km(self, obj: BikeAssembly) -> float | None:
-        return obj.compute_km(self._bike_total_km(obj))
+    def get_assembly_km(self, obj: BikeAssembly) -> float:
+        return obj.compute_km(self._ledger(obj))
 
     def get_last_used_at(self, obj: BikeAssembly) -> date | None:
         """
@@ -812,20 +850,45 @@ class BikeAssemblySerializer(serializers.ModelSerializer[BikeAssembly]):
         """
         if obj.is_active:
             return date.today()
-        ends = [p.ended_at for p in obj.periods.all() if p.ended_at is not None]
+        ends = [end.date() for _, end in assembly_windows(obj) if end is not None]
         return max(ends) if ends else obj.retired_at
 
+    def get_periods(self, obj: BikeAssembly):
+        return AssemblyPeriodSerializer(obj.periods.all(), many=True).data
+
     def get_worst_status(self, obj: BikeAssembly) -> str:
-        return obj.worst_status(self._bike_total_km(obj))
+        return obj.worst_status(self._ledger(obj))
+
+    def get_linked_assembly_ids(self, obj: BikeAssembly) -> list[int]:
+        return [other.pk for other in obj.linked_assemblies.all()]
+
+    def get_linked_component_ids(self, obj: BikeAssembly) -> list[int]:
+        return [component.pk for component in obj.linked_components.all()]
+
+
+class AssemblyActionSerializer(serializers.Serializer):
+    """Body für activate/retire: optional, an welchem Tag das passiert ist."""
+
+    on = serializers.DateField(required=False, allow_null=True)
+    # Nur für retire: den ganzen Satz (das gekoppelte Laufrad) mit ausmustern.
+    with_linked = serializers.BooleanField(required=False, default=False)
+
+
+class AssemblyLinksSerializer(serializers.Serializer):
+    """Body für PUT /assemblies/{id}/links/ — ersetzt, was mitwechselt."""
+
+    assembly_ids = serializers.ListField(
+        child=serializers.IntegerField(), required=False, default=list
+    )
+    component_ids = serializers.ListField(
+        child=serializers.IntegerField(), required=False, default=list
+    )
 
 
 class MaintenanceIntervalLogRequestSerializer(serializers.Serializer):
     """Body für POST /intervals/{id}/log/ ("Erledigt/Erneuert")."""
 
-    done_at = serializers.DateField(required=False)
-    done_distance_km = serializers.FloatField(
-        required=False, allow_null=True, min_value=0
-    )
+    done_at = serializers.DateField(required=False, allow_null=True)
     note = serializers.CharField(required=False, allow_blank=True, default="")
 
 
@@ -864,9 +927,8 @@ class AssemblyPartItemSerializer(serializers.Serializer):
     # ignoriert — es ist ja dasselbe physische Teil. Siehe
     # _build_assembly_from_request/_validate_assembly_items.
     existing_slot_id = serializers.IntegerField(required=False, allow_null=True)
-    # Verwandter Fall: ein bereits *ausgebautes* Teil (z.B. der zurückgelegte
-    # Laufradsatz aus dem Keller, siehe `spare_components`) reaktivieren, statt
-    # es neu anzulegen. Schließt sich mit existing_slot_id aus.
+    # Verwandter Fall: ein Teil aus dem Regal (siehe `spare_components`) übernehmen,
+    # statt es neu anzulegen. Schließt sich mit existing_slot_id aus.
     reuse_component_id = serializers.IntegerField(required=False, allow_null=True)
 
 
@@ -880,7 +942,7 @@ class AssemblyIntervalItemSerializer(serializers.Serializer):
 
 
 class AssemblyCreateRequestSerializer(serializers.Serializer):
-    """Body für POST /bikes/{id}/assemblies/ und /assemblies/{id}/swap/."""
+    """Body für POST /bikes/{id}/assemblies/."""
 
     group_id = serializers.IntegerField(required=False)
     name = serializers.CharField(required=False, allow_blank=True, default="")
@@ -891,6 +953,10 @@ class AssemblyCreateRequestSerializer(serializers.Serializer):
     # ist bereits eine Instanz aufgezogen (zweiter Laufradsatz), wird die neue
     # standardmäßig geparkt angelegt statt die bestehende zu verdrängen.
     activate = serializers.BooleanField(required=False, allow_null=True, default=None)
+    # Gleich mitkoppeln: das andere Laufrad des neuen Satzes.
+    linked_assembly_ids = serializers.ListField(
+        child=serializers.IntegerField(), required=False, default=list
+    )
 
 
 class AssemblyAddItemRequestSerializer(serializers.Serializer):

@@ -1,16 +1,12 @@
 from datetime import date, timedelta
 
-from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.test import TestCase
-from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase
 
-from app_auth.models import StravaProfile
-from app_dashboard.models import Ride
 from app_maintenance.api.serializers import compute_wear
+from app_maintenance.api.usage import start_of_day
 from app_maintenance.models import (
     AssemblyStatus,
     Bike,
@@ -20,49 +16,23 @@ from app_maintenance.models import (
     ComponentCategory,
     ComponentGroup,
     ComponentSlot,
+    ComponentStatus,
     ComponentTemplate,
     GroupKind,
     MaintenanceInterval,
 )
+from app_maintenance.testing import MaintenanceTestCase
 
 
-def _make_profile(user, strava_athlete_id=24680):
-    return StravaProfile.objects.create(
-        user=user,
-        strava_athlete_id=strava_athlete_id,
-        access_token="token",
-        refresh_token="refresh",
-        expires_at=0,
-    )
+class AssemblyTestBase(MaintenanceTestCase):
+    bike_type = BikeType.GRAVEL
 
-
-class AssemblyTestBase(APITestCase):
     def setUp(self):
-        self.user = get_user_model().objects.create_user(username="asm", password="pw")
-        self.profile = _make_profile(self.user)
-        self.client.force_login(self.user)
-        session = self.client.session
-        session["strava_athlete_id"] = self.profile.strava_athlete_id
-        session.save()
+        super().setUp()
+        self.ride(100, days_ago=10)  # Grundfahrt, liegt vor allem anderen
 
-        self.bike = Bike.objects.create(
-            athlete=self.profile,
-            strava_bike_id="asm1",
-            name="Testrad",
-            bike_type=BikeType.GRAVEL,
-        )
-        Ride.objects.create(
-            strava_id=5001,
-            name="Grundfahrt",
-            distance=100_000,  # 100 km → bike.total_distance_km == 100.0
-            start_date=timezone.now() - timedelta(days=10),
-            athlete=self.profile,
-            bike=self.bike,
-        )
-
-        # Ein Laufradsatz ist eine echte Baugruppe: nur dafür bieten activate/swap
-        # überhaupt Sinn (siehe models.py::GroupKind). Ohne das greift der
-        # Default AREA, und beide Endpoints lehnen mit 400 ab.
+        # Ein Laufradsatz ist eine echte Baugruppe: nur dafür ergibt activate einen
+        # Sinn und nur dafür gibt es mehrere Instanzen (siehe models.py::GroupKind).
         self.wheel_group = ComponentGroup.objects.create(
             name="Laufrad vorne",
             category=ComponentCategory.WHEELS,
@@ -72,21 +42,18 @@ class AssemblyTestBase(APITestCase):
         self.tire = ComponentTemplate.objects.create(
             name="Reifen vorne",
             category=ComponentCategory.WHEELS,
-            is_system=False,
             group=self.wheel_group,
             warn_km=5000,
         )
         self.rim = ComponentTemplate.objects.create(
             name="Felge vorne",
             category=ComponentCategory.WHEELS,
-            is_system=False,
             group=self.wheel_group,
             warn_km=20000,
         )
         self.sealant = ComponentTemplate.objects.create(
             name="Tubeless Dichtmilch vorne",
             category=ComponentCategory.WHEELS,
-            is_system=False,
             group=self.wheel_group,
             warn_days=120,
             maintenance_kind="consumable",
@@ -101,19 +68,17 @@ class AssemblyTestBase(APITestCase):
         self.fork = ComponentTemplate.objects.create(
             name="Gabelöl",
             category=ComponentCategory.SUSPENSION,
-            is_system=False,
             group=self.susp_group,
         )
 
         # Fremdes Template ausserhalb jeder Gruppe.
         self.chain = ComponentTemplate.objects.create(
-            name="Kette", category=ComponentCategory.DRIVETRAIN, is_system=False
+            name="Kette", category=ComponentCategory.DRIVETRAIN
         )
 
     def _create_payload(self, **overrides):
         payload = {
             "group_id": self.wheel_group.id,
-            "installed_at": str(date.today()),
             "parts": [
                 {"template_id": self.tire.id, "include": True, "brand": "Schwalbe"},
                 {"template_id": self.rim.id, "include": True, "brand": "DT Swiss"},
@@ -139,17 +104,17 @@ class AssemblyCreateTests(AssemblyTestBase):
         self.assertTrue(assembly.is_active)
         self.assertEqual(assembly.slots.count(), 2)
         self.assertEqual(
-            Component.objects.filter(slot__assembly=assembly, is_mounted=True).count(),
+            Component.objects.filter(slot__assembly=assembly).count(),
             2,
         )
         interval = MaintenanceInterval.objects.get(assembly=assembly)
         self.assertEqual(interval.label, "Tubeless Dichtmilch vorne")
         self.assertEqual(interval.interval_days, 120)
-        self.assertEqual(interval.last_done_distance_km, 100.0)
+        self.assertEqual(interval.km_since_done(), 0.0)
 
-        # Component-km-Baseline = aktueller Bike-Stand.
+        # Die Grundfahrt liegt vor dem Einbau und zählt nicht.
         comp = Component.objects.filter(slot__assembly=assembly).first()
-        self.assertEqual(comp.distance_at_install, 100.0)
+        self.assertEqual(self.wear_km(comp), 0.0)
 
     def test_create_skips_non_included_items(self):
         payload = self._create_payload()
@@ -234,7 +199,7 @@ class AssemblyCreateTests(AssemblyTestBase):
         self.assertFalse(old.is_active)
         self.assertIsNone(old.retired_at, "Parken darf nicht ausmustern.")
         self.assertTrue(
-            Component.objects.filter(slot__assembly=old, is_mounted=True).exists(),
+            Component.objects.filter(slot__assembly=old).exists(),
             "Die Teile bleiben auf dem geparkten Satz montiert.",
         )
 
@@ -332,7 +297,7 @@ class AssemblyStatusFieldTests(AssemblyTestBase):
 
     def test_status_is_not_writable_through_patch(self):
         """
-        Ein Zustandswechsel muss über activate/retire/swap laufen: per PATCH
+        Ein Zustandswechsel muss über activate/retire/restore laufen: per PATCH
         gesetzt bliebe die AssemblyUsagePeriod offen und der abgezogene Satz
         sammelte weiter km.
         """
@@ -385,9 +350,8 @@ class AssemblyListTests(AssemblyTestBase):
 
     def test_spare_components_lists_removed_parts(self):
         """
-        Ein ausgebautes (nicht montiertes) Teil taucht als Übernahme-Vorschlag
-        in `spare_components` auf, unabhängig davon, ob seine ursprüngliche
-        Baugruppe noch existiert/aktiv ist.
+        Ein abgenommenes Teil taucht als Übernahme-Vorschlag in `spare_components` auf,
+        unabhängig davon, ob seine ursprüngliche Baugruppe noch aktiv ist.
         """
         res = self.client.post(
             f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
@@ -398,9 +362,7 @@ class AssemblyListTests(AssemblyTestBase):
         rim = Component.objects.get(
             slot__assembly_id=assembly_id, slot__template=self.rim
         )
-        rim.is_mounted = False
-        rim.retired_at = date.today()
-        rim.save(update_fields=["is_mounted", "retired_at"])
+        self.client.post(f"/api/maintenance/components/{rim.id}/unmount/")
 
         res = self.client.get(f"/api/maintenance/bikes/{self.bike.id}/assemblies/")
         spares = {s["template"]: s for s in res.data["spare_components"]}
@@ -409,7 +371,7 @@ class AssemblyListTests(AssemblyTestBase):
 
     def test_spare_components_lists_every_candidate_for_a_template(self):
         """
-        Regressionstest: mit mehreren ausgebauten Teilen desselben Templates
+        Regressionstest: mit mehreren abgenommenen Teilen desselben Templates
         darf `spare_components` nicht auf einen einzigen Kandidaten
         zusammenfallen (raten, welcher "der richtige" ist, schlägt bei
         mehrdeutigen Altdaten regelmäßig fehl) — der Client soll stattdessen
@@ -418,42 +380,23 @@ class AssemblyListTests(AssemblyTestBase):
         # Zwei getrennte (ausgemusterte) Baugruppen-Instanzen, damit beide
         # Kandidaten je einen eigenen Slot fürs Template bekommen können
         # (uniq_assembly_template erlaubt nur einen Slot je Baugruppe+Template).
-        assembly_a = BikeAssembly.objects.create(
-            bike=self.bike,
-            group=self.wheel_group,
-            status=AssemblyStatus.RETIRED,
-            retired_at=date.today(),
-        )
-        assembly_b = BikeAssembly.objects.create(
-            bike=self.bike,
-            group=self.wheel_group,
-            status=AssemblyStatus.RETIRED,
-            retired_at=date.today(),
-        )
-        mavic = Component.objects.create(
-            slot=ComponentSlot.objects.create(
-                bike=self.bike, assembly=assembly_a, template=self.rim
-            ),
-            brand="Mavic",
-            model_name="Cosmic CX80",
-            installed_at=date.today() - timedelta(days=18),
-            distance_at_install=10.0,
-            is_mounted=False,
-            retired_at=date.today(),
-            distance_at_retire=90.0,
-        )
-        original = Component.objects.create(
-            slot=ComponentSlot.objects.create(
-                bike=self.bike, assembly=assembly_b, template=self.rim
-            ),
-            brand="Devox",
-            model_name="Semi Aero",
-            installed_at=date(2013, 8, 31),
-            distance_at_install=0.0,
-            is_mounted=False,
-            retired_at=date.today(),
-            distance_at_retire=90.0,
-        )
+        spares = []
+        for brand in ("Mavic", "Devox"):
+            assembly = BikeAssembly.objects.create(
+                bike=self.bike,
+                group=self.wheel_group,
+                status=AssemblyStatus.RETIRED,
+                retired_at=date.today(),
+            )
+            spares.append(
+                Component.objects.create(
+                    slot=ComponentSlot.objects.create(
+                        bike=self.bike, assembly=assembly, template=self.rim
+                    ),
+                    brand=brand,
+                    status=ComponentStatus.SPARE,
+                )
+            )
 
         res = self.client.get(f"/api/maintenance/bikes/{self.bike.id}/assemblies/")
         rim_spare_ids = {
@@ -461,39 +404,34 @@ class AssemblyListTests(AssemblyTestBase):
             for s in res.data["spare_components"]
             if s["template"] == self.rim.id
         }
-        self.assertEqual(rim_spare_ids, {mavic.id, original.id})
+        self.assertEqual(rim_spare_ids, {c.id for c in spares})
 
     def test_assembly_km_counts_only_time_on_the_bike(self):
         """
         `assembly_km` misst die Nutzung der Baugruppe selbst (Nutzungsperioden),
-        nicht mehr den Einbau-km-Stand des ältesten Teils — sonst würde ein
-        einzelner Reifenwechsel die Laufleistung des Laufradsatzes zurücksetzen.
+        nicht den Einbau des ältesten Teils — sonst würde ein einzelner Reifenwechsel
+        die Laufleistung des Laufradsatzes zurücksetzen.
         """
         res = self.client.post(
             f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
-            self._create_payload(installed_at=str(date.today() - timedelta(days=5))),
+            self._create_payload(installed_at=str(self.days_ago(5))),
             format="json",
         )
         assembly_id = res.data["id"]
-        # Baseline = 100 km (Stand beim Einbau) → assembly_km == 0.
+        # Die Grundfahrt lag vor dem Einbau → assembly_km == 0.
         detail = self.client.get(f"/api/maintenance/assemblies/{assembly_id}/")
         self.assertEqual(detail.data["assembly_km"], 0.0)
 
-        # Ein einzelnes Teil "vorziehen" ändert die Laufleistung der Baugruppe nicht.
-        comp = Component.objects.filter(slot__assembly_id=assembly_id).first()
-        comp.distance_at_install = 40.0
-        comp.save()
+        self.ride(60)
         detail = self.client.get(f"/api/maintenance/assemblies/{assembly_id}/")
-        self.assertEqual(detail.data["assembly_km"], 0.0)
+        self.assertEqual(detail.data["assembly_km"], 60.0)
 
-        # Weitere 60 km fahren → die Baugruppe zählt sie mit.
-        Ride.objects.create(
-            strava_id=5002,
-            name="Ausfahrt",
-            distance=60_000,
-            start_date=timezone.now(),
-            athlete=self.profile,
-            bike=self.bike,
+        # Ein neuer Reifen setzt die Laufleistung des Laufrads nicht zurück.
+        slot = ComponentSlot.objects.get(assembly_id=assembly_id, template=self.tire)
+        self.client.post(
+            f"/api/maintenance/slots/{slot.id}/components/",
+            {"brand": "Neu"},
+            format="json",
         )
         detail = self.client.get(f"/api/maintenance/assemblies/{assembly_id}/")
         self.assertEqual(detail.data["assembly_km"], 60.0)
@@ -511,76 +449,6 @@ class AssemblyListTests(AssemblyTestBase):
 
         detail = self.client.get(f"/api/maintenance/assemblies/{assembly_id}/")
         self.assertEqual(detail.data["worst_status"], "critical")
-
-
-class AssemblySwapTests(AssemblyTestBase):
-    def _create(self):
-        res = self.client.post(
-            f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
-            self._create_payload(),
-            format="json",
-        )
-        return res.data["id"]
-
-    def test_swap_deactivates_old_and_creates_new_active(self):
-        old_id = self._create()
-        old_component_ids = list(
-            Component.objects.filter(slot__assembly_id=old_id).values_list(
-                "id", flat=True
-            )
-        )
-
-        res = self.client.post(
-            f"/api/maintenance/assemblies/{old_id}/swap/",
-            {
-                "installed_at": str(date.today()),
-                "parts": [
-                    {"template_id": self.tire.id, "include": True, "brand": "Conti"},
-                    {"template_id": self.rim.id, "include": True, "brand": "Newmen"},
-                ],
-                "intervals": [{"template_id": self.sealant.id, "include": True}],
-            },
-            format="json",
-        )
-        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
-
-        old = BikeAssembly.objects.get(id=old_id)
-        self.assertFalse(old.is_active)
-        self.assertIsNotNone(old.retired_at)
-
-        new_id = res.data["id"]
-        self.assertNotEqual(new_id, old_id)
-        self.assertEqual(
-            BikeAssembly.objects.filter(
-                bike=self.bike, group=self.wheel_group, status=AssemblyStatus.ACTIVE
-            ).count(),
-            1,
-        )
-
-        # Alte Komponenten ausgebaut.
-        for cid in old_component_ids:
-            self.assertFalse(Component.objects.get(id=cid).is_mounted)
-
-    def test_swap_history_is_queryable(self):
-        old_id = self._create()
-        self.client.post(
-            f"/api/maintenance/assemblies/{old_id}/swap/",
-            {
-                "parts": [{"template_id": self.tire.id, "include": True}],
-                "intervals": [],
-            },
-            format="json",
-        )
-        self.assertEqual(
-            BikeAssembly.objects.filter(bike=self.bike, group=self.wheel_group).count(),
-            2,
-        )
-        self.assertEqual(
-            BikeAssembly.objects.filter(
-                bike=self.bike, group=self.wheel_group, status=AssemblyStatus.RETIRED
-            ).count(),
-            1,
-        )
 
 
 class AssemblyActivateTests(AssemblyTestBase):
@@ -616,9 +484,7 @@ class AssemblyActivateTests(AssemblyTestBase):
         self.assertTrue(winter.is_active)
 
         # Die Teile des geparkten Satzes bleiben auf ihm montiert.
-        self.assertEqual(
-            Component.objects.filter(slot__assembly=summer, is_mounted=True).count(), 2
-        )
+        self.assertEqual(Component.objects.filter(slot__assembly=summer).count(), 2)
         # Geparkt = abgeschlossene Periode, aufgezogen = offene Periode.
         self.assertIsNone(summer.open_period())
         self.assertIsNotNone(winter.open_period())
@@ -627,7 +493,9 @@ class AssemblyActivateTests(AssemblyTestBase):
         summer_id = self._create(name="Sommer-LRS")
         winter_id = self._create(name="Winter-LRS")
 
+        self.advance(hours=1)
         self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
+        self.advance(hours=1)
         self.client.post(f"/api/maintenance/assemblies/{summer_id}/activate/")
 
         self.assertEqual(
@@ -651,7 +519,7 @@ class AssemblyActivateTests(AssemblyTestBase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(res.data["code"], "retired")
 
-    def test_retire_unmounts_components_and_records_odometer(self):
+    def test_retire_retires_components_and_closes_their_periods(self):
         summer_id = self._create(name="Sommer-LRS")
         res = self.client.post(f"/api/maintenance/assemblies/{summer_id}/retire/")
         self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
@@ -660,8 +528,8 @@ class AssemblyActivateTests(AssemblyTestBase):
         self.assertIsNotNone(summer.retired_at)
         self.assertFalse(summer.is_parked)
         for comp in Component.objects.filter(slot__assembly=summer):
-            self.assertFalse(comp.is_mounted)
-            self.assertEqual(comp.distance_at_retire, 100.0)
+            self.assertTrue(comp.is_retired)
+            self.assertFalse(comp.periods.filter(ended_at__isnull=True).exists())
 
     def test_list_separates_active_and_parked(self):
         self._create(name="Sommer-LRS")
@@ -682,14 +550,7 @@ class AssemblyActivateTests(AssemblyTestBase):
 
     def test_activate_requires_own_athlete(self):
         winter_id = self._create(name="Winter-LRS", activate=False)
-        other_user = get_user_model().objects.create_user(
-            username="other", password="pw"
-        )
-        _make_profile(other_user, strava_athlete_id=99999)
-        self.client.force_login(other_user)
-        session = self.client.session
-        session["strava_athlete_id"] = 99999
-        session.save()
+        self.login(self.make_profile())
 
         res = self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
         self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
@@ -711,16 +572,6 @@ class ParkedAssemblyWearTests(AssemblyTestBase):
     weiterfaehrt. Die Tage-Achse laeuft dagegen bewusst weiter.
     """
 
-    def _ride(self, strava_id, km, days_ago=0):
-        return Ride.objects.create(
-            strava_id=strava_id,
-            name=f"Fahrt {strava_id}",
-            distance=km * 1000,
-            start_date=timezone.now() - timedelta(days=days_ago),
-            athlete=self.profile,
-            bike=self.bike,
-        )
-
     def _create(self, name):
         res = self.client.post(
             f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
@@ -732,27 +583,23 @@ class ParkedAssemblyWearTests(AssemblyTestBase):
 
     def test_parked_assembly_stops_collecting_km(self):
         summer_id = self._create("Sommer-LRS")
-        self._ride(6001, 50)  # 50 km auf dem Sommer-LRS
+        self.ride(50)  # 50 km auf dem Sommer-LRS
 
         summer_comp = Component.objects.filter(slot__assembly_id=summer_id).first()
-        self.assertEqual(
-            compute_wear(summer_comp, self.bike.total_distance_km)["wear_km"], 50.0
-        )
+        self.assertEqual(self.wear_km(summer_comp), 50.0)
 
         # Winter-LRS aufziehen -> Sommer-LRS wird geparkt.
         winter_id = self._create("Winter-LRS")
         self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
 
         # 30 km auf dem Winter-LRS.
-        self._ride(6002, 30)
+        self.ride(30)
 
-        summer_comp.refresh_from_db()
         winter_comp = Component.objects.filter(slot__assembly_id=winter_id).first()
-        bike_km = self.bike.total_distance_km
 
-        self.assertEqual(bike_km, 180.0)  # 100 Grundfahrt + 50 + 30
-        self.assertEqual(compute_wear(summer_comp, bike_km)["wear_km"], 50.0)
-        self.assertEqual(compute_wear(winter_comp, bike_km)["wear_km"], 30.0)
+        self.assertEqual(self.bike.total_distance_km, 180.0)  # 100 + 50 + 30
+        self.assertEqual(self.wear_km(summer_comp), 50.0)
+        self.assertEqual(self.wear_km(winter_comp), 30.0)
 
     def test_parked_assembly_still_ages_in_days(self):
         summer_id = self._create("Sommer-LRS")
@@ -763,11 +610,11 @@ class ParkedAssemblyWearTests(AssemblyTestBase):
         winter_id = self._create("Winter-LRS")
         self.client.post(f"/api/maintenance/assemblies/{winter_id}/activate/")
 
-        wear = compute_wear(summer_comp, self.bike.total_distance_km)
+        wear = compute_wear(summer_comp)
         self.assertEqual(
             wear["wear_days"],
             40,
-            "Gummi altert auch im Keller â€” die Tage-Achse friert nicht ein.",
+            "Gummi altert auch im Keller — die Tage-Achse friert nicht ein.",
         )
 
     def test_parked_assembly_is_excluded_from_bike_overview(self):
@@ -789,15 +636,13 @@ class ParkedAssemblyWearTests(AssemblyTestBase):
         )
 
 
-class LegacyAssemblyWithoutPeriodsTests(AssemblyTestBase):
+class AssemblyOutsideTheApiTests(AssemblyTestBase):
     """
-    Baugruppen aus der Zeit vor den Nutzungszeitraeumen â€” oder ausserhalb der API
-    angelegt (Admin, seed_dev_data, Datenmigration) â€” haben keine Perioden. Ohne
-    Nachziehen beim Abziehen griffe der Alt-Fallback und der geparkte Satz wuerde
-    im Keller weiter km sammeln.
+    Baugruppen und Teile, die außerhalb der API entstehen (Admin, seed_dev_data), halten
+    die Invariante selbst: `save()` öffnet den Zeitraum, sonst sammelte das Teil nie km.
     """
 
-    def _legacy_assembly(self, name):
+    def _direct_assembly(self, name):
         assembly = BikeAssembly.objects.create(
             bike=self.bike,
             group=self.wheel_group,
@@ -807,20 +652,20 @@ class LegacyAssemblyWithoutPeriodsTests(AssemblyTestBase):
         slot = ComponentSlot.objects.create(
             bike=self.bike, assembly=assembly, template=self.tire
         )
-        Component.objects.create(
-            slot=slot,
-            installed_at=date.today() - timedelta(days=30),
-            distance_at_install=0.0,
-            is_mounted=True,
+        component = Component.objects.create(
+            slot=slot, installed_at=date.today() - timedelta(days=30)
         )
-        return assembly
+        return assembly, component
 
-    def test_parking_a_period_less_assembly_freezes_its_km(self):
-        legacy = self._legacy_assembly("Alt-LRS")
-        self.assertEqual(legacy.periods.count(), 0)
-        self.assertEqual(legacy.compute_km(self.bike.total_distance_km), 100.0)
+    def test_periods_open_by_themselves_and_count_from_the_install_date(self):
+        assembly, component = self._direct_assembly("Alt-LRS")
+        self.assertEqual(assembly.periods.count(), 1)
+        self.assertEqual(self.wear_km(component), 100.0)
+        self.assertEqual(assembly.compute_km(), 100.0)
 
-        # Zweiten Satz anlegen und aufziehen -> der alte wird geparkt.
+    def test_parking_freezes_its_km(self):
+        assembly, component = self._direct_assembly("Alt-LRS")
+
         payload = self._create_payload(name="Neu-LRS")
         payload["activate"] = True
         res = self.client.post(
@@ -828,52 +673,11 @@ class LegacyAssemblyWithoutPeriodsTests(AssemblyTestBase):
         )
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
 
-        legacy.refresh_from_db()
-        self.assertTrue(legacy.is_parked)
-        self.assertEqual(
-            legacy.periods.count(),
-            1,
-            "Beim Abziehen muss rueckwirkend ein Nutzungszeitraum entstehen.",
-        )
-
-        # Weitere 60 km auf dem neuen Satz.
-        Ride.objects.create(
-            strava_id=7001,
-            name="Nach dem Wechsel",
-            distance=60_000,
-            start_date=timezone.now(),
-            athlete=self.profile,
-            bike=self.bike,
-        )
-        legacy.refresh_from_db()
-        self.assertEqual(
-            legacy.compute_km(self.bike.total_distance_km),
-            100.0,
-            "Der geparkte Alt-Satz darf keine km mehr sammeln.",
-        )
-
-    def test_component_wear_of_a_parked_legacy_assembly_freezes_too(self):
-        legacy = self._legacy_assembly("Alt-LRS")
-        comp = Component.objects.get(slot__assembly=legacy)
-
-        payload = self._create_payload(name="Neu-LRS")
-        payload["activate"] = True
-        self.client.post(
-            f"/api/maintenance/bikes/{self.bike.id}/assemblies/", payload, format="json"
-        )
-        Ride.objects.create(
-            strava_id=7002,
-            name="Nach dem Wechsel",
-            distance=60_000,
-            start_date=timezone.now(),
-            athlete=self.profile,
-            bike=self.bike,
-        )
-
-        comp.refresh_from_db()
-        self.assertEqual(
-            compute_wear(comp, self.bike.total_distance_km)["wear_km"], 100.0
-        )
+        self.ride(60)
+        assembly.refresh_from_db()
+        self.assertTrue(assembly.is_parked)
+        self.assertEqual(assembly.compute_km(), 100.0)
+        self.assertEqual(self.wear_km(component), 100.0)
 
 
 class AssemblyReuseExistingComponentTests(AssemblyTestBase):
@@ -884,24 +688,19 @@ class AssemblyReuseExistingComponentTests(AssemblyTestBase):
     Baugruppe umgehängt wird, statt eine neue Component anzulegen.
     """
 
-    def _ungrouped_slot(
-        self, template, installed_at, distance_at_install, is_mounted=True
-    ):
+    def _ungrouped_slot(self, template, installed_at, status=ComponentStatus.MOUNTED):
         slot = ComponentSlot.objects.create(bike=self.bike, template=template)
         Component.objects.create(
             slot=slot,
             brand="Alt-Marke",
             model_name="Alt-Modell",
             installed_at=installed_at,
-            distance_at_install=distance_at_install,
-            is_mounted=is_mounted,
+            status=status,
         )
         return slot
 
     def test_reuse_moves_slot_instead_of_creating_new_component(self):
-        old_slot = self._ungrouped_slot(
-            self.tire, date.today() - timedelta(days=10), 50.0
-        )
+        old_slot = self._ungrouped_slot(self.tire, date.today() - timedelta(days=10))
         old_component_id = old_slot.mounted_component.id
 
         payload = self._create_payload()
@@ -929,11 +728,9 @@ class AssemblyReuseExistingComponentTests(AssemblyTestBase):
         self.assertEqual(rim_slot.mounted_component.brand, "DT Swiss")
 
     def test_reuse_preserves_wear_history_instead_of_resetting_it(self):
-        # 100 km Grundfahrt (aus AssemblyTestBase) — Reifen seit 30 Tagen/20 km
-        # montiert, also bereits 80 km gefahren, bevor er einer Gruppe zugeordnet wird.
-        old_slot = self._ungrouped_slot(
-            self.tire, date.today() - timedelta(days=30), 20.0
-        )
+        # Der Reifen ist seit 30 Tagen drauf und hat die Grundfahrt (100 km) mitgemacht,
+        # bevor er einer Gruppe zugeordnet wird.
+        old_slot = self._ungrouped_slot(self.tire, date.today() - timedelta(days=30))
 
         payload = self._create_payload()
         payload["parts"][0] = {
@@ -947,25 +744,21 @@ class AssemblyReuseExistingComponentTests(AssemblyTestBase):
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
 
         tire_component = old_slot.mounted_component
-        tire_component.refresh_from_db()
         self.assertEqual(
-            compute_wear(tire_component, self.bike.total_distance_km)["wear_km"],
-            80.0,
+            self.wear_km(tire_component),
+            100.0,
             "Die Nutzungsperiode darf den Verlauf des übernommenen Teils nicht abschneiden.",
         )
 
+        # Die Baugruppe ist am Rad, seit das übernommene Teil es ist.
         assembly = BikeAssembly.objects.get(pk=res.data["id"])
-        period = assembly.open_period()
-        self.assertEqual(period.started_at, date.today() - timedelta(days=30))
-        self.assertEqual(period.started_distance_km, 20.0)
+        self.assertEqual(assembly.compute_km(), 100.0)
 
-        # Die neu angelegte Felge zählt dagegen erst ab heute/dem aktuellen km-Stand.
+        # Die neu angelegte Felge zählt dagegen erst ab jetzt.
         rim_component = ComponentSlot.objects.get(
             assembly=assembly, template=self.rim
         ).mounted_component
-        self.assertEqual(
-            compute_wear(rim_component, self.bike.total_distance_km)["wear_km"], 0.0
-        )
+        self.assertEqual(self.wear_km(rim_component), 0.0)
 
     def test_reuse_rejects_slot_of_another_bike(self):
         other_bike = Bike.objects.create(
@@ -975,12 +768,7 @@ class AssemblyReuseExistingComponentTests(AssemblyTestBase):
             bike_type=BikeType.GRAVEL,
         )
         other_slot = ComponentSlot.objects.create(bike=other_bike, template=self.tire)
-        Component.objects.create(
-            slot=other_slot,
-            installed_at=date.today(),
-            distance_at_install=0.0,
-            is_mounted=True,
-        )
+        Component.objects.create(slot=other_slot, installed_at=date.today())
 
         payload = self._create_payload()
         payload["parts"][0] = {
@@ -1015,7 +803,7 @@ class AssemblyReuseExistingComponentTests(AssemblyTestBase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_reuse_rejects_template_mismatch(self):
-        rim_slot = self._ungrouped_slot(self.rim, date.today(), 0.0)
+        rim_slot = self._ungrouped_slot(self.rim, date.today())
 
         payload = self._create_payload()
         # existing_slot_id auf der TIRE-Zeile, aber der Slot ist für die Felge.
@@ -1031,7 +819,7 @@ class AssemblyReuseExistingComponentTests(AssemblyTestBase):
 
     def test_reuse_rejects_slot_without_mounted_component(self):
         empty_slot = self._ungrouped_slot(
-            self.tire, date.today(), 0.0, is_mounted=False
+            self.tire, date.today(), status=ComponentStatus.SPARE
         )
 
         payload = self._create_payload()
@@ -1045,48 +833,17 @@ class AssemblyReuseExistingComponentTests(AssemblyTestBase):
         )
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_swap_also_supports_reusing_an_existing_slot(self):
-        """Derselbe Code-Pfad (_build_assembly_from_request) trägt auch swap/."""
-        first = self.client.post(
-            f"/api/maintenance/bikes/{self.bike.id}/assemblies/",
-            self._create_payload(),
-            format="json",
-        )
-        spare_slot = self._ungrouped_slot(
-            self.tire, date.today() - timedelta(days=5), 90.0
-        )
-
-        res = self.client.post(
-            f"/api/maintenance/assemblies/{first.data['id']}/swap/",
-            {
-                "parts": [
-                    {
-                        "template_id": self.tire.id,
-                        "include": True,
-                        "existing_slot_id": spare_slot.id,
-                    },
-                    {"template_id": self.rim.id, "include": True, "brand": "Newmen"},
-                ],
-                "intervals": [],
-            },
-            format="json",
-        )
-        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
-        spare_slot.refresh_from_db()
-        self.assertEqual(spare_slot.assembly_id, res.data["id"])
-
 
 class AssemblyReuseSpareComponentTests(AssemblyTestBase):
     """
     Verwandter Fall zu `AssemblyReuseExistingComponentTests`: `reuse_component_id`
-    reaktiviert ein bereits *ausgebautes* Teil (z.B. ein zurückgelegter
-    Laufradsatz-Teil), statt es neu anlegen zu müssen — unabhängig davon, ob
+    holt ein Teil aus dem Regal, statt es neu anlegen zu müssen — unabhängig davon, ob
     dessen alte Baugruppe noch existiert/aktiv ist (Regressionsfall für den
     Prod-Bug: eine ausgemusterte Mavic-Felge tauchte nirgends mehr als
     Übernahme-Vorschlag auf).
     """
 
-    def _spare_component(self, template, installed_at, distance_at_install):
+    def _spare_component(self, template, installed_at, ridden=True):
         # Wie im Prod-Fall: das Teil hängt an einer inzwischen ausgemusterten
         # Baugruppe, nicht an einem ungruppierten Slot (der wäre wegen
         # `uniq_bike_template_ungrouped` je Template nur einmal möglich).
@@ -1099,19 +856,22 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
         slot = ComponentSlot.objects.create(
             bike=self.bike, assembly=old_assembly, template=template
         )
-        return Component.objects.create(
+        component = Component.objects.create(
             slot=slot,
             brand="Mavic",
             model_name="Cosmic CX80",
             installed_at=installed_at,
-            distance_at_install=distance_at_install,
-            is_mounted=False,
-            retired_at=date.today() - timedelta(days=1),
-            distance_at_retire=90.0,
+            status=ComponentStatus.SPARE,
         )
+        if ridden:
+            component.periods.create(
+                started_at=start_of_day(installed_at),
+                ended_at=start_of_day(date.today() - timedelta(days=1)),
+            )
+        return component
 
     def test_reuse_remounts_component_into_a_fresh_slot(self):
-        spare = self._spare_component(self.rim, date.today() - timedelta(days=20), 10.0)
+        spare = self._spare_component(self.rim, date.today() - timedelta(days=20))
 
         payload = self._create_payload()
         payload["parts"][1] = {
@@ -1127,7 +887,6 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
         spare.refresh_from_db()
         self.assertTrue(spare.is_mounted)
         self.assertIsNone(spare.retired_at)
-        self.assertIsNone(spare.distance_at_retire)
         self.assertEqual(spare.slot.assembly_id, res.data["id"])
         # Kein zweites Component-Objekt angelegt.
         self.assertEqual(
@@ -1135,18 +894,13 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
             1,
         )
 
-    def test_reuse_carries_over_prior_wear_and_keeps_days_aging(self):
+    def test_reuse_keeps_prior_wear_and_days_aging(self):
         """
-        Anders als bei `existing_slot_id` (durchgehender Einbau) war das Teil
-        hier wirklich ausgebaut — die neue Nutzungsperiode startet erst heute
-        (sonst zählten km mit, die zwischenzeitlich ein anderer Laufradsatz
-        gefahren ist). Der vor dem Ausbau real aufgelaufene Verschleiß (hier:
-        80 km, von km 10 bis km 90) geht dabei aber nicht verloren, sondern
-        wird in carried_over_wear_km eingefroren und von compute_wear() wieder
-        draufaddiert — die km-Achse macht also bei 80 weiter, nicht bei 0. Die
-        Tage-Achse altert ohnehin unverändert seit dem ursprünglichen Einbau.
+        Die km hängen an den Zeiträumen des Teils, nicht am Platz: das Teil hat die
+        Grundfahrt (100 km) mitgemacht und nimmt sie mit. Die Standzeit dazwischen zählt
+        nicht, die Tage-Achse altert seit dem ursprünglichen Einbau weiter.
         """
-        spare = self._spare_component(self.rim, date.today() - timedelta(days=20), 10.0)
+        spare = self._spare_component(self.rim, date.today() - timedelta(days=20))
 
         payload = self._create_payload()
         payload["parts"][1] = {
@@ -1160,37 +914,16 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
 
         spare.refresh_from_db()
-        self.assertEqual(spare.carried_over_wear_km, 80.0)
+        self.assertEqual(self.wear_km(spare), 100.0)
         self.assertEqual(
-            compute_wear(spare, self.bike.total_distance_km)["wear_km"],
-            80.0,
-            "Der vor dem Ausbau aufgelaufene Verschleiß bleibt erhalten.",
-        )
-        self.assertEqual(
-            compute_wear(spare, self.bike.total_distance_km)["wear_days"],
+            compute_wear(spare)["wear_days"],
             20,
             "Die Tage-Achse zählt seit dem ursprünglichen Einbau weiter.",
         )
 
-        assembly = BikeAssembly.objects.get(pk=res.data["id"])
-        period = assembly.open_period()
-        self.assertEqual(period.started_at, date.today())
-        self.assertEqual(period.started_distance_km, self.bike.total_distance_km)
-
-        # Weitere 30 km fahren zählen normal oben drauf — keine Standzeit-km,
-        # aber auch keine doppelt gezählten.
-        Ride.objects.create(
-            strava_id=5010,
-            name="Testfahrt",
-            distance=30_000,
-            start_date=timezone.now(),
-            athlete=self.profile,
-            bike=self.bike,
-        )
-        self.bike.refresh_from_db()
-        self.assertEqual(
-            compute_wear(spare, self.bike.total_distance_km)["wear_km"], 110.0
-        )
+        # Weitere 30 km zählen oben drauf.
+        self.ride(30)
+        self.assertEqual(self.wear_km(spare), 130.0)
 
     def test_reuse_rejects_still_mounted_component(self):
         first = self.client.post(
@@ -1214,7 +947,7 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_reuse_rejects_template_mismatch(self):
-        spare = self._spare_component(self.tire, date.today(), 0.0)
+        spare = self._spare_component(self.tire, date.today(), ridden=False)
 
         payload = self._create_payload()
         # reuse_component_id auf der FELGE-Zeile, aber die Component ist ein Reifen.
@@ -1237,11 +970,7 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
         )
         other_slot = ComponentSlot.objects.create(bike=other_bike, template=self.rim)
         other_spare = Component.objects.create(
-            slot=other_slot,
-            installed_at=date.today(),
-            distance_at_install=0.0,
-            is_mounted=False,
-            retired_at=date.today(),
+            slot=other_slot, status=ComponentStatus.SPARE
         )
 
         payload = self._create_payload()
@@ -1257,13 +986,8 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
 
     def test_existing_slot_id_and_reuse_component_id_are_mutually_exclusive(self):
         old_slot = ComponentSlot.objects.create(bike=self.bike, template=self.rim)
-        Component.objects.create(
-            slot=old_slot,
-            installed_at=date.today(),
-            distance_at_install=0.0,
-            is_mounted=True,
-        )
-        spare = self._spare_component(self.rim, date.today(), 0.0)
+        Component.objects.create(slot=old_slot, installed_at=date.today())
+        spare = self._spare_component(self.rim, date.today(), ridden=False)
 
         payload = self._create_payload()
         payload["parts"][1] = {
@@ -1281,9 +1005,9 @@ class AssemblyReuseSpareComponentTests(AssemblyTestBase):
 class CassetteBelongsToRearWheelGroupTests(TestCase):
     """
     Regressionstest für die Katalog-Migration 0020: Kassette soll mit dem
-    Hinterrad-Laufradsatz tauschbar sein statt (wie zuvor) unter "Antrieb" zu
-    hängen — ohne diese Zuordnung würde `assemblies/<id>/swap/` bzw.
-    `activate/` auf "Laufrad hinten" die Kassette nicht mit erfassen.
+    Hinterrad-Laufradsatz wechseln statt (wie zuvor) unter "Antrieb" zu hängen —
+    ohne diese Zuordnung würde `activate/` auf "Laufrad hinten" die Kassette nicht
+    mit erfassen.
     """
 
     def test_kassette_template_is_in_laufrad_hinten_group(self):

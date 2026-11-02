@@ -21,7 +21,9 @@ ein `confidence`-Feld, das die UI als "bitte pruefen" ausweisen kann.
 
 import logging
 
-from app_maintenance.models import ComponentGroup, MaintenanceKind
+from django.db.models import Prefetch
+
+from app_maintenance.models import ComponentGroup, ComponentTemplate, MaintenanceKind
 
 from .ai_providers import get_ai_provider
 
@@ -111,9 +113,11 @@ def suggest_models(
 
 def _catalog_for_bike_type(bike_type: str) -> list[ComponentGroup]:
     """Baugruppen + Templates, die zu diesem Bike-Typ passen — wie ComponentGroupListView."""
-    groups = ComponentGroup.objects.prefetch_related("templates").order_by(
-        "sort_order", "name"
-    )
+    # Nur der gemeinsame Katalog: eigene Vorlagen anderer Nutzer gehören nicht in den
+    # Prompt.
+    groups = ComponentGroup.objects.prefetch_related(
+        Prefetch("templates", queryset=ComponentTemplate.objects.catalog())
+    ).order_by("sort_order", "name")
     return [group for group in groups if group.applies_to(bike_type)]
 
 

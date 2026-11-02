@@ -20,8 +20,10 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
-        components = Component.objects.filter(is_mounted=True).select_related(
-            "slot__bike", "slot__template"
+        components = (
+            Component.objects.filter(periods__isnull=False)
+            .distinct()
+            .select_related("slot__bike", "slot__template")
         )
 
         updated = 0

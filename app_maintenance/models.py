@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 from django.core.exceptions import ValidationError
@@ -7,6 +7,15 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 from app_auth.models import StravaProfile
+
+from .api.usage import (
+    RideLedger,
+    assembly_km,
+    interval_km_since_done,
+    moment_for,
+    ride_clock_now,
+    start_of_day,
+)
 
 if TYPE_CHECKING:
     from django.db.models.fields.related_descriptors import RelatedManager
@@ -117,7 +126,9 @@ class Bike(models.Model):
         on_delete=models.CASCADE,
         related_name="bikes",
     )
-    strava_bike_id = models.CharField(max_length=50, unique=True)
+    # NULL = von Hand angelegt, ohne Strava-Bezug. Ein leerer String ginge wegen
+    # `unique` nur ein einziges Mal über alle Nutzer hinweg gut.
+    strava_bike_id = models.CharField(max_length=50, unique=True, null=True, blank=True)
     name = models.CharField(max_length=255)
     bike_type = models.CharField(
         max_length=20,
@@ -160,6 +171,7 @@ class Bike(models.Model):
         rides: RelatedManager["Ride"]
         slots: RelatedManager["ComponentSlot"]
         intervals: RelatedManager["MaintenanceInterval"]
+        assemblies: RelatedManager["BikeAssembly"]
 
         def get_bike_type_display(self) -> str: ...
 
@@ -187,20 +199,6 @@ class Bike(models.Model):
             return None
         return total_m / 1000  # Strava liefert Meter
 
-    def distance_km_up_to(self, as_of: date) -> float:
-        """
-        Gefahrene km dieses Bikes bis einschließlich `as_of`. Fahrten mit
-        einem anderen Bike sind über die FK-Filterung auf `self.rides`
-        automatisch ausgeschlossen. Ohne passende Fahrten wird 0 geliefert
-        (nicht None), damit das Feld sinnvoll vorbefüllt werden kann.
-        """
-        from django.db.models import Sum
-
-        result = self.rides.filter(start_date__date__lte=as_of).aggregate(
-            total=Sum("distance")
-        )["total"]
-        return (result or 0) / 1000  # Strava liefert Meter
-
 
 class MountPosition(models.TextChoices):
     """
@@ -226,15 +224,17 @@ class GroupKind(models.TextChoices):
     Ob eine `ComponentGroup` eine echte Baugruppe ist oder nur ein Bereich.
 
     `ASSEMBLY` = physische Einheit, die man am Stueck ab- und aufzieht
-    (Laufradsatz). Nur hier ergeben "Wechseln" (`activate`) und "Teile
-    erneuern" (`swap`) einen Sinn: ein zweiter kompletter Satz im Keller ist
-    ein realer Fall.
+    (Laufrad). Nur hier ergibt "Wechseln" (`activate`) einen Sinn, und nur hier
+    darf es mehrere Instanzen je Bike geben: ein zweiter Satz im Keller ist ein
+    realer Fall.
 
     `AREA` = Teile, die denselben Ort teilen, aber unabhaengig verschleissen —
     Bremsbelaege 3.000 km neben Bremsscheibe 15.000 km neben Bremsfluessigkeit
     730 Tage; Kette 2.000 km neben Kurbel 30.000 km. Niemand hat ein zweites
-    komplettes "Cockpit". Dort wird einzeln getauscht (`slots/<id>/mount`),
-    und `activate`/`swap` werden serverseitig abgelehnt.
+    komplettes "Cockpit", deshalb gibt es hoechstens eine Instanz je Bike. Zwei
+    Belag-Saetze sind zwei Teile im selben Slot (siehe `Component`); dass die
+    Belaege zum Laufrad passen muessen, regelt die Kopplung
+    (`BikeAssembly.linked_components`), nicht eine zweite "Bremse".
     """
 
     ASSEMBLY = "assembly", "Baugruppe (am Stück wechselbar)"
@@ -314,13 +314,34 @@ class ComponentGroup(models.Model):
         return bike_type in self.applicable_bike_types
 
 
+class ComponentTemplateQuerySet(models.QuerySet):
+    def visible_to(self, athlete: StravaProfile) -> "ComponentTemplateQuerySet":
+        """Der gemeinsame Katalog plus die eigenen Vorlagen dieses Nutzers."""
+        return self.filter(
+            models.Q(owner__isnull=True, is_system=True) | models.Q(owner=athlete)
+        )
+
+    def catalog(self) -> "ComponentTemplateQuerySet":
+        """Nur der gemeinsame Katalog, ohne Vorlagen einzelner Nutzer."""
+        return self.filter(owner__isnull=True, is_system=True)
+
+
 class ComponentTemplate(models.Model):
     """
     Vordefinierter Katalog aller möglichen Verschleißkomponenten.
-    Wird als Fixture geliefert, kann aber auch vom User erweitert werden.
+    Wird als Fixture geliefert, kann aber auch vom User erweitert werden — eigene
+    Vorlagen gehören genau einem Nutzer (`owner`).
     """
 
     name = models.CharField(max_length=100)
+    owner = models.ForeignKey(
+        StravaProfile,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="custom_templates",
+        help_text="Besitzer einer eigenen Vorlage. Leer = gemeinsamer Katalog.",
+    )
     category = models.CharField(max_length=20, choices=ComponentCategory.choices)
     group = models.ForeignKey(
         ComponentGroup,
@@ -379,7 +400,17 @@ class ComponentTemplate(models.Model):
             "Siehe MountPosition."
         ),
     )
+    follows_wheel = models.BooleanField(
+        default=False,
+        help_text=(
+            "Sitzt nicht auf dem Laufrad, muss aber dazu passen (Bremsbelaege, "
+            "Bremsscheiben). Der Client schlaegt diese Teile als Kopplung vor, wenn "
+            "ein zweites Laufrad angelegt wird. Siehe BikeAssembly.linked_components."
+        ),
+    )
     notes = models.TextField(blank=True)
+
+    objects = ComponentTemplateQuerySet.as_manager()
 
     class Meta:
         ordering = ["category", "name"]
@@ -420,6 +451,10 @@ class BikeAssemblyQuerySet(models.QuerySet):
     def parked(self) -> "BikeAssemblyQuerySet":
         """Abgezogen, aber nicht ausgemustert — die Wechsel-Alternativen."""
         return self.filter(status=AssemblyStatus.PARKED)
+
+    def retired(self) -> "BikeAssemblyQuerySet":
+        """Verkauft/entsorgt — nur noch Historie."""
+        return self.filter(status=AssemblyStatus.RETIRED)
 
 
 class BikeAssembly(models.Model):
@@ -464,6 +499,24 @@ class BikeAssembly(models.Model):
         default=AssemblyStatus.ACTIVE,
         db_index=True,
     )
+    # Was beim Aufziehen dieser Baugruppe mitwechselt. Zwei Arten, weil es zwei
+    # verschiedene Dinge sind: ein zweites Laufrad wird als Ganzes aufgezogen, von der
+    # Bremse wechselt dagegen nur der Belag — die Bremse selbst bleibt am Rad.
+    linked_assemblies = models.ManyToManyField(
+        "self",
+        blank=True,
+        symmetrical=True,
+        help_text="Baugruppen, die zusammengehören (Vorder- und Hinterrad eines Satzes).",
+    )
+    linked_components = models.ManyToManyField(
+        "Component",
+        blank=True,
+        related_name="linked_to_assemblies",
+        help_text=(
+            "Einzelne Teile aus anderen Bereichen, die beim Aufziehen dieser "
+            "Baugruppe mit montiert werden (Bremsbelaege zum Carbon-Laufrad)."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -486,6 +539,8 @@ class BikeAssembly(models.Model):
 
     if TYPE_CHECKING:
         id: int
+        bike_id: int
+        group_id: int
         slots: RelatedManager["ComponentSlot"]
         intervals: RelatedManager["MaintenanceInterval"]
         periods: RelatedManager["AssemblyUsagePeriod"]
@@ -523,117 +578,30 @@ class BikeAssembly(models.Model):
                 return period
         return None
 
-    def ensure_open_period(self) -> "AssemblyUsagePeriod | None":
+    def sync_usage_period(self, at: datetime | None = None) -> None:
         """
-        Sorgt dafür, dass eine laufende Nutzungsperiode existiert, und legt sie
-        andernfalls rückwirkend ab dem Einbau an.
-
-        Nötig für Baugruppen, die vor Migration 0019 oder außerhalb der API
-        entstanden sind (`seed_dev_data`, Admin, Datenmigrationen): ohne Periode
-        greift in `api/usage.py` der Alt-Fallback, und ein Abziehen könnte gar
-        nicht festgehalten werden — der Satz würde im Keller weiter km sammeln.
-        Gibt None zurück, wenn sich kein Startdatum ermitteln lässt.
+        Hält die Invariante: offene Periode genau dann, wenn die Baugruppe am Rad ist.
+        Ohne `at` beginnt eine neue Periode beim Einbau, ein Ende liegt bei jetzt.
         """
-        existing = self.open_period()
-        if existing is not None:
-            return existing
+        open_period = self.periods.filter(ended_at__isnull=True).first()
+        if self.is_active and open_period is None:
+            AssemblyUsagePeriod.objects.create(
+                assembly=self, started_at=at or moment_for(self.installed_at)
+            )
+        elif not self.is_active and open_period is not None:
+            open_period.close(at or ride_clock_now())
 
-        mounted = [
-            c
-            for slot in self.slots.all()
-            for c in slot.components.all()
-            if c.is_mounted
-        ]
-        install_dates = [c.installed_at for c in mounted if c.installed_at]
-        install_km = [
-            c.distance_at_install for c in mounted if c.distance_at_install is not None
-        ]
-
-        started_at = self.installed_at or (
-            min(install_dates) if install_dates else None
-        )
-        if started_at is None:
-            return None
-
-        return AssemblyUsagePeriod.objects.create(
-            assembly=self,
-            started_at=started_at,
-            started_distance_km=min(install_km) if install_km else None,
-        )
-
-    def sync_open_period_start(self) -> bool:
+    def pull_first_period_back(self, moment: datetime) -> None:
         """
-        Zieht den Beginn der laufenden Nutzungsperiode auf den frühesten
-        Einbaupunkt der montierten Teile zurück. Gibt True zurück, wenn sich
-        etwas geändert hat.
-
-        Nötig, weil `api/usage.py` die km eines Teils gegen die Perioden seiner
-        Baugruppe schneidet: liegt der Periodenbeginn *nach* dem Einbau des
-        Teils, bleibt vom Fenster nichts übrig und das Teil zeigt 0 km. Genau
-        das passiert beim naheliegenden Ablauf „Baugruppe heute anlegen, danach
-        die Teile auf ihr echtes Einbaudatum korrigieren" — die Teile wandern
-        zurück, die Periode bliebe ohne diesen Aufruf stehen.
-
-        Nur der Beginn wird zurückgezogen, nie nach vorne geschoben: eine
-        Periode beschreibt, seit wann die Baugruppe am Rad ist, und ein später
-        eingebautes Einzelteil verkürzt das nicht.
+        Zieht den Beginn der ersten Periode zurück, wenn ein Teil schon früher am Rad
+        war. Davor liegt nichts mehr, Überlappungen sind also ausgeschlossen. Nach
+        vorne geschoben wird nie: ein später eingebautes Einzelteil verkürzt die Zeit
+        der Baugruppe am Rad nicht.
         """
-        period = self.open_period()
-        if period is None:
-            return False
-
-        mounted = [
-            c
-            for slot in self.slots.all()
-            for c in slot.components.all()
-            if c.is_mounted
-        ]
-        dates = [c.installed_at for c in mounted if c.installed_at]
-        kms = [
-            c.distance_at_install for c in mounted if c.distance_at_install is not None
-        ]
-        if not dates:
-            return False
-
-        earliest_at = min(dates)
-        earliest_km = min(kms) if kms else None
-
-        # Nicht vor das Ende der letzten abgeschlossenen Periode zurueckziehen.
-        # Sonst ueberlappt die offene Periode mit einer bereits erfassten, und
-        # `assembly_km_windows()` summiert denselben Zeitraum zweimal — an echten
-        # Daten gemessen: ein Laufradsatz stand danach bei 19.691 km, obwohl das
-        # Rad insgesamt erst 9.868 km hatte.
-        closed_ends = [
-            p.ended_at for p in self.periods.all() if p.pk != period.pk and p.ended_at
-        ]
-        if closed_ends:
-            floor_at = max(closed_ends)
-            if earliest_at < floor_at:
-                earliest_at = floor_at
-                floor_kms = [
-                    p.ended_distance_km
-                    for p in self.periods.all()
-                    if p.pk != period.pk
-                    and p.ended_at == floor_at
-                    and p.ended_distance_km is not None
-                ]
-                earliest_km = max(floor_kms) if floor_kms else earliest_km
-
-        fields = []
-        if earliest_at < period.started_at:
-            period.started_at = earliest_at
-            fields.append("started_at")
-        if earliest_km is not None and (
-            period.started_distance_km is None
-            or earliest_km < period.started_distance_km
-        ):
-            period.started_distance_km = earliest_km
-            fields.append("started_distance_km")
-
-        if not fields:
-            return False
-        period.save(update_fields=fields)
-        return True
+        first = self.periods.order_by("started_at").first()
+        if first is not None and moment < first.started_at:
+            first.started_at = moment
+            first.save(update_fields=["started_at"])
 
     def clean(self):
         # Doppelt zum DB-Constraint (siehe Meta), aber mit verständlicher
@@ -650,68 +618,43 @@ class BikeAssembly(models.Model):
                     "Baugruppe aktiv. Bitte zuerst die aktuelle deaktivieren."
                 )
 
-    def save(self, *args, **kwargs):
+    def save(self, *args, usage_at: datetime | None = None, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+        self.sync_usage_period(usage_at)
 
-    def compute_km(self, bike_total_km: float | None) -> float | None:
-        """
-        Gefahrene km MIT dieser Baugruppe — Summe über die Nutzungsperioden, damit
-        Parkzeiten (Baugruppe abgezogen, Bike fährt auf einer anderen Instanz
-        weiter) nicht mitzählen. Ohne Perioden (Altbestand) gilt der frühere
-        Fallback: bike_total minus km-Stand beim Einbau des ältesten Teils.
-        """
-        from .api.usage import assembly_km_windows
+    def compute_km(self, ledger: RideLedger | None = None) -> float:
+        """Gefahrene km MIT dieser Baugruppe — Summe über ihre Zeiten am Rad."""
+        return assembly_km(self, ledger or RideLedger.for_bike(self.bike_id))
 
-        if bike_total_km is None:
-            return None
-
-        windows = assembly_km_windows(self, bike_total_km)
-        if windows:
-            return round(sum(end - start for start, end in windows), 1)
-
-        installs = [
-            c.distance_at_install
-            for slot in self.slots.all()
-            for c in slot.components.all()
-            if c.is_mounted and c.distance_at_install is not None
-        ]
-        if not installs:
-            return None
-        return round(bike_total_km - min(installs), 1)
-
-    def worst_status(self, bike_total_km: float | None) -> str:
+    def worst_status(self, ledger: RideLedger | None = None) -> str:
         """Schlechtester Status über montierte Komponenten + zugehörige Intervalle."""
         from .api.serializers import compute_wear
 
+        ledger = ledger or RideLedger.for_bike(self.bike_id)
         statuses: list[str] = []
         for slot in self.slots.all():
             comp = slot.mounted_component
             if comp is None:
                 statuses.append(WarnLevel.UNKNOWN)
                 continue
-            statuses.append(compute_wear(comp, bike_total_km)["warn_status_overall"])
+            statuses.append(compute_wear(comp, ledger)["warn_status_overall"])
         for interval in self.intervals.all():
-            statuses.append(interval.status(bike_total_km))
+            statuses.append(interval.status(ledger))
 
         return worst_of(statuses)
 
 
 class AssemblyUsagePeriod(models.Model):
     """
-    Ein Zeitraum, in dem eine `BikeAssembly` tatsächlich am Rad war.
-
-    Nötig, seit mehrere Instanzen derselben `ComponentGroup` nebeneinander
-    existieren dürfen (Sommer-/Winter-LRS): der abgezogene Satz darf keine km und
-    keinen Wetter-Verschleiß sammeln, während das Bike auf dem anderen Satz
-    weiterfährt. Die km-Achse hängt am Bike-Odometer (`*_distance_km`), die
-    Datums-Achse an `*_at` — letztere filtert im `WeatherWearService` die Rides.
-
-    Die **Tage-Achse des Verschleißes läuft bewusst weiter** (Gummi und
-    Dichtmilch altern auch im Keller), Perioden gelten also nur für km/Wetter.
+    Ein Zeitraum, in dem eine `BikeAssembly` tatsächlich am Rad war — Grundlage für
+    `assembly_km` und dafür, dass ein Teil nicht in eine Zeit zurückdatiert werden
+    kann, in der die Baugruppe im Keller lag. Die km der einzelnen Teile hängen an
+    deren eigenen Zeiträumen (`ComponentUsagePeriod`).
 
     Offene Periode (`ended_at is None`) = aktuell montiert. Es gibt höchstens
-    eine offene Periode je Baugruppe, und nur bei `status=active`.
+    eine offene Periode je Baugruppe, und nur bei `status=active`. Alle Zeitpunkte
+    liegen auf der Uhr der Fahrten (siehe `api/usage.py`).
     """
 
     assembly = models.ForeignKey(
@@ -719,21 +662,11 @@ class AssemblyUsagePeriod(models.Model):
         on_delete=models.CASCADE,
         related_name="periods",
     )
-    started_at = models.DateField(help_text="Tag der Montage.")
-    started_distance_km = models.FloatField(
+    started_at = models.DateTimeField(help_text="Zeitpunkt der Montage.")
+    ended_at = models.DateTimeField(
         null=True,
         blank=True,
-        help_text="Km-Stand des Bikes bei der Montage.",
-    )
-    ended_at = models.DateField(
-        null=True,
-        blank=True,
-        help_text="Tag des Abziehens. None = aktuell montiert.",
-    )
-    ended_distance_km = models.FloatField(
-        null=True,
-        blank=True,
-        help_text="Km-Stand des Bikes beim Abziehen.",
+        help_text="Zeitpunkt des Abziehens. None = aktuell montiert.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -742,39 +675,32 @@ class AssemblyUsagePeriod(models.Model):
         verbose_name = "Baugruppen-Nutzungszeitraum"
         verbose_name_plural = "Baugruppen-Nutzungszeiträume"
         indexes = [models.Index(fields=["assembly", "ended_at"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["assembly"],
+                condition=models.Q(ended_at__isnull=True),
+                name="uniq_open_period_per_assembly",
+            ),
+        ]
 
     if TYPE_CHECKING:
         id: int
 
     def __str__(self):
-        bis = self.ended_at.isoformat() if self.ended_at else "heute"
-        return f"{self.assembly.display_name}: {self.started_at} – {bis}"
+        bis = self.ended_at.date().isoformat() if self.ended_at else "heute"
+        return f"{self.assembly.display_name}: {self.started_at.date()} – {bis}"
 
     @property
     def is_open(self) -> bool:
         return self.ended_at is None
 
-    def clean(self):
-        if self.ended_at is not None and self.ended_at < self.started_at:
-            raise ValidationError("Ende darf nicht vor dem Beginn liegen.")
-        if self.ended_at is None:
-            others = AssemblyUsagePeriod.objects.filter(
-                assembly=self.assembly, ended_at__isnull=True
-            ).exclude(pk=self.pk)
-            if others.exists():
-                raise ValidationError(
-                    "Diese Baugruppe hat bereits einen offenen Nutzungszeitraum."
-                )
-
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
-
-    def close(self, ended_at: date, ended_distance_km: float | None) -> None:
-        """Periode beenden (Baugruppe wird abgezogen)."""
-        self.ended_at = max(ended_at, self.started_at)
-        self.ended_distance_km = ended_distance_km
-        self.save(update_fields=["ended_at", "ended_distance_km"])
+    def close(self, at: datetime) -> None:
+        """Beenden. Ein leerer Zeitraum (gleich wieder abgezogen) bleibt nicht stehen."""
+        if at <= self.started_at:
+            self.delete()
+            return
+        self.ended_at = at
+        self.save(update_fields=["ended_at"])
 
 
 class ComponentSlotQuerySet(models.QuerySet):
@@ -794,8 +720,8 @@ class ComponentSlotQuerySet(models.QuerySet):
 class ComponentSlot(models.Model):
     """
     Ein logischer Steckplatz am Fahrrad, z.B. 'Kette', 'Reifen vorne'.
-    Mehrere Component-Instanzen können einem Slot zugeordnet sein,
-    aber immer nur eine ist montiert (is_mounted=True).
+    Mehrere Component-Instanzen können einem Slot zugeordnet sein (der Sommer- und
+    der Winterreifen desselben Laufrads), aber immer nur eine ist montiert.
 
     Gehört (fast immer) zu einer `BikeAssembly`; `assembly=None` nur für
     Alt-Slots, die noch keiner Baugruppe zugeordnet wurden. `bike` bleibt
@@ -841,6 +767,9 @@ class ComponentSlot(models.Model):
 
     if TYPE_CHECKING:
         id: int
+        bike_id: int
+        assembly_id: int | None
+        template_id: int
         components: RelatedManager["Component"]
 
     def __str__(self):
@@ -865,11 +794,42 @@ class ComponentSlot(models.Model):
         return None
 
 
+class ComponentStatus(models.TextChoices):
+    """
+    Die drei Zustände eines Teils — analog zu `AssemblyStatus` ein Feld statt einer
+    Kodierung über mehrere.
+
+    Vorher gab es nur "montiert ja/nein", und `retired_at` wurde bei jedem Ausbau
+    gesetzt. Damit war nicht unterscheidbar, ob ein abgenommener Reifen im Regal
+    liegt und noch gut ist oder längst im Müll.
+    """
+
+    MOUNTED = "mounted", "Montiert"
+    SPARE = "spare", "Ersatz"
+    RETIRED = "retired", "Ausgemustert"
+
+
+class ComponentQuerySet(models.QuerySet):
+    def mounted(self) -> "ComponentQuerySet":
+        return self.filter(status=ComponentStatus.MOUNTED)
+
+    def spare(self) -> "ComponentQuerySet":
+        return self.filter(status=ComponentStatus.SPARE)
+
+    def retired(self) -> "ComponentQuerySet":
+        return self.filter(status=ComponentStatus.RETIRED)
+
+
 class Component(models.Model):
     """
     Eine konkrete physische Komponente, die einem Slot zugeordnet ist.
     Mehrere können einem Slot gehören (Ersatzreifen, alte Kette etc.),
-    aber is_mounted=True darf nur einmal pro Slot vorkommen.
+    aber nur eine davon ist montiert (Partial-Unique-Constraint in der DB).
+
+    Ihre Kilometer sind nirgends gespeichert: sie ergeben sich aus den Fahrten in
+    ihren Nutzungszeiträumen (`periods`, siehe `api/usage.py`). Montiert auf einer
+    geparkten Baugruppe heißt: das Teil sitzt auf dem Laufrad, aber das Laufrad ist
+    nicht am Rad — dann läuft kein Zeitraum.
     """
 
     slot = models.ForeignKey(
@@ -880,51 +840,38 @@ class Component(models.Model):
     brand = models.CharField(max_length=100, blank=True)
     model_name = models.CharField(max_length=100, blank=True)
 
-    # Kilometerstand des Fahrrads zum Einbauzeitpunkt (aus Strava)
-    distance_at_install = models.FloatField(
+    status = models.CharField(
+        max_length=10,
+        choices=ComponentStatus.choices,
+        default=ComponentStatus.MOUNTED,
+        db_index=True,
+    )
+    installed_at = models.DateField(
         null=True,
         blank=True,
-        help_text="Km-Stand des Fahrrads beim Einbau",
+        help_text=(
+            "Tag des ersten Einbaus. Bleibt bei späteren Wechseln stehen, denn daran "
+            "hängt die Tage-Achse: Gummi altert auch, während das Teil im Regal liegt."
+        ),
     )
-    installed_at = models.DateField(null=True, blank=True)
     retired_at = models.DateField(
         null=True,
         blank=True,
-        help_text="Datum des Ausbaus / Entsorgung",
+        help_text="Tag des Ausmusterns. Nur bei status=retired gesetzt.",
     )
-    distance_at_retire = models.FloatField(
+    prior_km = models.FloatField(
         null=True,
         blank=True,
         help_text=(
-            "Km-Stand des Fahrrads beim Ausbau. Nötig, um ein mitten in einer "
-            "Baugruppen-Nutzungsperiode getauschtes Teil sauber abzuschneiden "
-            "(siehe AssemblyUsagePeriod)."
+            "Km, die das Teil schon hatte, bevor es hier erfasst wurde (gebraucht "
+            "gekauft, vor der App gefahren). Wird auf die gefahrenen km addiert."
         ),
     )
-    carried_over_wear_km = models.FloatField(
+    prior_weather_km = models.FloatField(
         null=True,
         blank=True,
-        help_text=(
-            "Verschleiß-km, die bereits vor einem früheren Ausbau aufgelaufen waren. "
-            "Wird beim Reaktivieren eines ausgebauten Teils (siehe "
-            "api/views.py::_build_assembly_from_request, reuse_component_id) einmalig "
-            "eingefroren, weil die neue Nutzungsperiode/Baugruppe die alte Fahrhistorie "
-            "sonst nicht sieht — component_active_km() rechnet ja nur die Perioden der "
-            "aktuellen Baugruppe. compute_wear() addiert diesen Wert auf den frisch "
-            "berechneten km-Verschleiß."
-        ),
+        help_text="Analog zu prior_km für die wetter-gewichtete Achse.",
     )
-    carried_over_weather_wear_km = models.FloatField(
-        null=True,
-        blank=True,
-        help_text=(
-            "Analog zu carried_over_wear_km, aber für die wetter-gewichtete Achse: "
-            "friert weather_wear_km beim Reaktivieren ein, damit "
-            "WeatherWearService.recompute_component() den alten Wert nicht durch die "
-            "neue (kürzere) Fahrhistorie überschreibt statt ihn draufzurechnen."
-        ),
-    )
-    is_mounted = models.BooleanField(default=True)
     notes = models.TextField(blank=True)
 
     # Individuelle Lebensdauer-Vorgaben — überschreiben die Template-Empfehlung
@@ -1010,17 +957,47 @@ class Component(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    objects = ComponentQuerySet.as_manager()
+
     class Meta:
-        ordering = ["-installed_at"]
+        ordering = ["-installed_at", "-id"]
+        constraints = [
+            # Die eigentliche Garantie; `clean()` liefert nur die freundlichere Meldung.
+            models.UniqueConstraint(
+                fields=["slot"],
+                condition=models.Q(status="mounted"),
+                name="uniq_mounted_component_per_slot",
+            ),
+        ]
 
     if TYPE_CHECKING:
         id: int
+        slot_id: int
         checks: RelatedManager["ComponentCheck"]
+        periods: RelatedManager["ComponentUsagePeriod"]
+        linked_to_assemblies: RelatedManager["BikeAssembly"]
+
+        def get_status_display(self) -> str: ...
 
     def __str__(self):
-        status = "montiert" if self.is_mounted else "ausgebaut"
-        label = f"{self.brand} {self.model_name}".strip() or "Unbekannt"
-        return f"{label} [{status}] @ {self.slot}"
+        return f"{self.label} [{self.get_status_display()}] @ {self.slot}"
+
+    @property
+    def label(self) -> str:
+        """Was der Nutzer als Namen des Teils sieht: Marke + Modell, sonst der Slot."""
+        return f"{self.brand} {self.model_name}".strip() or self.slot.display_name
+
+    @property
+    def is_mounted(self) -> bool:
+        return self.status == ComponentStatus.MOUNTED
+
+    @property
+    def is_spare(self) -> bool:
+        return self.status == ComponentStatus.SPARE
+
+    @property
+    def is_retired(self) -> bool:
+        return self.status == ComponentStatus.RETIRED
 
     @property
     def effective_warn_km(self) -> float | None:
@@ -1038,21 +1015,101 @@ class Component(models.Model):
             else self.slot.template.warn_days
         )
 
+    def collects_km(self) -> bool:
+        """Sammelt das Teil gerade km? Montiert — und die Baugruppe ist am Rad."""
+        if not self.is_mounted:
+            return False
+        assembly = self.slot.assembly
+        return assembly is None or assembly.is_active
+
+    def sync_usage_period(self, at: datetime | None = None) -> None:
+        """
+        Hält die Invariante: offener Zeitraum genau dann, wenn das Teil gerade km
+        sammelt. Jeder Zustandswechsel läuft hier durch, deshalb können km und Status
+        nicht auseinanderlaufen. Ohne `at` beginnt ein erster Zeitraum beim Einbau,
+        alles andere bei jetzt.
+        """
+        open_period = self.periods.filter(ended_at__isnull=True).first()
+        collects = self.collects_km()
+        if collects and open_period is None:
+            if at is None:
+                first_time = not self.periods.exists()
+                at = moment_for(self.installed_at) if first_time else ride_clock_now()
+            ComponentUsagePeriod.objects.create(component=self, started_at=at)
+        elif not collects and open_period is not None:
+            open_period.close(at or ride_clock_now())
+
     def clean(self):
         """Stellt sicher dass pro Slot maximal eine Komponente montiert ist."""
         if self.is_mounted:
-            qs = Component.objects.filter(slot=self.slot, is_mounted=True).exclude(
-                pk=self.pk
-            )
+            qs = Component.objects.mounted().filter(slot=self.slot).exclude(pk=self.pk)
             if qs.exists():
                 raise ValidationError(
                     f"Im Slot '{self.slot.display_name}' ist bereits eine "
                     "Komponente montiert. Bitte zuerst die aktuelle ausbauen."
                 )
 
-    def save(self, *args, **kwargs):
+    def save(self, *args, usage_at: datetime | None = None, **kwargs):
+        if self.is_mounted and self.installed_at is None:
+            self.installed_at = (usage_at or ride_clock_now()).date()
+            if kwargs.get("update_fields") is not None:
+                kwargs["update_fields"] = [*kwargs["update_fields"], "installed_at"]
         self.full_clean()
         super().save(*args, **kwargs)
+        self.sync_usage_period(usage_at)
+
+
+class ComponentUsagePeriod(models.Model):
+    """
+    Ein Zeitraum, in dem dieses Teil tatsächlich gefahren wurde. Aus diesen Zeiträumen
+    und den Fahrten ergeben sich seine Kilometer (siehe `api/usage.py`).
+
+    Beim Parken einer Baugruppe enden die Zeiträume ihrer Teile, beim Aufziehen
+    beginnen neue — die Zeiträume stehen also für sich und müssen nicht mit denen der
+    Baugruppe verschnitten werden. Dadurch kann ein Teil auch auf ein anderes Laufrad
+    umziehen, ohne seine Vergangenheit zu verlieren.
+    """
+
+    component = models.ForeignKey(
+        Component,
+        on_delete=models.CASCADE,
+        related_name="periods",
+    )
+    started_at = models.DateTimeField(help_text="Ab hier zählen die Fahrten.")
+    ended_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Fahrten ab hier zählen nicht mehr. None = läuft noch.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["started_at", "id"]
+        verbose_name = "Komponenten-Nutzungszeitraum"
+        verbose_name_plural = "Komponenten-Nutzungszeiträume"
+        indexes = [models.Index(fields=["component", "ended_at"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["component"],
+                condition=models.Q(ended_at__isnull=True),
+                name="uniq_open_period_per_component",
+            ),
+        ]
+
+    if TYPE_CHECKING:
+        id: int
+
+    def __str__(self):
+        bis = self.ended_at.date().isoformat() if self.ended_at else "heute"
+        return f"{self.component.label}: {self.started_at.date()} – {bis}"
+
+    def close(self, at: datetime) -> None:
+        """Beenden. Ein leerer Zeitraum (gleich wieder abgenommen) bleibt nicht stehen."""
+        if at <= self.started_at:
+            self.delete()
+            return
+        self.ended_at = at
+        self.save(update_fields=["ended_at"])
 
 
 class ComponentCheck(models.Model):
@@ -1069,10 +1126,13 @@ class ComponentCheck(models.Model):
         related_name="checks",
     )
     checked_at = models.DateField(default=date.today)
-    checked_at_distance_km = models.FloatField(
+    baseline_at = models.DateTimeField(
         null=True,
         blank=True,
-        help_text="Km-Stand des Fahrrads zum Zeitpunkt der Prüfung",
+        help_text=(
+            "Ab hier zählen die km für den Warn-Status neu (Uhr der Fahrten). Leer = "
+            "ab dem Morgen von checked_at."
+        ),
     )
     checked_at_weather_wear_km = models.FloatField(
         null=True,
@@ -1080,7 +1140,7 @@ class ComponentCheck(models.Model):
         help_text=(
             "component.weather_wear_km zum Zeitpunkt der Prüfung — Baseline, damit "
             "der wetterbereinigte Warn-Status nach einer Freigabe ebenfalls zurückgesetzt "
-            "wird (analog zu checked_at_distance_km für die km-Achse)."
+            "wird (analog zu baseline_at für die km-Achse)."
         ),
     )
     condition_pct = models.PositiveSmallIntegerField(
@@ -1092,7 +1152,7 @@ class ComponentCheck(models.Model):
     snooze_km = models.FloatField(
         null=True,
         blank=True,
-        help_text="Erneut warnen nach X weiteren km ab checked_at_distance_km",
+        help_text="Erneut warnen nach X weiteren km ab der Prüfung",
     )
     snooze_days = models.IntegerField(
         null=True,
@@ -1110,6 +1170,9 @@ class ComponentCheck(models.Model):
 
     def __str__(self):
         return f"Check {self.checked_at} @ {self.component}"
+
+    def baseline_moment(self) -> datetime:
+        return self.baseline_at or start_of_day(self.checked_at)
 
 
 class MaintenanceIntervalKind(models.TextChoices):
@@ -1159,10 +1222,13 @@ class MaintenanceInterval(models.Model):
     interval_km = models.FloatField(null=True, blank=True)
     interval_days = models.IntegerField(null=True, blank=True)
     last_done_at = models.DateField(null=True, blank=True)
-    last_done_distance_km = models.FloatField(
+    km_baseline_at = models.DateTimeField(
         null=True,
         blank=True,
-        help_text="Km-Stand des Bikes bei der letzten Erledigung.",
+        help_text=(
+            "Ab hier zählen die km seit der letzten Erledigung (Uhr der Fahrten). "
+            "Leer = ab dem Morgen von last_done_at."
+        ),
     )
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1175,34 +1241,48 @@ class MaintenanceInterval(models.Model):
 
     if TYPE_CHECKING:
         id: int
+        bike_id: int
+        assembly_id: int | None
         logs: RelatedManager["MaintenanceLog"]
 
     def __str__(self):
         return f"{self.bike.name} — {self.label}"
 
-    def status(self, bike_total_km: float | None, as_of: date | None = None) -> str:
+    @property
+    def is_on_bike(self) -> bool:
+        """Intervalle einer geparkten/ausgemusterten Baugruppe betreffen das Rad nicht."""
+        return self.assembly_id is None or self.assembly.is_active
+
+    def km_baseline(self) -> datetime | None:
+        """Ab wann die km zählen. None = noch nie erledigt, also alle Fahrten."""
+        if self.km_baseline_at is not None:
+            return self.km_baseline_at
+        return start_of_day(self.last_done_at) if self.last_done_at else None
+
+    def km_since_done(self, ledger: RideLedger | None = None) -> float:
+        return interval_km_since_done(self, ledger or RideLedger.for_bike(self.bike_id))
+
+    def usage_ratio(
+        self, ledger: RideLedger | None = None, as_of: date | None = None
+    ) -> float | None:
+        """Verbrauchter Anteil des Intervalls, schlechteste Achse. None = keine Grenze."""
+        as_of = as_of or date.today()
+        ratios: list[float] = []
+        if self.interval_km:
+            ratios.append(self.km_since_done(ledger) / self.interval_km)
+        if self.interval_days and self.last_done_at:
+            ratios.append((as_of - self.last_done_at).days / self.interval_days)
+        return max(ratios) if ratios else None
+
+    def status(
+        self, ledger: RideLedger | None = None, as_of: date | None = None
+    ) -> str:
         """
         Ampel wie `compute_wear`: schlechtester Wert aus km- und Tage-Achse.
         `as_of` projiziert nur die Tage-Achse (Default: heute) — analog zur
         Fahrt-Vorhersage in app_notifications.
         """
-        as_of = as_of or date.today()
-        ratios: list[float] = []
-
-        if self.interval_km:
-            if bike_total_km is not None and self.last_done_distance_km is not None:
-                ratios.append(
-                    (bike_total_km - self.last_done_distance_km) / self.interval_km
-                )
-            elif bike_total_km is not None:
-                ratios.append(bike_total_km / self.interval_km)
-
-        if self.interval_days and self.last_done_at:
-            ratios.append((as_of - self.last_done_at).days / self.interval_days)
-
-        if not ratios:
-            return WarnLevel.UNKNOWN
-        return warn_status_from_ratio(max(ratios))
+        return warn_status_from_ratio(self.usage_ratio(ledger, as_of))
 
 
 class MaintenanceLog(models.Model):
@@ -1214,7 +1294,10 @@ class MaintenanceLog(models.Model):
         related_name="logs",
     )
     done_at = models.DateField(default=date.today)
-    done_distance_km = models.FloatField(null=True, blank=True)
+    # Der Stand des Intervalls vor diesem Eintrag — damit "Rückgängig" ihn exakt
+    # wiederherstellen kann, auch wenn es davor noch gar keinen Eintrag gab.
+    previous_done_at = models.DateField(null=True, blank=True)
+    previous_baseline_at = models.DateTimeField(null=True, blank=True)
     note = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

@@ -3,15 +3,15 @@ from django.urls import path
 from .views import (
     AssemblyActivateView,
     AssemblyAddItemView,
+    AssemblyLinksView,
+    AssemblyRestoreView,
     AssemblyRetireView,
-    AssemblySwapView,
     AssistantModelsView,
     AssistantSetupView,
     BikeAssemblyDetailView,
     BikeAssemblyListView,
     BikeConditionReportView,
     BikeDetailView,
-    BikeDistanceAtDateView,
     BikeInstalledAtView,
     BikeListView,
     ComponentCheckInstructionsView,
@@ -19,26 +19,24 @@ from .views import (
     ComponentDetailView,
     ComponentGroupListView,
     ComponentListView,
+    ComponentMountView,
+    ComponentMoveView,
+    ComponentRestoreView,
+    ComponentRetireView,
     ComponentSlotDetailView,
     ComponentSlotListView,
     ComponentTemplateDetailView,
     ComponentTemplateListView,
+    ComponentUnmountView,
     ComponentWeatherExplanationView,
     MaintenanceIntervalDetailView,
     MaintenanceIntervalListCreateView,
     MaintenanceIntervalLogView,
-    SlotMountView,
-    SlotUnmountView,
 )
 
 urlpatterns = [
     path("maintenance/bikes/", BikeListView.as_view(), name="bike-list"),
     path("maintenance/bikes/<int:pk>/", BikeDetailView.as_view(), name="bike-detail"),
-    path(
-        "maintenance/bikes/<int:bike_id>/distance-at/",
-        BikeDistanceAtDateView.as_view(),
-        name="bike-distance-at",
-    ),
     path(
         "maintenance/bikes/<int:bike_id>/installed-at/",
         BikeInstalledAtView.as_view(),
@@ -82,9 +80,14 @@ urlpatterns = [
         name="assembly-retire",
     ),
     path(
-        "maintenance/assemblies/<int:pk>/swap/",
-        AssemblySwapView.as_view(),
-        name="assembly-swap",
+        "maintenance/assemblies/<int:pk>/restore/",
+        AssemblyRestoreView.as_view(),
+        name="assembly-restore",
+    ),
+    path(
+        "maintenance/assemblies/<int:pk>/links/",
+        AssemblyLinksView.as_view(),
+        name="assembly-links",
     ),
     path(
         "maintenance/bikes/<int:bike_id>/intervals/",
@@ -117,14 +120,6 @@ urlpatterns = [
         name="slot-detail",
     ),
     path(
-        "maintenance/slots/<int:pk>/mount/", SlotMountView.as_view(), name="slot-mount"
-    ),
-    path(
-        "maintenance/slots/<int:pk>/unmount/",
-        SlotUnmountView.as_view(),
-        name="slot-unmount",
-    ),
-    path(
         "maintenance/slots/<int:slot_id>/components/",
         ComponentListView.as_view(),
         name="component-list",
@@ -133,6 +128,31 @@ urlpatterns = [
         "maintenance/components/<int:pk>/",
         ComponentDetailView.as_view(),
         name="component-detail",
+    ),
+    path(
+        "maintenance/components/<int:pk>/mount/",
+        ComponentMountView.as_view(),
+        name="component-mount",
+    ),
+    path(
+        "maintenance/components/<int:pk>/unmount/",
+        ComponentUnmountView.as_view(),
+        name="component-unmount",
+    ),
+    path(
+        "maintenance/components/<int:pk>/retire/",
+        ComponentRetireView.as_view(),
+        name="component-retire",
+    ),
+    path(
+        "maintenance/components/<int:pk>/restore/",
+        ComponentRestoreView.as_view(),
+        name="component-restore",
+    ),
+    path(
+        "maintenance/components/<int:pk>/move/",
+        ComponentMoveView.as_view(),
+        name="component-move",
     ),
     path(
         "maintenance/components/<int:pk>/check/",

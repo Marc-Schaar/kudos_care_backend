@@ -12,9 +12,9 @@ from app_maintenance.models import (
     WeatherSensitivityCoefficient,
 )
 
-from ..models import AssemblyStatus, WarnLevel
+from ..models import WarnLevel
 from .serializers import compute_wear
-from .usage import component_date_windows, date_in_windows
+from .usage import RideLedger, component_windows
 
 logger = logging.getLogger("my_app_debug")
 
@@ -146,24 +146,16 @@ class WeatherWearService:
     """
     Orchestriert Neuberechnung/Persistierung von Component.weather_wear_km.
 
-    v1-Einschränkung: nur aktuell montierte Komponenten. Es gibt keine FK von
-    Ride zu Component/ComponentSlot, daher keine punktgenaue Rekonstruktion,
-    welches Teil zu einem früheren Zeitpunkt montiert war — ausgebaute/
-    historische Komponenten werden bewusst nicht unterstützt.
-
-    Voller Recompute, kein Delta/Watermark — jede Neuberechnung geht die
-    komplette Ride-Historie seit Einbau durch (analog recompute_wind.py).
-    Zeiträume, in denen die Baugruppe abgezogen war (z.B. Sommer-LRS im Keller),
-    fallen dabei aus dem Ride-Filter — siehe api/usage.py.
+    Voller Recompute, kein Delta/Watermark — jede Neuberechnung geht alle Fahrten in
+    den Nutzungszeiträumen des Teils durch (analog recompute_wind.py). Das sind
+    dieselben Fahrten, die auch die km-Achse zählt (siehe api/usage.py), deshalb
+    können beide Achsen nicht auseinanderlaufen.
     """
 
     @staticmethod
     def calculate_weather_wear_km(component: Component) -> tuple[float, int]:
         """Reine Berechnung (liest DB, schreibt nicht). Gibt (weather_wear_km, ride_count) zurück."""
         from app_dashboard.models import Ride
-
-        if not component.installed_at:
-            return 0.0, 0
 
         coeff = WeatherSensitivityCoefficient.objects.filter(
             category=component.slot.template.category
@@ -176,17 +168,18 @@ class WeatherWearService:
             )
             return 0.0, 0
 
-        windows = component_date_windows(component)
+        windows = component_windows(component)
         if not windows:
             return 0.0, 0
 
-        # Ein Q-Zweig je Nutzungsfenster — nur Fahrten, bei denen das Teil auch
-        # wirklich am Rad war.
+        # Ein Q-Zweig je Nutzungszeitraum — nur Fahrten, bei denen das Teil auch
+        # wirklich am Rad war. Halboffen, damit beim Tausch A → B jede Fahrt genau
+        # einem Teil gehört.
         window_filter = Q()
         for start, end in windows:
-            branch = Q(start_date__date__gte=start)
+            branch = Q(start_date__gte=start)
             if end is not None:
-                branch &= Q(start_date__date__lte=end)
+                branch &= Q(start_date__lt=end)
             window_filter |= branch
 
         rides = Ride.objects.filter(
@@ -214,13 +207,19 @@ class WeatherWearService:
         weather_wear_km, ride_count = WeatherWearService.calculate_weather_wear_km(
             component
         )
-        # + carried_over_weather_wear_km: analog zu wear_km in compute_wear() —
-        # component_date_windows() sieht nur die Fahrten der *aktuellen* Baugruppe,
-        # eine reaktivierte Komponente (siehe reuse_component_id) würde sonst ihre
-        # vor dem Ausbau aufgelaufene Wetter-Last verlieren.
-        component.weather_wear_km = weather_wear_km + (
-            component.carried_over_weather_wear_km or 0.0
-        )
+        # + prior_weather_km: was das Teil schon hatte, bevor es hier erfasst wurde —
+        # analog zu prior_km in compute_wear().
+        total = weather_wear_km + (component.prior_weather_km or 0.0)
+        if (
+            component.weather_wear_computed_at is not None
+            and component.weather_wear_km == total
+            and component.weather_wear_ride_count == ride_count
+        ):
+            # Keine neuen Zahlen, also auch kein neuer Zeitstempel: daran hängt die
+            # Staleness der KI-Erklärung, und die kostet einen AI-Call.
+            return component
+
+        component.weather_wear_km = total
         component.weather_wear_ride_count = ride_count
         component.weather_wear_computed_at = timezone.now()
         component.save(
@@ -233,20 +232,18 @@ class WeatherWearService:
         return component
 
     @staticmethod
-    def recompute_bike(bike: Bike, include_parked: bool = False) -> int:
+    def recompute_bike(bike: Bike) -> int:
         """
-        Rechnet die montierten Komponenten des Bikes neu — standardmäßig nur die
-        der aktiven Baugruppen. Geparkte Sätze sammeln nichts dazu, ihr Wert
-        wird beim Abziehen einmal final berechnet (`include_parked=True`).
+        Rechnet alle Teile des Bikes neu, die je gefahren wurden — nicht nur die
+        montierten: eine nachträglich synchronisierte oder gelöschte Fahrt kann auch
+        einen Reifen betreffen, der inzwischen im Regal liegt.
         """
-        components = Component.objects.filter(
-            slot__bike=bike, is_mounted=True
-        ).select_related("slot__template", "slot__assembly")
-        if not include_parked:
-            components = components.filter(
-                Q(slot__assembly__isnull=True)
-                | Q(slot__assembly__status=AssemblyStatus.ACTIVE)
-            )
+        components = (
+            Component.objects.filter(slot__bike=bike, periods__isnull=False)
+            .distinct()
+            .select_related("slot__template", "slot__assembly")
+            .prefetch_related("periods")
+        )
         count = 0
         for component in components:
             try:
@@ -272,31 +269,27 @@ def ride_wear_breakdown(ride) -> dict:
     empfohlenen Lebensdauer unterscheidet sich je Komponente.
 
     Berücksichtigt werden Komponenten, die **zum Zeitpunkt der Fahrt** am Rad waren —
-    nicht nur die heute montierten wie in `WeatherWearService`. Maßgeblich sind die
-    Nutzungsfenster aus `api/usage.py`: eine damals geparkte Baugruppe (Winter-LRS)
-    hat diese Fahrt nicht mitgemacht, auch wenn ihre Teile weiter `is_mounted` sind.
-    Nie montierte Ersatzteile bleiben draußen.
+    nicht die heute montierten: maßgeblich sind ihre Nutzungszeiträume. Nie montierte
+    Ersatzteile und eine damals geparkte Baugruppe bleiben also draußen, ein seither
+    abgenommener Reifen ist dabei.
     """
     if ride.bike_id is None or ride.start_date is None or not ride.distance:
         return {"distance_km": None, "categories": [], "component_count": 0}
 
-    ride_date = ride.start_date.date()
     distance_km = ride.distance / 1000
 
-    candidates = (
+    # Beide Bedingungen im selben filter()-Aufruf: sie müssen auf denselben
+    # Nutzungszeitraum zutreffen, nicht auf zwei verschiedene.
+    components = (
         Component.objects.filter(
+            Q(periods__ended_at__isnull=True)
+            | Q(periods__ended_at__gt=ride.start_date),
             slot__bike_id=ride.bike_id,
-            installed_at__isnull=False,
-            installed_at__lte=ride_date,
+            periods__started_at__lte=ride.start_date,
         )
-        .filter(Q(retired_at__isnull=True) | Q(retired_at__gte=ride_date))
-        .filter(Q(is_mounted=True) | Q(retired_at__isnull=False))
+        .distinct()
         .select_related("slot__template", "slot__assembly")
-        .prefetch_related("slot__assembly__periods")
     )
-    components = [
-        c for c in candidates if date_in_windows(component_date_windows(c), ride_date)
-    ]
 
     coefficients = {
         coeff.category: coeff for coeff in WeatherSensitivityCoefficient.objects.all()
@@ -533,8 +526,8 @@ def bike_condition_report_is_stale(bike: Bike) -> bool:
     if latest_ride and latest_ride > generated_at:
         return True
 
-    mounted = Component.objects.filter(
-        slot__in=ComponentSlot.objects.on_bike(bike), is_mounted=True
+    mounted = Component.objects.mounted().filter(
+        slot__in=ComponentSlot.objects.on_bike(bike)
     )
     latest_weather = mounted.aggregate(latest=Max("weather_wear_computed_at"))["latest"]
     if latest_weather and latest_weather > generated_at:
@@ -609,13 +602,14 @@ def get_new_component_warnings(
         slots = (
             ComponentSlot.objects.on_bike(b)
             .select_related("template")
-            .prefetch_related("components", "assembly__periods")
+            .prefetch_related("components__periods", "components__checks")
         )
+        ledger = RideLedger.for_bike(b.pk)
         for slot in slots:
             comp = slot.mounted_component
             if comp is None:
                 continue
-            wear = compute_wear(comp, b.total_distance_km)
+            wear = compute_wear(comp, ledger)
             status = wear["warn_status_overall"]
             if (
                 status in (WarnLevel.WARN, WarnLevel.CRITICAL)
@@ -651,21 +645,21 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
         slots = (
             ComponentSlot.objects.on_bike(bike)
             .select_related("template")
-            .prefetch_related("components", "assembly__periods")
+            .prefetch_related("components__periods", "components__checks")
         )
         mounted = [(slot, slot.mounted_component) for slot in slots]
         mounted = [(slot, comp) for slot, comp in mounted if comp is not None]
         if not mounted:
             continue
 
-        bike_total_km = bike.total_distance_km
+        ledger = RideLedger.for_bike(bike.pk)
         today_worst = WarnLevel.UNKNOWN
         projected_components = []
         for slot, comp in mounted:
-            today_wear = compute_wear(comp, bike_total_km)
+            today_wear = compute_wear(comp, ledger)
             if today_wear["warn_status_overall"] == WarnLevel.CRITICAL:
                 today_worst = WarnLevel.CRITICAL
-            projected_wear = compute_wear(comp, bike_total_km, as_of=predicted_date)
+            projected_wear = compute_wear(comp, ledger, as_of=predicted_date)
             if projected_wear["warn_status_overall"] == WarnLevel.CRITICAL:
                 projected_components.append(
                     {"slot": slot, "component": comp, "wear": projected_wear}

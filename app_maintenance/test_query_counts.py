@@ -9,8 +9,7 @@ verletzt:
 * `Bike.total_distance_km` ist ein Property mit eigener Aggregat-Query und
   wurde in den `get_warn_status`-Schleifen je Slot und je Intervall erneut
   gelesen (gemessen 18 identische `SUM`-Queries für ein einziges Bike);
-* `ComponentSlot.mounted_component` filterte mit `.filter(is_mounted=True)`
-  auf einem prefetchten Related-Manager und umging damit den Prefetch-Cache;
+* `ComponentSlot.mounted_component` filterte auf einem prefetchten Related-Manager und umging damit den Prefetch-Cache;
 * `ComponentTemplateSerializer.group_name` griff je Template auf
   `template.group` zu, ohne dass die Kette geprefetcht war;
 * Slots, die über eine `BikeAssembly` geladen werden, kennen ihr Bike nicht
@@ -33,7 +32,6 @@ from rest_framework.test import APITestCase
 from app_auth.models import StravaProfile
 from app_dashboard.models import Ride
 from app_maintenance.models import (
-    AssemblyUsagePeriod,
     Bike,
     BikeAssembly,
     BikeType,
@@ -41,6 +39,7 @@ from app_maintenance.models import (
     ComponentCategory,
     ComponentGroup,
     ComponentSlot,
+    ComponentStatus,
     ComponentTemplate,
     MaintenanceInterval,
 )
@@ -85,11 +84,6 @@ class QueryScalingTests(APITestCase):
         assembly = BikeAssembly.objects.create(
             bike=bike, group=group, installed_at=date.today() - timedelta(days=30)
         )
-        AssemblyUsagePeriod.objects.create(
-            assembly=assembly,
-            started_at=date.today() - timedelta(days=30),
-            started_distance_km=0,
-        )
         for i in range(slot_count):
             template = ComponentTemplate.objects.create(
                 name=f"Teil {suffix}-{i}",
@@ -104,8 +98,14 @@ class QueryScalingTests(APITestCase):
                 slot=slot,
                 brand="Marke",
                 installed_at=date.today() - timedelta(days=30),
-                distance_at_install=0,
-                is_mounted=True,
+            )
+            # Ein Ersatzteil und ein ausgemustertes je Platz: auch die dürfen keine
+            # zusätzlichen Queries kosten.
+            Component.objects.create(
+                slot=slot, brand="Ersatz", status=ComponentStatus.SPARE
+            )
+            Component.objects.create(
+                slot=slot, brand="Alt", status=ComponentStatus.RETIRED
             )
         for i in range(3):
             MaintenanceInterval.objects.create(
@@ -114,7 +114,6 @@ class QueryScalingTests(APITestCase):
                 label=f"Intervall {suffix}-{i}",
                 interval_km=500,
                 last_done_at=date.today() - timedelta(days=30),
-                last_done_distance_km=0,
             )
         return bike
 

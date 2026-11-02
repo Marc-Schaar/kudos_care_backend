@@ -15,7 +15,9 @@ from app_dashboard.api.wind import (
     build_wind_segments,
     hourly_headwind,
 )
+from app_maintenance.api import lifecycle
 from app_maintenance.api.services import WeatherWearService
+from app_maintenance.api.usage import start_of_day
 from app_maintenance.models import (
     AssemblyStatus,
     Bike,
@@ -25,8 +27,10 @@ from app_maintenance.models import (
     ComponentGroup,
     ComponentSlot,
     ComponentTemplate,
+    GroupKind,
     MaintenanceInterval,
     MaintenanceKind,
+    MountPosition,
 )
 
 logger = logging.getLogger("my_app_debug")
@@ -85,6 +89,10 @@ def _loop_route(
     step = elapsed_time / (ROUTE_POINTS - 1)
     time_series = [int(i * step) for i in range(ROUTE_POINTS)]
     return latlngs, time_series
+
+
+def _template(name: str) -> ComponentTemplate:
+    return ComponentTemplate.objects.get(name=name, owner__isnull=True)
 
 
 class Command(BaseCommand):
@@ -187,7 +195,6 @@ class Command(BaseCommand):
                         interval_km=template.warn_km,
                         interval_days=template.warn_days,
                         last_done_at=installed_at,
-                        last_done_distance_km=0,
                     )
                     intervals_created += 1
                     continue
@@ -201,26 +208,21 @@ class Command(BaseCommand):
                     slot=slot,
                     brand="DevBrand",
                     model_name=template.name,
-                    distance_at_install=0,
                     installed_at=installed_at,
-                    is_mounted=True,
                 )
                 mounted += 1
 
-            if assembly.installed_at is None:
-                installs = [
-                    c.installed_at
-                    for s in assembly.slots.all()
-                    for c in s.components.all()
-                    if c.installed_at
-                ]
-                if installs:
-                    assembly.installed_at = min(installs)
-                    assembly.save(update_fields=["installed_at"])
-
-            # Laufender Nutzungszeitraum, damit ein spaeterer Wechsel auf einen
-            # zweiten Satz korrekt abgerechnet wird (siehe api/usage.py).
-            assembly.ensure_open_period()
+            # Die Baugruppe ist am Rad, seit ihr ältestes Teil es ist.
+            installs = [
+                c.installed_at
+                for s in assembly.slots.all()
+                for c in s.components.all()
+                if c.installed_at
+            ]
+            if installs:
+                assembly.installed_at = min(installs)
+                assembly.save(update_fields=["installed_at"])
+                assembly.pull_first_period_back(start_of_day(min(installs)))
 
         self.stdout.write(
             f"{mounted} Komponenten montiert, {intervals_created} Wartungs-Intervalle angelegt."
@@ -335,15 +337,86 @@ class Command(BaseCommand):
         # In Produktion passiert das per Celery-Task nach jedem Ride-Import — hier
         # synchron, weil im schlanken Dev-Setup ohne Redis/Celery-Worker sonst kein
         # weather_wear_km befuellt wuerde.
-        recomputed = 0
-        for component in Component.objects.filter(slot__bike=bike, is_mounted=True):
-            WeatherWearService.recompute_component(component)
-            recomputed += 1
+        recomputed = WeatherWearService.recompute_bike(bike)
         self.stdout.write(f"{recomputed} Komponenten weather_wear_km neu berechnet.")
+
+        self._seed_second_wheelset(bike)
 
         self.stdout.write(
             self.style.SUCCESS(
                 f"Fertig. Login als Dev-Athlet (athlete_id={profile.strava_athlete_id}) via "
                 "POST /api/dev/login/ (nur mit DEBUG=True verfügbar)."
             )
+        )
+
+    def _seed_second_wheelset(self, bike: Bike) -> None:
+        """
+        Der Fall, um den es in der Teile-Verwaltung geht: zwei Laufradsätze, die
+        Bremsbeläge wechseln mit, auf dem Vorderrad liegt ein zweiter Reifen im Regal.
+        """
+        wheels = {
+            group.position: group
+            for group in ComponentGroup.objects.filter(kind=GroupKind.ASSEMBLY)
+        }
+        if BikeAssembly.objects.filter(bike=bike, name="Carbon vorne").exists():
+            return
+
+        active = {}
+        for position, group in wheels.items():
+            assembly = (
+                BikeAssembly.objects.filter(bike=bike, group=group).active().first()
+            )
+            if assembly is not None:
+                assembly.name = f"Alu {group.get_position_display().lower()}"
+                assembly.save(update_fields=["name"])
+                active[position] = assembly
+
+        carbon = {}
+        for position, tire, brand in (
+            (MountPosition.FRONT, "Reifen vorne", "Vittoria"),
+            (MountPosition.REAR, "Reifen hinten", "Vittoria"),
+        ):
+            assembly = BikeAssembly(
+                bike=bike,
+                group=wheels[position],
+                name=f"Carbon {wheels[position].get_position_display().lower()}",
+                status=AssemblyStatus.PARKED,
+                installed_at=timezone.now().date(),
+            )
+            assembly.save()
+            slot = ComponentSlot.objects.create(
+                bike=bike, assembly=assembly, template=_template(tire)
+            )
+            lifecycle.add_component(slot, brand=brand, model_name="Corsa Pro")
+            carbon[position] = assembly
+
+        lifecycle.set_links(
+            active[MountPosition.FRONT], [active[MountPosition.REAR].pk], []
+        )
+
+        pad_slot = ComponentSlot.objects.filter(
+            bike=bike,
+            assembly__status=AssemblyStatus.ACTIVE,
+            template__name="Bremsbeläge Scheibe hinten",
+        ).first()
+        pads = []
+        if pad_slot is not None:
+            pads.append(
+                lifecycle.add_component(
+                    pad_slot, mount=False, brand="SwissStop", model_name="Yellow King"
+                ).pk
+            )
+        lifecycle.set_links(
+            carbon[MountPosition.REAR], [carbon[MountPosition.FRONT].pk], pads
+        )
+
+        tire_slot = ComponentSlot.objects.filter(
+            assembly=active[MountPosition.FRONT], template__name="Reifen vorne"
+        ).first()
+        if tire_slot is not None:
+            lifecycle.add_component(
+                tire_slot, mount=False, brand="Schwalbe", model_name="Marathon Winter"
+            )
+        self.stdout.write(
+            "Zweiter Laufradsatz (Carbon) mit gekoppelten Belägen angelegt."
         )

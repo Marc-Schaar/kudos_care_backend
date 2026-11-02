@@ -1,162 +1,180 @@
 """
-Nutzungsfenster von Baugruppen und Komponenten — die **einzige** Quelle dafür,
-in welchen Abschnitten ein Teil tatsächlich am Rad war.
+Wann war ein Teil am Rad, und wie viele km fallen in diese Zeit — die **einzige**
+Quelle dafür.
 
-Hintergrund: seit mehrere Instanzen derselben `ComponentGroup` nebeneinander
-existieren dürfen (Sommer-/Winter-LRS), stimmt die alte Annahme "ab Einbau
-lückenlos montiert" nicht mehr. `wear_km` und `WeatherWearService` würden einem
-abgezogenen Laufradsatz sonst die km und das Wetter der Fahrten anrechnen, die
-das Bike auf dem anderen Satz gemacht hat.
+Die Regel ist genau ein Satz: **Eine Fahrt gehört den Teilen, die zu ihrem
+Startzeitpunkt am Rad waren.** Kilometer werden nie gespeichert, sondern aus den
+Fahrten in den Nutzungszeiträumen (`ComponentUsagePeriod`, `AssemblyUsagePeriod`)
+live zusammengezählt.
 
-Zwei Achsen, dieselben Perioden (`AssemblyUsagePeriod`):
+Vorher hingen zwei Rechnungen nebeneinander: die km-Achse rechnete mit
+gespeicherten Tacho-Schnappschüssen, die Wetter-Achse mit Datumsangaben. Sobald
+sich die Fahrten änderten, liefen sie auseinander — eine erst nach dem Reifentausch
+synchronisierte Fahrt landete beim neuen Reifen, eine gelöschte Fahrt warf die
+Schnappschüsse aus der Skala. Jetzt zählen beide Achsen dieselben Fahrten, und ein
+Nachimport oder Löschen stimmt automatisch.
 
-* **km-Fenster** (`(start_km, end_km)` auf dem Bike-Odometer) → `wear_km`,
-  `km_since_check`, `BikeAssembly.compute_km()`
-* **Datums-Fenster** (`(start_date, end_date|None)`) → Ride-Filter im
-  `WeatherWearService` und `ride_wear_breakdown`
+**Die Uhr der Fahrten:** `Ride.start_date` kommt aus Stravas `start_date_local`, ist
+also die Ortszeit, nur als UTC beschriftet. Alle Nutzungszeiträume liegen deshalb auf
+derselben Uhr (`ride_clock_now()`). Mit dem echten `timezone.now()` zählte eine Fahrt
+um 10 Uhr, nach der man um 11 Uhr die Reifen wechselt, zum neuen Reifen — in Deutschland
+liegt die echte UTC-Zeit dann noch vor der beschrifteten Startzeit.
 
-Die **Tage-Achse des Verschleißes bleibt bewusst außen vor**: Gummi und
-Dichtmilch altern auch im Keller, `wear_days` läuft daher über Parkzeiten hinweg
-weiter (siehe `compute_wear`).
+Fenster sind halboffen: `start <= Fahrt < ende`. Beim Tausch A → B endet A genau dort,
+wo B beginnt, jede Fahrt gehört also genau einem Teil.
 
-Fallback: Slots ohne Baugruppe (ungruppierte Alt-Slots) und Baugruppen ohne
-Perioden (Altbestand vor Migration 0018) liefern genau ein Fenster ab Einbau —
-also exakt das frühere Verhalten. Bestehende Zahlen ändern sich dadurch nicht.
+Die **Tage-Achse bleibt bewusst außen vor**: Gummi und Dichtmilch altern auch im
+Keller, `wear_days` zählt über Parkzeiten hinweg weiter (siehe `compute_wear`).
 """
 
 from __future__ import annotations
 
-from datetime import date
+from bisect import bisect_left
+from collections.abc import Iterable
+from datetime import date, datetime, time
+from datetime import timezone as dt_timezone
+from itertools import accumulate
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
+
+from django.utils import timezone
 
 if TYPE_CHECKING:
-    from ..models import BikeAssembly, Component
+    from ..models import BikeAssembly, Component, MaintenanceInterval
+
+#: Zeitzone der Nutzer für die "Jetzt"-Angabe. Strava liefert die Ortszeit der Fahrt,
+#: den Server interessiert hier nur, wie sich "jetzt" dazu verhält.
+RIDE_CLOCK_ZONE = ZoneInfo("Europe/Berlin")
+
+#: `None` als Start = seit jeher, `None` als Ende = bis heute offen.
+Window = tuple[datetime | None, datetime | None]
 
 
-KmWindow = tuple[float, float]
-DateWindow = tuple[date, date | None]
+def ride_clock_now() -> datetime:
+    """Jetzt, auf der Uhr von `Ride.start_date` (siehe Modul-Docstring)."""
+    return timezone.now().astimezone(RIDE_CLOCK_ZONE).replace(tzinfo=dt_timezone.utc)
 
 
-def _clip_km(
-    windows: list[KmWindow], low: float | None, high: float | None
-) -> list[KmWindow]:
+def start_of_day(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=dt_timezone.utc)
+
+
+def moment_for(day: date | None) -> datetime:
     """
-    Schneidet km-Fenster auf [low, high] zu. Fenster der Länge 0 bleiben erhalten
-    (frisch montiertes Teil = 0 km, nicht "unbekannt"), invertierte fallen weg.
+    Der Zeitpunkt zu einer Tagesangabe des Nutzers. Heute (oder keine Angabe) heißt
+    "jetzt": was heute schon gefahren wurde, gehört noch zum alten Teil. Ein Tag in
+    der Vergangenheit heißt "ab morgens": die Fahrten dieses Tages zählen schon für
+    das neue Teil, denn wer nachträglich einen Tag nennt, meint den Tag des Umbaus.
     """
-    clipped: list[KmWindow] = []
+    now = ride_clock_now()
+    if day is None or day >= now.date():
+        return now
+    return start_of_day(day)
+
+
+class RideLedger:
+    """
+    Die Fahrten eines Bikes als kumulierte km — beantwortet "wie viele km liegen in
+    diesem Zeitraum" in O(log n). Einmal je Request und Bike aufgebaut (siehe
+    `api/serializers.py::ride_ledger`), damit die Anzahl der Teile keine Queries
+    kostet.
+    """
+
+    def __init__(self, rides: Iterable[tuple[datetime, float]] = ()):
+        ordered = sorted(rides, key=lambda ride: ride[0])
+        self._starts = [start for start, _ in ordered]
+        self._cumulative = list(accumulate((km for _, km in ordered), initial=0.0))
+
+    @classmethod
+    def for_bike(cls, bike_id: int) -> "RideLedger":
+        from app_dashboard.models import Ride
+
+        rows = Ride.objects.filter(
+            bike_id=bike_id, start_date__isnull=False, distance__isnull=False
+        ).values_list("start_date", "distance")
+        return cls((start, distance / 1000) for start, distance in rows)
+
+    def km_between(self, start: datetime | None, end: datetime | None) -> float:
+        low = 0 if start is None else bisect_left(self._starts, start)
+        high = len(self._starts) if end is None else bisect_left(self._starts, end)
+        return self._cumulative[high] - self._cumulative[low] if high > low else 0.0
+
+    def km_in(self, windows: Iterable[Window]) -> float:
+        return sum(self.km_between(start, end) for start, end in windows)
+
+
+def clip_windows(windows: Iterable[Window], since: datetime | None) -> list[Window]:
+    """Schneidet Fenster unten ab — für die Baseline nach einer Prüfung/Erledigung."""
+    if since is None:
+        return list(windows)
+    clipped: list[Window] = []
     for start, end in windows:
-        if low is not None:
-            start = max(start, low)
-        if high is not None:
-            end = min(end, high)
-        if end >= start:
-            clipped.append((start, end))
+        if end is not None and end <= since:
+            continue
+        clipped.append((since if start is None or start < since else start, end))
     return clipped
 
 
-def assembly_km_windows(
-    assembly: "BikeAssembly", bike_total_km: float | None
-) -> list[KmWindow]:
+def intersect_windows(window: Window, others: Iterable[Window]) -> list[Window]:
     """
-    Odometer-Abschnitte, in denen die Baugruppe am Rad war. Leere Liste, wenn
-    keine Perioden erfasst sind (Altbestand) — der Aufrufer fällt dann auf die
-    frühere Rechnung zurück.
+    Der Teil von `window`, der in `others` liegt. Gebraucht beim Rückdatieren: ein
+    Einbaudatum darf nicht in die Zeit reichen, in der die Baugruppe im Keller lag.
     """
-    if bike_total_km is None:
-        return []
-
-    windows: list[KmWindow] = []
-    for period in assembly.periods.all():
-        if period.started_distance_km is None:
-            continue
-        end = (
-            period.ended_distance_km
-            if period.ended_at is not None and period.ended_distance_km is not None
-            else bike_total_km
-        )
-        if end >= period.started_distance_km:
-            windows.append((period.started_distance_km, end))
-    return sorted(windows)
+    start, end = window
+    result: list[Window] = []
+    for other_start, other_end in others:
+        low = max(start, other_start) if start and other_start else start or other_start
+        if end is None or other_end is None:
+            high = end or other_end
+        else:
+            high = min(end, other_end)
+        if high is None or low is None or high > low:
+            result.append((low, high))
+    return result
 
 
-def component_km_windows(
-    component: "Component", bike_total_km: float | None
-) -> list[KmWindow]:
+def component_windows(component: "Component") -> list[Window]:
+    """In welchen Zeiträumen die Komponente tatsächlich gefahren wurde."""
+    return [(p.started_at, p.ended_at) for p in component.periods.all()]
+
+
+def assembly_windows(assembly: "BikeAssembly") -> list[Window]:
+    """In welchen Zeiträumen die Baugruppe am Rad war."""
+    return [(p.started_at, p.ended_at) for p in assembly.periods.all()]
+
+
+def component_km(
+    component: "Component", ledger: RideLedger, since: datetime | None = None
+) -> float:
     """
-    Odometer-Abschnitte, in denen genau diese Komponente gefahren wurde: die
-    Perioden ihrer Baugruppe, zugeschnitten auf ihre eigene Einbau-/Ausbau-Spanne.
+    Auf dieser Komponente gefahrene km, ohne `prior_km`. `since` ist die Baseline nach
+    einer Freigabe (`ComponentCheck.baseline_moment`).
     """
-    if bike_total_km is None or component.distance_at_install is None:
-        return []
-
-    low = component.distance_at_install
-    high = component.distance_at_retire if not component.is_mounted else None
-    if high is None and not component.is_mounted:
-        # Ausgebaut, aber ohne erfassten km-Stand (Altbestand): bis heute rechnen,
-        # wie bisher — besser eine leicht zu hohe Zahl als gar keine.
-        high = bike_total_km
-
-    assembly = component.slot.assembly
-    if assembly is not None:
-        windows = assembly_km_windows(assembly, bike_total_km)
-        if windows:
-            return _clip_km(windows, low, high)
-
-    return _clip_km([(low, bike_total_km)], low, high)
+    return round(ledger.km_in(clip_windows(component_windows(component), since)), 1)
 
 
-def component_active_km(
-    component: "Component",
-    bike_total_km: float | None,
-    since_km: float | None = None,
-) -> float | None:
+def assembly_km(assembly: "BikeAssembly", ledger: RideLedger) -> float:
+    return round(ledger.km_in(assembly_windows(assembly)), 1)
+
+
+def interval_km_since_done(
+    interval: "MaintenanceInterval", ledger: RideLedger
+) -> float:
     """
-    Gefahrene km der Komponente, Parkzeiten herausgerechnet.
-
-    `since_km` ist ein Odometer-Stand als Untergrenze — gebraucht für die
-    Baseline nach einer Freigabe (`ComponentCheck.checked_at_distance_km`),
-    damit eine Parkphase nach der Prüfung ebenfalls nicht mitzählt.
-
-    `None` heißt "unbekannt" (kein Einbau-km-Stand, kein Bike-Odometer) — eine
-    Baseline, die alle Fenster wegschneidet, ergibt dagegen 0.0.
+    Km seit der letzten Erledigung. Hängt das Intervall an einer Baugruppe, zählen nur
+    deren Zeiten am Rad — Dichtmilch im Laufrad im Keller sammelt keine km.
     """
-    windows = component_km_windows(component, bike_total_km)
-    if not windows:
-        return None
-    if since_km is not None:
-        windows = _clip_km(windows, since_km, None)
-    return round(sum(end - start for start, end in windows), 1)
+    windows: list[Window] = (
+        assembly_windows(interval.assembly)
+        if interval.assembly_id is not None
+        else [(None, None)]
+    )
+    return round(ledger.km_in(clip_windows(windows, interval.km_baseline())), 1)
 
 
-def component_date_windows(component: "Component") -> list[DateWindow]:
-    """
-    Datums-Abschnitte, in denen die Komponente gefahren wurde — für den
-    Ride-Filter. `None` als Ende heißt "bis heute offen".
-    """
-    if component.installed_at is None:
-        return []
-
-    low = component.installed_at
-    high = component.retired_at if not component.is_mounted else None
-
-    assembly = component.slot.assembly
-    raw: list[DateWindow]
-    if assembly is not None and assembly.periods.all():
-        raw = [(p.started_at, p.ended_at) for p in assembly.periods.all()]
-    else:
-        raw = [(low, None)]
-
-    windows: list[DateWindow] = []
-    for start, end in raw:
-        start = max(start, low)
-        if high is not None:
-            end = high if end is None else min(end, high)
-        if end is None or end >= start:
-            windows.append((start, end))
-    return sorted(windows, key=lambda w: w[0])
-
-
-def date_in_windows(windows: list[DateWindow], day: date) -> bool:
-    """War die Komponente an diesem Tag am Rad?"""
-    return any(start <= day and (end is None or day <= end) for start, end in windows)
+def date_in_windows(windows: Iterable[Window], moment: datetime) -> bool:
+    """War das Teil zu diesem Zeitpunkt am Rad?"""
+    return any(
+        (start is None or start <= moment) and (end is None or moment < end)
+        for start, end in windows
+    )

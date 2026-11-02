@@ -9,16 +9,13 @@ zeigten 0 km. Nachgestellt an echten Produktivdaten (Scott Foil RC 10: Teile
 seit 30.03. bei 5 km, Periode ab 02.09. bei 1.208 km, angezeigt 0 km).
 """
 
-from datetime import date, timedelta
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
-from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
-from app_dashboard.models import Ride
-from app_maintenance.api.serializers import compute_wear
+from app_maintenance.api.usage import start_of_day
 from app_maintenance.models import (
     AssemblyUsagePeriod,
     Bike,
@@ -33,41 +30,17 @@ from app_maintenance.models import (
     MaintenanceInterval,
     MaintenanceKind,
 )
+from app_maintenance.testing import MaintenanceTestCase
 
 
-class _InstallBase(APITestCase):
+class _InstallBase(MaintenanceTestCase):
     """Gemeinsamer Aufbau: ein Bike mit 10 Fahrten à 100 km, täglich."""
 
     def setUp(self):
-        user = get_user_model().objects.create_user(username="bd")
-        self.profile = StravaProfile.objects.create(
-            user=user,
-            strava_athlete_id=7777,
-            access_token="t",
-            refresh_token="r",
-            expires_at=0,
-        )
-        self.client.force_login(user)
-        session = self.client.session
-        session["strava_athlete_id"] = 7777
-        session.save()
-
-        self.bike = Bike.objects.create(
-            athlete=self.profile,
-            strava_bike_id="bd1",
-            name="Rad",
-            bike_type=BikeType.ROAD,
-        )
+        super().setUp()
         # 10 Fahrten à 100 km, täglich; die älteste vor 10 Tagen.
         for i in range(10):
-            Ride.objects.create(
-                strava_id=70000 + i,
-                name=f"Fahrt {i}",
-                distance=100_000,
-                start_date=timezone.now() - timedelta(days=10 - i),
-                athlete=self.profile,
-                bike=self.bike,
-            )
+            self.ride(100, days_ago=10 - i)
 
         self.group = ComponentGroup.objects.create(
             name="Antrieb-T",
@@ -88,7 +61,7 @@ class _InstallBase(APITestCase):
             warn_km=30000,
             maintenance_kind=MaintenanceKind.PART,
         )
-        self.backdated = date.today() - timedelta(days=5)  # dort standen 600 km
+        self.backdated = self.days_ago(5)  # davor liegen 5, ab da 5 Fahrten
 
     def _create_assembly_today(self) -> int:
         """Baugruppe mit dem Default-Datum (heute) anlegen — der reale Ablauf."""
@@ -107,9 +80,8 @@ class _InstallBase(APITestCase):
         self.assertEqual(res.status_code, status.HTTP_201_CREATED)
         return res.data["id"]
 
-    def _wear(self, component: Component) -> float | None:
-        component.refresh_from_db()
-        return compute_wear(component, self.bike.total_distance_km)["wear_km"]
+    def _wear(self, component: Component) -> float:
+        return self.wear_km(component)
 
 
 class BackdatedInstallTests(_InstallBase):
@@ -128,8 +100,7 @@ class BackdatedInstallTests(_InstallBase):
         self.assertEqual(res.status_code, status.HTTP_201_CREATED)
         comp = Component.objects.get(slot__template=self.chain)
         self.assertEqual(comp.installed_at, self.backdated)
-        self.assertEqual(comp.distance_at_install, 600.0)
-        self.assertEqual(self._wear(comp), 400.0)  # 1000 gesamt − 600 bei Einbau
+        self.assertEqual(self._wear(comp), 500.0)  # Fahrten seit dem Morgen des Einbaus
 
     def test_editing_a_component_backwards_pulls_the_period_with_it(self):
         """
@@ -142,15 +113,14 @@ class BackdatedInstallTests(_InstallBase):
 
         res = self.client.patch(
             f"/api/maintenance/components/{comp.id}/",
-            {"installed_at": str(self.backdated), "distance_at_install": 600.0},
+            {"installed_at": str(self.backdated)},
             format="json",
         )
         self.assertEqual(res.status_code, status.HTTP_200_OK)
 
-        self.assertEqual(self._wear(comp), 400.0)
+        self.assertEqual(self._wear(comp), 500.0)
         period = AssemblyUsagePeriod.objects.get(assembly__bike=self.bike)
-        self.assertEqual(period.started_at, self.backdated)
-        self.assertEqual(period.started_distance_km, 600.0)
+        self.assertEqual(period.started_at, start_of_day(self.backdated))
 
     def test_period_start_is_never_pushed_forward(self):
         """
@@ -158,21 +128,23 @@ class BackdatedInstallTests(_InstallBase):
         nicht — die Periode beschreibt, seit wann der Satz am Rad ist.
         """
         assembly_id = self._create_assembly_today()
-        assembly = BikeAssembly.objects.get(pk=assembly_id)
-        period = assembly.open_period()
-        period.started_at = self.backdated
-        period.started_distance_km = 600.0
-        period.save()
-
         comp = Component.objects.get(slot__template=self.chain)
         self.client.patch(
             f"/api/maintenance/components/{comp.id}/",
-            {"installed_at": str(date.today()), "distance_at_install": 1000.0},
+            {"installed_at": str(self.backdated)},
+            format="json",
+        )
+        period = BikeAssembly.objects.get(pk=assembly_id).open_period()
+        self.assertEqual(period.started_at, start_of_day(self.backdated))
+
+        crank = Component.objects.get(slot__template=self.crank)
+        self.client.patch(
+            f"/api/maintenance/components/{crank.id}/",
+            {"installed_at": str(self.days_ago(2))},
             format="json",
         )
         period.refresh_from_db()
-        self.assertEqual(period.started_at, self.backdated)
-        self.assertEqual(period.started_distance_km, 600.0)
+        self.assertEqual(period.started_at, start_of_day(self.backdated))
 
 
 class BulkInstalledAtTests(_InstallBase):
@@ -189,17 +161,14 @@ class BulkInstalledAtTests(_InstallBase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data["components_updated"], 2)
         self.assertEqual(res.data["assemblies_updated"], 1)
-        self.assertEqual(res.data["distance_at_install"], 600.0)
 
         for template in (self.chain, self.crank):
             comp = Component.objects.get(slot__template=template)
             self.assertEqual(comp.installed_at, self.backdated)
-            self.assertEqual(comp.distance_at_install, 600.0)
-            self.assertEqual(self._wear(comp), 400.0)
+            self.assertEqual(self._wear(comp), 500.0)
 
         period = AssemblyUsagePeriod.objects.get(assembly__bike=self.bike)
-        self.assertEqual(period.started_at, self.backdated)
-        self.assertEqual(period.started_distance_km, 600.0)
+        self.assertEqual(period.started_at, start_of_day(self.backdated))
 
     def test_can_be_limited_to_one_assembly(self):
         first = self._create_assembly_today()
@@ -234,13 +203,13 @@ class BulkInstalledAtTests(_InstallBase):
 
         # Der Sattel der anderen Baugruppe bleibt unberührt.
         untouched = Component.objects.get(slot__template=saddle)
-        self.assertEqual(untouched.installed_at, date.today())
+        self.assertEqual(untouched.installed_at, self.today())
 
     def test_future_dates_are_refused(self):
         self._create_assembly_today()
         res = self.client.post(
             f"/api/maintenance/bikes/{self.bike.id}/installed-at/",
-            {"installed_at": str(date.today() + timedelta(days=1))},
+            {"installed_at": str(self.today() + timedelta(days=1))},
             format="json",
         )
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
@@ -323,8 +292,7 @@ class AssemblyAddItemTests(_InstallBase):
         comp = Component.objects.get(slot__template=self.crank)
         self.assertEqual(comp.brand, "Shimano")
         self.assertEqual(comp.installed_at, self.backdated)
-        self.assertEqual(comp.distance_at_install, 600.0)
-        self.assertEqual(self._wear(comp), 400.0)
+        self.assertEqual(self._wear(comp), 500.0)
 
     def test_a_backdated_part_pulls_the_period_with_it(self):
         self.client.post(
@@ -333,8 +301,7 @@ class AssemblyAddItemTests(_InstallBase):
             format="json",
         )
         period = AssemblyUsagePeriod.objects.get(assembly_id=self.assembly_id)
-        self.assertEqual(period.started_at, self.backdated)
-        self.assertEqual(period.started_distance_km, 600.0)
+        self.assertEqual(period.started_at, start_of_day(self.backdated))
 
     def test_consumable_becomes_an_interval_not_a_part(self):
         res = self.client.post(
@@ -381,46 +348,34 @@ class AssemblyAddItemTests(_InstallBase):
 
 class PeriodOverlapTests(_InstallBase):
     """
-    Der Beginn einer offenen Periode darf nie vor das Ende der letzten
-    abgeschlossenen rutschen.
+    Rückdatieren darf nicht in eine Zeit reichen, in der die Baugruppe im Keller lag.
 
-    Sonst ueberlappen beide, `assembly_km_windows()` summiert denselben
-    Zeitraum zweimal, und die Baugruppe steht ueber der Gesamtleistung des Rads
-    (an Produktivdaten gemessen: 19.691 km bei einem Rad mit 9.868 km).
+    Sonst zählt das Teil Fahrten mit, die ein anderes Laufrad gefahren ist, und die
+    Baugruppe steht über der Gesamtleistung des Rads (an Produktivdaten gemessen: 19.691 km
+    bei einem Rad mit 9.868 km).
     """
 
-    def test_period_start_stops_at_the_previous_period_end(self):
+    def test_backdating_skips_the_time_the_assembly_was_off(self):
         assembly_id = self._create_assembly_today()
         assembly = BikeAssembly.objects.get(pk=assembly_id)
-        open_period = assembly.open_period()
+        chain = Component.objects.get(slot__template=self.chain)
 
-        # Eine abgeschlossene Periode davor, wie sie ein Park-/Wechsel-Zyklus
-        # hinterlaesst.
-        AssemblyUsagePeriod.objects.create(
-            assembly=assembly,
-            started_at=date.today() - timedelta(days=10),
-            started_distance_km=0.0,
-            ended_at=date.today() - timedelta(days=2),
-            ended_distance_km=800.0,
+        # Vor 10 bis vor 6 Tagen am Rad, dann im Keller, seit heute wieder.
+        assembly.periods.create(
+            started_at=start_of_day(self.days_ago(10)),
+            ended_at=start_of_day(self.days_ago(6)),
         )
 
-        comp = Component.objects.get(slot__template=self.chain)
         self.client.patch(
-            f"/api/maintenance/components/{comp.id}/",
-            {
-                "installed_at": str(date.today() - timedelta(days=9)),
-                "distance_at_install": 100.0,
-            },
+            f"/api/maintenance/components/{chain.id}/",
+            {"installed_at": str(self.days_ago(9))},
             format="json",
         )
 
-        open_period.refresh_from_db()
-        self.assertEqual(open_period.started_at, date.today() - timedelta(days=2))
-        self.assertEqual(open_period.started_distance_km, 800.0)
-
-        total = self.bike.total_distance_km
+        # Drei Fahrten aus der ersten Zeit am Rad; die vier im Keller zählen nicht.
+        self.assertEqual(self._wear(chain), 300.0)
         self.assertLessEqual(
-            assembly.compute_km(total),
-            total,
+            assembly.compute_km(),
+            self.bike.total_distance_km,
             "Eine Baugruppe kann nicht mehr km haben als das Rad.",
         )
