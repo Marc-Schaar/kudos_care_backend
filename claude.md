@@ -64,6 +64,15 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   über `user__email` — eine Suche verriete die Adresse auch ohne Anzeige, weil ein
   Treffer sie bestätigt) und **nicht in Logs** (bei Versandfehlern steht die
   Athleten-Id; Logdateien leben länger und werden breiter gelesen als die Datenbank).
+  **Einwilligungen** (`app_auth/consent.py`): `StravaProfile.weather_consent_at` und
+  `ai_consent_at` sind Zeitpunkte statt Flags, weil sie der Nachweis sind; `GET|PATCH me/`
+  bilden sie als Bools ab. Stravas API Agreement verbietet die Weitergabe von Nutzerdaten an
+  Dritte ohne ausdrückliche Einwilligung. Ohne Wetter-Einwilligung gehen beim Import keine
+  Koordinaten an Open-Meteo (`recompute_wind` überspringt solche Nutzer und holt nach einer
+  späteren Zustimmung die alten Fahrten nach). Ohne KI-Einwilligung liefern die KI-Endpoints 403
+  `ai_consent_required`; `wear-impact` gibt stattdessen die Zahlen mit
+  `ai_consent_required: true`. **Die Prüfung gehört direkt vor den Anbieter-Aufruf**, Gecachtes
+  bleibt lesbar. Neue KI-Endpoints brauchen dieselbe Prüfung, Tests die Einwilligung im Setup.
   Offen aus derselben Durchsicht: kein Datenexport (Art. 20), und die GPS-Tracks in
   `Ride.track`/`RideStream.latlngs` sind ein deutlich sensiblerer Datensatz als jede
   Adresse.

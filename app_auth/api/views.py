@@ -6,6 +6,7 @@ from django.contrib.auth import login, logout
 from django.contrib.auth.models import User
 from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework import status
@@ -13,6 +14,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from app_auth.consent import has_ai_consent, has_weather_consent
 from app_auth.mixins import CsrfExemptSessionAuthentication
 from app_auth.models import StravaProfile
 from app_notifications.tasks import send_welcome_email_task
@@ -86,6 +88,15 @@ class StravaAuthCallbackView(APIView):
                 sync_bikes_from_strava(athlete_data, profile)
                 send_welcome_email_task.delay(profile.id)
 
+            # Nur setzen, nie zurücknehmen: wer sich erneut anmeldet und das Kästchen nicht
+            # ankreuzt, widerruft damit nichts. Das geht im Benutzermenü.
+            if (
+                serializer.validated_data["weather_consent"]
+                and not profile.weather_consent_at
+            ):
+                profile.weather_consent_at = timezone.now()
+                profile.save(update_fields=["weather_consent_at"])
+
             login(request, profile.user)
 
             request.session["strava_athlete_id"] = profile.strava_athlete_id
@@ -144,6 +155,8 @@ class CurrentUserView(APIView):
             "email": email,
             "email_notifications_enabled": profile.email_notifications_enabled,
             "needs_email": not email,
+            "weather_consent": has_weather_consent(profile),
+            "ai_consent": has_ai_consent(profile),
         }
 
     @method_decorator(ensure_csrf_cookie)
@@ -176,6 +189,19 @@ class CurrentUserView(APIView):
         if "email_notifications_enabled" in data:
             profile.email_notifications_enabled = data["email_notifications_enabled"]
             profile.save(update_fields=["email_notifications_enabled"])
+
+        for key, field in (
+            ("weather_consent", "weather_consent_at"),
+            ("ai_consent", "ai_consent_at"),
+        ):
+            if key not in data:
+                continue
+            # Eine wiederholte Zustimmung lässt den ursprünglichen Zeitpunkt stehen.
+            if data[key] and getattr(profile, field) is None:
+                setattr(profile, field, timezone.now())
+            elif not data[key]:
+                setattr(profile, field, None)
+            profile.save(update_fields=[field])
 
         # Bei Erstanmeldung ohne hinterlegte E-Mail lief die Willkommens-Mail ins
         # Leere (send_templated_email gibt dann still False zurueck). Sobald zum

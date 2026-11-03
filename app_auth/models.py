@@ -49,6 +49,19 @@ class StravaProfile(models.Model):
         ),
     )
 
+    # Einwilligungen in die Weitergabe an Dritte (siehe app_auth/consent.py). Der Zeitpunkt
+    # statt eines Flags, weil er der Nachweis ist. NULL heißt: keine Einwilligung.
+    weather_consent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Einwilligung: Startkoordinaten und Datum von Fahrten an Open-Meteo.",
+    )
+    ai_consent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Einwilligung: Fahrt-, Rad- und Teileangaben an Gemini oder Groq.",
+    )
+
     if TYPE_CHECKING:
         id: int
 

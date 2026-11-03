@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from app_auth.consent import ai_consent_required_response, has_ai_consent
 from app_auth.models import StravaProfile
 from app_maintenance.models import (
     AssemblyStatus,
@@ -524,6 +525,9 @@ class ComponentWeatherExplanationView(AthleteMixin, APIView):
             )
 
         wear = compute_wear(component)
+        if not has_ai_consent(component.slot.bike.athlete):
+            return ai_consent_required_response()
+
         system_prompt, user_prompt = build_weather_explanation_prompt(component, wear)
         explanation = generate_reviewed_text(system_prompt, user_prompt)
 
@@ -584,6 +588,9 @@ class ComponentCheckInstructionsView(AthleteMixin, APIView):
                     "cached": True,
                 }
             )
+
+        if not has_ai_consent(component.slot.bike.athlete):
+            return ai_consent_required_response()
 
         system_prompt, user_prompt = build_check_instructions_prompt(component, wear)
         instructions = generate_reviewed_text(system_prompt, user_prompt)
@@ -677,6 +684,9 @@ class BikeConditionReportView(AthleteMixin, APIView):
                     "cached": True,
                 }
             )
+
+        if not has_ai_consent(bike.athlete):
+            return ai_consent_required_response()
 
         system_prompt, user_prompt = build_bike_condition_report_prompt(
             bike, component_summaries
@@ -1514,6 +1524,9 @@ class AssistantModelsView(AthleteMixin, APIView):
     """
 
     def post(self, request):
+        if not has_ai_consent(self.get_athlete()):
+            return ai_consent_required_response()
+
         body = AssistantModelsRequestSerializer(data=request.data)
         body.is_valid(raise_exception=True)
         data = body.validated_data
@@ -1542,6 +1555,9 @@ class AssistantSetupView(AthleteMixin, APIView):
 
     def post(self, request, bike_id):
         bike = get_object_or_404(Bike, pk=bike_id, athlete=self.get_athlete())
+        if not has_ai_consent(bike.athlete):
+            return ai_consent_required_response()
+
         body = AssistantSetupRequestSerializer(data=request.data)
         body.is_valid(raise_exception=True)
         data = body.validated_data

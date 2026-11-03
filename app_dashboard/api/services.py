@@ -11,6 +11,7 @@ from django.db.models import F
 from shapely.geometry import LineString as ShapelyLineString
 
 from app_auth.api.utils import strava_get
+from app_auth.consent import has_weather_consent
 from app_auth.models import StravaProfile
 from app_maintenance.api.tasks import recompute_weather_wear_for_bike
 from app_maintenance.models import Bike
@@ -221,7 +222,7 @@ class StravaImportService:
             stream_data = None
 
         avg_headwind = None
-        if start_latlng and start_date:
+        if start_latlng and start_date and has_weather_consent(profile):
             weather_info = WeatherService.get_historical_weather(
                 start_latlng[0], start_latlng[1], start_date
             )

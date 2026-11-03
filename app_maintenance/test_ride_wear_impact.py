@@ -206,6 +206,8 @@ class RideMultiplierDetailTests(APITestCase):
 class ActivityWearImpactViewTests(RideWearBreakdownTests):
     def setUp(self):
         super().setUp()
+        self.profile.ai_consent_at = timezone.now()
+        self.profile.save(update_fields=["ai_consent_at"])
         self.client.force_login(self.profile.user)
         session = self.client.session
         session["strava_athlete_id"] = self.profile.strava_athlete_id

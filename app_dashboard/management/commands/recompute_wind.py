@@ -32,6 +32,7 @@ class Command(BaseCommand):
             start_latlng__isnull=False,
             track__isnull=False,
             streams__isnull=False,
+            athlete__weather_consent_at__isnull=False,
         ).select_related("streams")
 
         updated = 0

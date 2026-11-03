@@ -4,6 +4,7 @@ from rest_framework import serializers
 class StravaAuthSerializer(serializers.Serializer):
     code = serializers.CharField(required=True, write_only=True)
     scope = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    weather_consent = serializers.BooleanField(required=False, default=False)
 
 
 class UserSettingsSerializer(serializers.Serializer):
@@ -17,10 +18,10 @@ class UserSettingsSerializer(serializers.Serializer):
 
     email = serializers.EmailField(required=False, allow_blank=True)
     email_notifications_enabled = serializers.BooleanField(required=False)
+    weather_consent = serializers.BooleanField(required=False)
+    ai_consent = serializers.BooleanField(required=False)
 
     def validate(self, attrs):
         if not attrs:
-            raise serializers.ValidationError(
-                "Mindestens eines von 'email' oder 'email_notifications_enabled' angeben."
-            )
+            raise serializers.ValidationError("Mindestens eine Einstellung angeben.")
         return attrs

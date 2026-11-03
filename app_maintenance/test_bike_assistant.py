@@ -13,6 +13,7 @@ from unittest.mock import patch
 import requests
 from django.contrib.auth import get_user_model
 from django.test import override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -331,6 +332,8 @@ class KudoModelSuggestionTests(APITestCase):
 class AssistantEndpointTests(KudoCatalogGuardTests):
     def setUp(self):
         super().setUp()
+        self.profile.ai_consent_at = timezone.now()
+        self.profile.save(update_fields=["ai_consent_at"])
         self.client.force_login(self.profile.user)
         session = self.client.session
         session["strava_athlete_id"] = self.profile.strava_athlete_id

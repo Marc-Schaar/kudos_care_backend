@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from app_auth.consent import ai_consent_required_response, has_ai_consent
 from app_auth.mixins import CsrfExemptSessionAuthentication
 from app_auth.models import StravaProfile
 from app_maintenance.api.ai_providers import generate_reviewed_text, get_ai_provider
@@ -181,6 +182,9 @@ class ActivitySummaryView(APIView):
                 }
             )
 
+        if not has_ai_consent(ride.athlete):
+            return ai_consent_required_response()
+
         system_prompt, user_prompt = build_ride_summary_prompt(ride)
         summary = get_ai_provider().generate_text(system_prompt, user_prompt)
 
@@ -246,6 +250,18 @@ class ActivityWearImpactView(APIView):
                     "summary": ride.wear_impact_summary,
                     "generated_at": ride.wear_impact_generated_at,
                     "cached": True,
+                }
+            )
+
+        # Die Zahlen stehen für sich: ohne Einwilligung fehlt nur der Erzähltext.
+        if not has_ai_consent(ride.athlete):
+            return Response(
+                {
+                    "breakdown": breakdown,
+                    "summary": "",
+                    "generated_at": None,
+                    "cached": False,
+                    "ai_consent_required": True,
                 }
             )
 

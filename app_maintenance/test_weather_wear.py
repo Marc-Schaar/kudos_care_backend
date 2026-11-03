@@ -322,6 +322,8 @@ class ComponentWeatherExplanationViewTests(APITestCase):
             username="weather-explain", password="pw"
         )
         self.profile = _make_profile(self.user, strava_athlete_id=98765)
+        self.profile.ai_consent_at = timezone.now()
+        self.profile.save(update_fields=["ai_consent_at"])
         self.client.force_login(self.user)
         session = self.client.session
         session["strava_athlete_id"] = self.profile.strava_athlete_id
@@ -464,6 +466,8 @@ class ComponentCheckInstructionsViewTests(APITestCase):
             username="check-instructions", password="pw"
         )
         self.profile = _make_profile(self.user, strava_athlete_id=98766)
+        self.profile.ai_consent_at = timezone.now()
+        self.profile.save(update_fields=["ai_consent_at"])
         self.client.force_login(self.user)
         session = self.client.session
         session["strava_athlete_id"] = self.profile.strava_athlete_id
@@ -560,6 +564,8 @@ class BikeConditionReportViewTests(APITestCase):
             username="condition-report", password="pw"
         )
         self.profile = _make_profile(self.user, strava_athlete_id=11111)
+        self.profile.ai_consent_at = timezone.now()
+        self.profile.save(update_fields=["ai_consent_at"])
         self.client.force_login(self.user)
         session = self.client.session
         session["strava_athlete_id"] = self.profile.strava_athlete_id
