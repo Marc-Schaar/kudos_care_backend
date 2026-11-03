@@ -183,7 +183,9 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `MaintenanceLog` (Historie der Erledigungen), `WeatherSensitivityCoefficient`
   (Regen/Hitze/Kälte/Wind-Gewichtung je `ComponentCategory`, geseedet in Migration `0006`
   bzw. für neu hinzugekommene Kategorien in Folgemigrationen wie `0011`,
-  Basis für eine spätere Kalibrierung aus `ComponentCheck.condition_pct`-Verlauf),
+  Basis für eine spätere Kalibrierung aus `ComponentCheck.condition_pct`-Verlauf; die
+  Landing-Page rechnet ohne Anmeldung und hält eine Kopie von Formel und Startwerten in
+  `kudos_care_frontend/.../app-landing/models/wear-formula.ts`, Änderungen dort nachziehen),
   `ComponentCheck` (Log eines Checks/Release, optional `condition_pct` + Snooze).
   `AthleteMixin` (`api/views.py`) scoped alle Querysets auf
   `request.session["strava_athlete_id"]`.

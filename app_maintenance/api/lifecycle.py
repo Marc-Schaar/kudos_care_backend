@@ -613,15 +613,7 @@ def retire_assembly(
     return targets
 
 
-def restore_assembly(assembly: BikeAssembly) -> None:
-    """
-    Holt eine ausgemusterte Baugruppe zurück, samt den Teilen, die an dem Tag mit ihr
-    ausgemustert wurden. Ist für die Gruppe schon etwas aufgezogen, kommt sie geparkt
-    zurück und verdrängt nichts.
-    """
-    if not assembly.is_retired:
-        return
-
+def _restore_one(assembly: BikeAssembly) -> None:
     bike, group = assembly.bike, assembly.group
     if (
         group.kind == GroupKind.AREA
@@ -635,26 +627,48 @@ def restore_assembly(assembly: BikeAssembly) -> None:
         )
 
     retired_day = assembly.retired_at
-    with transaction.atomic():
-        assembly.status = (
-            AssemblyStatus.PARKED
-            if active_sibling(bike, group) is not None
-            else AssemblyStatus.ACTIVE
-        )
-        assembly.retired_at = None
-        assembly.save(update_fields=["status", "retired_at", "updated_at"])
+    assembly.status = (
+        AssemblyStatus.PARKED
+        if active_sibling(bike, group) is not None
+        else AssemblyStatus.ACTIVE
+    )
+    assembly.retired_at = None
+    assembly.save(update_fields=["status", "retired_at", "updated_at"])
 
-        for slot in assembly.slots.select_related("assembly"):
-            part = (
-                slot.components.retired()
-                .filter(retired_at=retired_day)
-                .order_by("-updated_at")
-                .first()
-            )
-            if part is not None and _mounted_in(slot) is None:
-                part.status = ComponentStatus.MOUNTED
-                part.retired_at = None
-                part.save(update_fields=["status", "retired_at", "updated_at"])
+    for slot in assembly.slots.select_related("assembly"):
+        part = (
+            slot.components.retired()
+            .filter(retired_at=retired_day)
+            .order_by("-updated_at")
+            .first()
+        )
+        if part is not None and _mounted_in(slot) is None:
+            part.status = ComponentStatus.MOUNTED
+            part.retired_at = None
+            part.save(update_fields=["status", "retired_at", "updated_at"])
+
+
+def restore_assembly(assembly: BikeAssembly) -> None:
+    """
+    Holt eine ausgemusterte Baugruppe zurück, samt den Teilen, die an dem Tag mit ihr
+    ausgemustert wurden. Ist für die Gruppe schon etwas aufgezogen, kommt sie geparkt
+    zurück und verdrängt nichts.
+
+    Wurde der ganze Satz gemeinsam ausgemustert, kommt er auch gemeinsam zurück: das
+    gekoppelte Laufrad vom selben Tag gehört dazu, sonst bliebe vom Rückgängig nur
+    die Hälfte.
+    """
+    if not assembly.is_retired:
+        return
+
+    partners = list(
+        assembly.linked_assemblies.retired()
+        .filter(retired_at=assembly.retired_at)
+        .select_related("group", "bike")
+    )
+    with transaction.atomic():
+        for target in [assembly, *partners]:
+            _restore_one(target)
 
 
 def set_links(

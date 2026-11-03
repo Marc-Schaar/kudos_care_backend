@@ -754,6 +754,28 @@ class WheelRetireTests(WheelScenario):
         self.ride(30)
         self.assertEqual(self.wear_km(self.tire), 130, "Die Zeit im Müll zählt nicht.")
 
+    def test_a_set_retired_together_comes_back_together(self):
+        self.post(f"{P}/assemblies/{self.alu.id}/retire/", {"with_linked": True})
+        self.post(f"{P}/assemblies/{self.alu.id}/restore/")
+        self.alu.refresh_from_db()
+        self.alu_rear.refresh_from_db()
+        self.assertTrue(self.alu.is_active)
+        self.assertTrue(self.alu_rear.is_active)
+        self.assertTrue(self.part_in(self.alu_rear, self.tire_rear).is_mounted)
+
+    def test_restoring_leaves_a_partner_retired_on_another_day(self):
+        self.post(
+            f"{P}/assemblies/{self.alu_rear.id}/retire/",
+            {"on": str(self.days_ago(0))},
+        )
+        BikeAssembly.objects.filter(pk=self.alu_rear.pk).update(
+            retired_at=self.days_ago(30)
+        )
+        self.post(f"{P}/assemblies/{self.alu.id}/retire/")
+        self.post(f"{P}/assemblies/{self.alu.id}/restore/")
+        self.alu_rear.refresh_from_db()
+        self.assertTrue(self.alu_rear.is_retired)
+
     def test_restore_comes_back_parked_when_the_slot_is_taken(self):
         self.post(f"{P}/assemblies/{self.carbon.id}/activate/")
         self.post(f"{P}/assemblies/{self.alu.id}/retire/")
