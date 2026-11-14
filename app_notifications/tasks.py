@@ -2,6 +2,13 @@ import logging
 
 from celery import shared_task
 
+from .presentation import (
+    group_predictions,
+    group_warnings,
+    prediction_subject,
+    warning_headline,
+    warning_subject,
+)
 from .services import send_templated_email
 
 logger = logging.getLogger("my_app_debug")
@@ -52,17 +59,16 @@ def _send_component_warning_digest(profile, bike=None) -> bool:
     if not warnings:
         return False
 
-    count = len(warnings)
-    if count == 1:
-        subject = "Kudos Care: 1 Komponente benötigt Aufmerksamkeit"
-    else:
-        subject = f"Kudos Care: {count} Komponenten benötigen Aufmerksamkeit"
-
+    groups = group_warnings(warnings)
     sent = send_templated_email(
         profile,
-        subject=subject,
+        subject=warning_subject(groups),
         template_name="emails/component_warnings.html",
-        context={"warnings": warnings, "immediate": bike is not None},
+        context={
+            "groups": groups,
+            "headline": warning_headline(groups),
+            "immediate": bike is not None,
+        },
     )
     if sent:
         for warning in warnings:
@@ -143,11 +149,12 @@ def check_bike_unsafe_predictions():
         if not predictions:
             continue
 
+        groups = group_predictions(predictions)
         sent = send_templated_email(
             profile,
-            subject="Kudos Care: Vor der nächsten Fahrt prüfen",
+            subject=prediction_subject(groups),
             template_name="emails/bike_unsafe_predictions.html",
-            context={"predictions": predictions},
+            context={"groups": groups},
         )
         if sent:
             sent_count += 1

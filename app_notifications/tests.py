@@ -1,6 +1,5 @@
 import itertools
 from datetime import date, timedelta
-from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
 from django.core import mail
@@ -27,7 +26,6 @@ from app_notifications.tasks import (
     check_component_warnings_for_bike,
     send_welcome_email_task,
 )
-from app_notifications.templatetags.notification_extras import warn_label
 
 
 def _make_profile(user, strava_athlete_id=80001, email_enabled=True):
@@ -367,38 +365,3 @@ class HtmlToPlaintextTests(SimpleTestCase):
         self.assertNotIn("background-color", result)
         self.assertNotIn("font-family", result)
         self.assertNotIn("{% ", result)
-
-
-class WarnLabelFilterTests(SimpleTestCase):
-    """Rohe Status-Slugs ("critical") gehoeren nicht in eine deutsche Nutzer-Mail."""
-
-    def test_translates_known_statuses(self):
-        self.assertEqual(warn_label("critical"), "Überfällig")
-        self.assertEqual(warn_label("warn"), "Bald fällig")
-        self.assertEqual(warn_label("ok"), "In Ordnung")
-
-    def test_passes_through_unknown_values(self):
-        self.assertEqual(warn_label("etwas-neues"), "etwas-neues")
-
-    def test_warning_mail_renders_german_label(self):
-        html = render_to_string(
-            "emails/component_warnings.html",
-            {
-                "frontend_url": "http://localhost:3000",
-                "immediate": True,
-                "warnings": [
-                    {
-                        "bike": SimpleNamespace(name="Gravel"),
-                        "slot": SimpleNamespace(display_name="Kette"),
-                        "wear": {
-                            "wear_km": 100,
-                            "wear_days": 10,
-                            "warn_status_overall": "critical",
-                        },
-                    }
-                ],
-            },
-        )
-        self.assertIn("Überfällig", html)
-        # Der Slug darf nur noch als CSS-Klasse vorkommen, nicht als sichtbarer Text.
-        self.assertIn("badge-critical", html)

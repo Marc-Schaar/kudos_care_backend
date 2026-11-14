@@ -478,14 +478,23 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   Plaintext-Fallback via `html_to_plaintext()`. Letzteres statt `strip_tags` allein, weil
   `strip_tags` nur Tags entfernt, nicht den Inhalt von `<style>` — sonst landet das
   komplette Stylesheet im Plaintext-Teil; zusätzlich werden HTML-Entities aufgelöst.
-  Das Layout ist **tabellenbasiert** (Outlook rendert mit Word und bricht bei
-  div/flex), hell mit dunklem Marken-Band und Lime-CTA — durchgehend dunkel wie die App
-  invertieren Outlook und einige Gmail-Dark-Modes teilweise. Webfonts werden in Mail-
-  Clients meist nicht geladen, es zählen die Fallback-Stacks. Deutsche Status-Labels
-  kommen aus dem Template-Filter `templatetags/notification_extras.py::warn_label`
-  (vorher stand dort der rohe Slug „critical"). Design prüfen ohne Versand:
-  `python manage.py preview_emails --text --open`. gibt bei Opt-out/fehlender E-Mail/Versandfehler `False`
-  zurück statt zu werfen. Drei E-Mail-Typen, alle über `tasks.py`: (1) Willkommens-Mail
+  Das Layout ist ein **Werkstattzettel** und **tabellenbasiert** (Outlook rendert mit
+  Word und bricht bei div/flex): helles „Zeichenpapier" mit den Light-Mode-Tokens der
+  App, dunkles Band mit der Wortmarke, Lime nur auf dem Knopf — durchgehend dunkel wie
+  die App invertieren Outlook und einige Gmail-Dark-Modes teilweise. **Keine Webfonts
+  per `<link>`**: Google Fonts schickt beim Öffnen die IP des Empfängers an Google; es
+  zählen die Fallback-Stacks. Je Teil eine Zeile (`templates/emails/_wear_line.html`):
+  Statusform (◆/▲), die Zahl, nach der man handelt („312 km drüber"/„noch 18 Tage"),
+  Herleitung und ein Balken. **Die Templates rechnen nichts** — `presentation.py` baut
+  aus `compute_wear()` die `WearLine`s, gruppiert je Rad, formuliert Betreff
+  (nennt das dringendste Teil) und Überschrift und formatiert deutsche Daten
+  (`LANGUAGE_CODE` ist `en-us`, der `date`-Filter schriebe „Saturday"). Die
+  Restwert-Regel ist eine **Kopie von `partRemaining()`** im Frontend
+  (`app-maintenance/shared/utils/utils.ts`), damit Mail und App dieselbe Zahl nennen —
+  Änderungen dort nachziehen. Design prüfen ohne Versand:
+  `python manage.py preview_emails --text --open` (schickt die Beispieldaten durch
+  dieselben Helfer und gibt den Betreff mit aus). `send_templated_email()` gibt bei
+  Opt-out/fehlender E-Mail/Versandfehler `False` zurück statt zu werfen. Drei E-Mail-Typen, alle über `tasks.py`: (1) Willkommens-Mail
   (`send_welcome_email_task`) — automatisch bei Erstanmeldung (Hook in
   `app_auth/api/views.py::StravaAuthCallbackView`), rückwirkend für Bestandsnutzer per
   Admin-Action "Willkommens-E-Mail senden" auf `StravaProfileAdmin`; (2) Komponenten-Warnung
@@ -779,7 +788,12 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   (Projektion, Ausschluss bereits heute kritischer Bikes, Dedupe via
   `predicted_unsafe_notified_for_date`), `SendWelcomeEmailTaskTests`.
   Dazu `HtmlToPlaintextTests` (Stylesheet-Inhalt und HTML-Entities dürfen nicht im
-  Plaintext-Teil landen) und `WarnLabelFilterTests` (deutsche Labels statt roher Slugs).
+  Plaintext-Teil landen). `app_notifications/test_presentation.py` (`SimpleTestCase`,
+  Stubs statt DB): `WearLineTests` (dieselbe Restwert-Regel wie das Frontend — km inkl.
+  Wetteraufschlag gegen Tage, „drüber" zählt weiter, Singular „1 Tag"),
+  `GroupingAndSubjectTests` (je Rad, Dringendstes zuerst, Betreff nennt das Teil,
+  deutsches Datum) und `RenderedWarningMailTests` (Link aufs Rad, kein roher Slug und
+  kein „? km" im sichtbaren Text).
 - `app_auth/tests.py`: `CurrentUserSettingsTests` (GET/PATCH `me/`, `needs_email`,
   Nachholen der Willkommens-Mail beim ersten Setzen einer Adresse — und nur dann),
   `StravaAuthCallbackWelcomeEmailTests` (Willkommens-Mail-Trigger nur bei

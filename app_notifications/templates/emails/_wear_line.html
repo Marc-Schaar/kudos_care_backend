@@ -1,0 +1,36 @@
+{% comment %}
+  Eine Zeile des Werkstattzettels, gebaut aus presentation.WearLine.
+  Optional: `prefix` vor der Zahl (z.B. "dann" in der Vorhersage-Mail).
+  Die Form steht in einer eigenen Spalte, damit lange Namen am Handy bündig umbrechen.
+{% endcomment %}<tr class="line">
+  <td class="line-cell">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        <td width="18" valign="top" class="shape status-{{ line.status }}">{{ line.shape }} </td>
+        <td valign="top">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td valign="top" class="line-name">{{ line.name }}</td>
+              {% if line.remaining %}<td valign="top" align="right" class="remaining status-{{ line.status }}">{% if prefix %}{{ prefix }} {% endif %}{{ line.remaining }}</td>{% endif %}
+            </tr>
+            <tr>
+              <td colspan="2" class="line-sub">{% if line.part %}{{ line.part }}{% if line.detail %} &middot; {% endif %}{% endif %}{{ line.detail }}</td>
+            </tr>
+            {% if line.bar_pct %}
+            <tr>
+              <td colspan="2">
+                <table role="presentation" class="meter" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td width="{{ line.bar_pct }}%" height="6" bgcolor="{% if line.status == 'critical' %}#be123c{% elif line.status == 'warn' %}#975200{% else %}#15702f{% endif %}">&nbsp;</td>
+                    {% if line.rest_pct %}<td width="{{ line.rest_pct }}%" height="6" bgcolor="#d9dcd8">&nbsp;</td>{% endif %}
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            {% endif %}
+          </table>
+        </td>
+      </tr>
+    </table>
+  </td>
+</tr>

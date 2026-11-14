@@ -1,50 +1,30 @@
 {% extends "emails/base_email.html" %}
-{% load notification_extras %}
 
-{% block title %}Kudos Care: Vor der nächsten Fahrt prüfen{% endblock %}
+{% block title %}Vor deiner nächsten Fahrt{% endblock %}
 
 {% block content %}
-<h1>Bald wieder unterwegs?</h1>
-<p>
-  Basierend auf deinem bisherigen Fahrverhalten schätzen wir, wann du folgende Bikes
-  voraussichtlich wieder fährst. Bis dahin werden einzelne Komponenten voraussichtlich
-  fällig — am besten vorher kurz prüfen:
+<h1>Vor deiner nächsten Fahrt</h1>
+<p class="lede">
+  So wie du bisher fährst, bist du bald wieder unterwegs. Bis dahin werden diese Teile
+  fällig. Am besten schaust du sie dir vorher an.
 </p>
 
-{% for p in predictions %}
-<h2>{{ p.bike.name }}</h2>
-
-<table role="presentation" class="stats" width="100%" cellpadding="0" cellspacing="0">
-  <tr>
+{% for group in groups %}
+<table role="presentation" class="bike" width="100%" cellpadding="0" cellspacing="0">
+  <tr class="bike-head">
     <td>
-      <div class="stat-label">Voraussichtlich wieder unterwegs</div>
-      <div class="stat-value">{{ p.predicted_date|date:"d.m.Y" }}</div>
+      <h2>{{ group.bike.name }}</h2>
+      <span class="bike-meta">Nächste Fahrt voraussichtlich {{ group.predicted_day }}</span>
     </td>
   </tr>
+  {% for line in group.lines %}{% include "emails/_wear_line.html" with prefix="dann" %}{% endfor %}
 </table>
-
-<table role="presentation" class="item-list" width="100%" cellpadding="0" cellspacing="0">
-  {% for c in p.components %}
-  <tr>
-    <td>
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-          <td><span class="item-title">{{ c.slot.display_name }}</span></td>
-          <td align="right">
-            <span class="badge badge-critical">{{ "critical"|warn_label }} bis dahin</span>
-          </td>
-        </tr>
-      </table>
-      <div class="item-meta">
-        voraussichtlich
-        {% if c.wear.wear_days != None %}{{ c.wear.wear_days }} Tage{% else %}? Tage{% endif %}
-        seit Einbau bis dahin
-      </div>
-    </td>
-  </tr>
-  {% endfor %}
+<table role="presentation" class="actions" cellpadding="0" cellspacing="0">
+  <tr><td class="cta-cell" bgcolor="#c8f060"><a class="cta" href="{{ frontend_url }}/app/maintenance/bikes/{{ group.bike.id }}">{{ group.bike.name }} öffnen</a></td></tr>
 </table>
-
-<p><a class="cta" href="{{ frontend_url }}/app/maintenance/bikes/{{ p.bike.id }}">Zu {{ p.bike.name }}</a></p>
 {% endfor %}
+
+<p class="hint">
+  Ist ein Teil noch gut, tipp in der App am Teil auf „Prüfen / Freigeben“. Dann zählt die Grenze ab heute neu.
+</p>
 {% endblock %}

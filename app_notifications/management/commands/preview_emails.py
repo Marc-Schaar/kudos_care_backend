@@ -15,58 +15,104 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.template.loader import render_to_string
 
+from app_notifications.presentation import (
+    group_predictions,
+    group_warnings,
+    prediction_subject,
+    warning_headline,
+    warning_subject,
+)
 from app_notifications.services import html_to_plaintext
 
 DEFAULT_OUTPUT_DIR = "email_previews"
 
 
+def _part(label: str, warn_km=None, warn_days=None, weather_km=None) -> SimpleNamespace:
+    return SimpleNamespace(
+        label=label,
+        effective_warn_km=warn_km,
+        effective_warn_days=warn_days,
+        weather_wear_km=weather_km,
+    )
+
+
 def _sample_context() -> dict:
     """
-    Beispieldaten in derselben Form, die `app_notifications.tasks` uebergibt —
-    verschachtelte Objekte, daher SimpleNamespace statt Dicts (die Templates greifen
-    per Attribut zu, z.B. `w.slot.display_name`).
+    Beispieldaten in derselben Form, die `app_notifications.tasks` übergibt, und durch
+    dieselben Helfer aus `presentation.py` geschickt — sonst prüft die Vorschau ein
+    anderes Layout als das, das verschickt wird. SimpleNamespace statt Models, weil die
+    Templates per Attribut zugreifen.
     """
-    bike = SimpleNamespace(id=1, name="Gravel Bike")
+    gravel = SimpleNamespace(id=1, name="Gravel Bike")
+    road = SimpleNamespace(id=2, name="Renner")
     today = datetime.date.today()
 
     warnings = [
         {
-            "bike": bike,
+            "bike": gravel,
+            "slot": SimpleNamespace(display_name="Bremsbeläge vorne"),
+            "component": _part("SwissStop Exotherm2", warn_km=2000, weather_km=1712),
+            "wear": {"wear_km": 1650.0, "wear_days": 95, "warn_status_overall": "warn"},
+        },
+        {
+            "bike": gravel,
             "slot": SimpleNamespace(display_name="Kette"),
+            "component": _part("Shimano CN-M8100", warn_km=3000, weather_km=3312),
             "wear": {
-                "wear_km": 4210.5,
+                "wear_km": 2980.4,
                 "wear_days": 180,
                 "warn_status_overall": "critical",
             },
         },
         {
-            "bike": bike,
-            "slot": SimpleNamespace(display_name="Bremsbeläge vorne"),
+            "bike": road,
+            "slot": SimpleNamespace(display_name="Tubeless-Dichtmilch hinten"),
+            "component": _part("", warn_days=120),
             "wear": {
-                "wear_km": 1650.0,
-                "wear_days": 95,
-                "warn_status_overall": "warn",
+                "wear_km": 1063.0,
+                "wear_days": 143,
+                "warn_status_overall": "critical",
             },
         },
     ]
 
+    predicted = today + datetime.timedelta(days=4)
     predictions = [
         {
-            "bike": bike,
-            "predicted_date": today + datetime.timedelta(days=4),
+            "bike": gravel,
+            "predicted_date": predicted,
             "components": [
                 {
-                    "slot": SimpleNamespace(display_name="Kette"),
-                    "wear": {"wear_days": 184, "warn_status_overall": "critical"},
+                    "slot": SimpleNamespace(display_name="Reifen hinten"),
+                    "component": _part(
+                        "Schwalbe G-One RS", warn_km=4000, warn_days=730
+                    ),
+                    "wear": {
+                        "wear_km": 1200.0,
+                        "wear_days": 734,
+                        "warn_status_overall": "critical",
+                    },
                 }
             ],
         }
     ]
 
+    warning_groups = group_warnings(warnings)
+    prediction_groups = group_predictions(predictions)
     return {
-        "welcome.html": {},
-        "component_warnings.html": {"warnings": warnings, "immediate": True},
-        "bike_unsafe_predictions.html": {"predictions": predictions},
+        "welcome.html": ("Willkommen bei Kudos Care", {}),
+        "component_warnings.html": (
+            warning_subject(warning_groups),
+            {
+                "groups": warning_groups,
+                "headline": warning_headline(warning_groups),
+                "immediate": True,
+            },
+        ),
+        "bike_unsafe_predictions.html": (
+            prediction_subject(prediction_groups),
+            {"groups": prediction_groups},
+        ),
     }
 
 
@@ -100,13 +146,13 @@ class Command(BaseCommand):
         out_dir = Path(options["out"])
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        for template_name, context in _sample_context().items():
+        for template_name, (subject, context) in _sample_context().items():
             full_context = {**context, "frontend_url": settings.FRONTEND_URL}
             html = render_to_string(f"emails/{template_name}", full_context)
 
             target = out_dir / template_name
             target.write_text(html, encoding="utf-8")
-            self.stdout.write(f"{target}")
+            self.stdout.write(f"{target}  Betreff: {subject}")
 
             if options["text"]:
                 # Bewusst als Datei statt auf stdout: die Windows-Konsole kann die

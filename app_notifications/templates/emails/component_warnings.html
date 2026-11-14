@@ -1,46 +1,30 @@
 {% extends "emails/base_email.html" %}
-{% load notification_extras %}
 
-{% block title %}Kudos Care: Komponenten benötigen Aufmerksamkeit{% endblock %}
+{% block title %}{{ headline }}{% endblock %}
 
 {% block content %}
+<h1>{{ headline }}</h1>
 {% if immediate %}
-<h1>Nach deiner letzten Fahrt</h1>
-<p>
-  Deine letzte Fahrt hat den Verschleiß einer oder mehrerer Komponenten über die
-  empfohlene Grenze gebracht:
-</p>
+<p class="lede">Deine letzte Fahrt hat diese Teile nah an oder über ihre Grenze gebracht.</p>
 {% else %}
-<h1>Tägliche Übersicht</h1>
-<p>Folgende Komponenten benötigen aktuell deine Aufmerksamkeit:</p>
+<p class="lede">
+  Diese Teile sind seit gestern nah an oder über ihre Grenze gekommen, auch ohne neue
+  Fahrt: Reifen und Dichtmilch altern mit der Zeit.
+</p>
 {% endif %}
 
-<table role="presentation" class="item-list" width="100%" cellpadding="0" cellspacing="0">
-  {% for w in warnings %}
-  <tr>
-    <td>
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-          <td>
-            <span class="item-title">{{ w.slot.display_name }}</span>
-          </td>
-          <td align="right">
-            <span class="badge badge-{{ w.wear.warn_status_overall }}">
-              {{ w.wear.warn_status_overall|warn_label }}
-            </span>
-          </td>
-        </tr>
-      </table>
-      <div class="item-meta">
-        {{ w.bike.name }} &middot;
-        {% if w.wear.wear_km != None %}{{ w.wear.wear_km }} km{% else %}? km{% endif %} /
-        {% if w.wear.wear_days != None %}{{ w.wear.wear_days }} Tage{% else %}? Tage{% endif %}
-        seit Einbau
-      </div>
-    </td>
-  </tr>
-  {% endfor %}
+{% for group in groups %}
+<table role="presentation" class="bike" width="100%" cellpadding="0" cellspacing="0">
+  <tr class="bike-head"><td><h2>{{ group.bike.name }}</h2></td></tr>
+  {% for line in group.lines %}{% include "emails/_wear_line.html" %}{% endfor %}
 </table>
+<table role="presentation" class="actions" cellpadding="0" cellspacing="0">
+  <tr><td class="cta-cell" bgcolor="#c8f060"><a class="cta" href="{{ frontend_url }}/app/maintenance/bikes/{{ group.bike.id }}">{{ group.bike.name }} öffnen</a></td></tr>
+</table>
+{% endfor %}
 
-<p><a class="cta" href="{{ frontend_url }}/app/maintenance">Zur Wartungsübersicht</a></p>
+<p class="hint">
+  Du hast nachgesehen und das Teil ist noch gut? Tipp in der App am Teil auf „Prüfen / Freigeben“. Dann zählt die
+  Grenze ab heute neu.
+</p>
 {% endblock %}

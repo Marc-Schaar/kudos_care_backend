@@ -1,117 +1,119 @@
-{% load notification_extras %}<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="de">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="x-apple-disable-message-reformatting">
+<meta name="color-scheme" content="light">
+<meta name="supported-color-schemes" content="light">
 <title>{% block title %}Kudos Care{% endblock %}</title>
 {% comment %}
-  Tabellen-Layout statt div/flex: Outlook-Desktop rendert mit Word und bricht bei
-  modernem CSS. Aus demselben Grund liegen kritische Angaben zusaetzlich als
-  HTML-Attribute (bgcolor/align/width) vor, nicht nur im Stylesheet.
+  Ein Werkstattzettel: das helle "Zeichenpapier" der App (Tokens aus dem Light-Mode in
+  kudos_care_frontend/src/styles.css), oben das dunkle Band mit der Wortmarke wie in der
+  Navigation. Ein durchgehend dunkles Design invertieren Outlook und einige Gmail-Dark-
+  Modes teilweise, wodurch Text auf Text landet.
 
-  Helles Layout mit dunklem Marken-Band: ein durchgehend dunkles Design wie in der
-  App invertieren Outlook und einige Gmail-Dark-Modes teilweise, wodurch Text auf
-  Text landet. Die Marke traegt hier das Header-Band und der Lime-Akzent.
+  Tabellen statt div/flex: Outlook-Desktop rendert mit Word. Alles, was für die Aussage
+  zählt (Farben, Breiten), steht deshalb zusätzlich als HTML-Attribut (bgcolor/width).
 
-  Webfonts (Barlow Condensed / DM Mono) werden von den meisten Clients nicht
-  geladen — die Fallback-Stacks sind das, was tatsaechlich zu sehen ist.
+  Keine Webfonts per <link>: Google Fonts zu laden schickt die IP des Empfängers an
+  Google, sobald er die Mail öffnet. Barlow Condensed greift nur, wo sie installiert ist;
+  sichtbar ist meist "Arial Narrow" bzw. der System-Stack.
+
+  Die Ampel nimmt die hellen Werte der App (die dunklen lägen auf Papier unter 2:1) und
+  ist immer Form + Farbe: Raute überfällig, Dreieck bald fällig.
 {% endcomment %}
 <style>
-  body { margin: 0; padding: 0; background-color: #f3f4f6; -webkit-font-smoothing: antialiased; }
+  body { margin: 0; padding: 0; background-color: #e4e6e3; -webkit-font-smoothing: antialiased; }
   table { border-collapse: collapse; }
-  img { border: 0; line-height: 100%; outline: none; text-decoration: none; }
-  a { color: #4d7c0f; }
+  a { color: #3e6a00; text-underline-offset: 2px; }
 
-  .wrapper { width: 100%; background-color: #f3f4f6; padding: 24px 12px; }
-  .container { width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; }
-
-  .band { background-color: #0e0f11; padding: 18px 32px; }
-  .brand {
-    font-family: 'Barlow Condensed', 'Arial Narrow', Helvetica, Arial, sans-serif;
-    font-size: 20px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
-    color: #ffffff; margin: 0;
+  .sheet { width: 100%; max-width: 600px; background-color: #f0f2ef; }
+  .band { background-color: #0e0f11; padding: 16px 32px; }
+  .wordmark {
+    font-family: 'Barlow Condensed', 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 18px; font-weight: 700; letter-spacing: 0.06em; color: #e8e9ec; margin: 0;
   }
-  .brand-mark { color: #c8f060; }
-  /* Lime-Kante unter dem Band — der Marken-Akzent, der auch bei Bild-Blockade bleibt. */
-  .accent-rule { height: 3px; background-color: #c8f060; font-size: 0; line-height: 0; }
+  .wordmark-rule { border-left: 1px solid #c8f060; margin-left: 6px; padding-left: 2px; }
 
-  .body { padding: 32px; color: #1a1c22; font-size: 15px; line-height: 1.6;
-          font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
-  .body h1 {
-    font-family: 'Barlow Condensed', 'Arial Narrow', Helvetica, Arial, sans-serif;
-    font-size: 26px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase;
-    color: #0e0f11; margin: 0 0 14px; line-height: 1.15;
-  }
-  .body h2 {
-    font-family: 'Barlow Condensed', 'Arial Narrow', Helvetica, Arial, sans-serif;
-    font-size: 18px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
-    color: #0e0f11; margin: 26px 0 10px;
-  }
-  .body p { margin: 0 0 16px; }
+  .text, .text td { font-family: 'Barlow', -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+  .content { padding: 32px 32px 8px; color: #16181c; font-size: 16px; line-height: 1.55; }
+  .content p { margin: 0 0 16px; max-width: 34em; }
 
-  /* CTA: dunkle Schrift auf Lime. Weiss auf Lime faellt beim Kontrast durch. */
+  h1, h2 {
+    font-family: 'Barlow Condensed', 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
+    font-weight: 700; color: #16181c; margin: 0;
+  }
+  h1 { font-size: 32px; line-height: 1.1; margin-bottom: 10px; }
+  h2 { font-size: 22px; line-height: 1.2; }
+  .lede { color: #4b505a; }
+
+  /* Ein Rad: Name links, darunter die Teile als Zeilen. */
+  .bike { width: 100%; margin: 24px 0 8px; }
+  .bike-head td { padding-bottom: 6px; border-bottom: 2px solid #16181c; }
+  .bike-meta { font-size: 13px; color: #4b505a; }
+
+  .line td { vertical-align: top; }
+  .line-cell { padding: 14px 0 16px; border-bottom: 1px solid #c3c7c2; }
+  .line-name { font-size: 17px; font-weight: 600; color: #16181c; }
+  .shape { font-size: 13px; line-height: 26px; }
+  .line-sub { padding: 2px 0 10px; font-size: 14px; color: #4b505a; }
+  /* Die Zahl, nach der man handelt: das eine laute Element im Zettel. */
+  .remaining {
+    font-family: 'Barlow Condensed', 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 20px; font-weight: 700; line-height: 1.1; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .meter td { height: 6px; font-size: 1px; line-height: 1px; }
+
+  .status-critical { color: #be123c; }
+  .status-warn { color: #975200; }
+  .status-ok { color: #15702f; }
+  .status-unknown { color: #4b505a; }
+
+  /* Hauptaktion: dunkle Schrift auf Lime (Weiß auf Lime fällt beim Kontrast durch). */
+  .cta-cell { background-color: #c8f060; border: 1px solid #a9d23c; }
   .cta {
-    display: inline-block; background-color: #c8f060; color: #0e0f11 !important;
-    text-decoration: none; padding: 13px 24px; font-size: 14px; font-weight: 700;
-    letter-spacing: 0.08em; text-transform: uppercase;
-    font-family: 'Barlow Condensed', 'Arial Narrow', Helvetica, Arial, sans-serif;
+    display: inline-block; padding: 12px 22px; color: #0e0f11 !important; text-decoration: none;
+    font-family: 'Barlow Condensed', 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 18px; font-weight: 700; letter-spacing: 0.01em;
   }
+  .actions { margin: 20px 0 28px; }
 
-  /* Kennzahlen-Zeile, angelehnt an die summary-bar der App. */
-  .stats { width: 100%; margin: 4px 0 20px; }
-  .stats td { padding: 10px 14px; background-color: #f7f8fa; border-left: 3px solid #c8f060; }
-  .stat-label { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: #6b7280; }
-  .stat-value { font-size: 18px; font-weight: 700; color: #0e0f11; }
+  .hint { font-size: 14px; color: #4b505a; }
 
-  .item-list { width: 100%; margin: 8px 0 20px; }
-  .item-list td { padding: 12px 0; border-bottom: 1px solid #e5e7eb; font-size: 14px; vertical-align: top; }
-  .item-title { font-weight: 700; color: #0e0f11; }
-  .item-meta { color: #6b7280; font-size: 13px; padding-top: 3px; }
-
-  /* Ampel an den App-Tokens (--ok/--warn/--critical), als getoente Flaeche mit
-     dunklem Text — gesaettigte Schrift auf hellem Grund liest sich sonst schlecht. */
-  .badge {
-    display: inline-block; padding: 3px 10px; font-size: 11px; font-weight: 700;
-    text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap;
-  }
-  .badge-ok { background-color: #e7f8ee; color: #14683c; }
-  .badge-warn { background-color: #fdf0d5; color: #8a5300; }
-  .badge-critical { background-color: #fde7ec; color: #9b1032; }
-
-  .footer { padding: 22px 32px 30px; color: #9ca3af; font-size: 12px; line-height: 1.6;
-            font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            border-top: 1px solid #e5e7eb; }
-  .footer a { color: #6b7280; }
+  .footer { padding: 20px 32px 28px; color: #4b505a; font-size: 13px; line-height: 1.55;
+            border-top: 1px solid #c3c7c2; }
+  .footer a { color: #4b505a; }
 
   @media only screen and (max-width: 620px) {
-    .body, .band, .footer { padding-left: 20px !important; padding-right: 20px !important; }
-    .body h1 { font-size: 22px !important; }
+    .band, .content, .footer { padding-left: 20px !important; padding-right: 20px !important; }
+    .content { padding-top: 24px !important; }
+    h1 { font-size: 27px !important; }
+    .remaining { font-size: 18px !important; }
   }
 </style>
 </head>
-<body>
-<table role="presentation" class="wrapper" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f3f4f6">
+<body bgcolor="#e4e6e3">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#e4e6e3">
   <tr>
-    <td align="center">
-      <table role="presentation" class="container" width="600" cellpadding="0" cellspacing="0" bgcolor="#ffffff">
+    <td align="center" style="padding: 24px 12px;">
+      <table role="presentation" class="sheet text" width="600" cellpadding="0" cellspacing="0" bgcolor="#f0f2ef">
         <tr>
           <td class="band" bgcolor="#0e0f11">
-            <p class="brand"><span class="brand-mark">&#11041;</span>&nbsp; Kudos Care</p>
+            <p class="wordmark">KUDOS<span class="wordmark-rule"> </span>CARE</p>
           </td>
         </tr>
-        <tr><td class="accent-rule" bgcolor="#c8f060">&nbsp;</td></tr>
         <tr>
-          <td class="body">
+          <td class="content">
             {% block content %}{% endblock %}
           </td>
         </tr>
         <tr>
           <td class="footer">
-            Diese E-Mail kommt automatisch von Kudos Care, basierend auf deinen getrackten
-            Fahrten und Komponenten.<br>
-            Adresse ändern oder Benachrichtigungen abschalten kannst du jederzeit im
-            Benutzermenü: <a href="{{ frontend_url }}/app/dashboard">Einstellungen öffnen</a>.
+            Kudos Care schickt diese Mail, weil du Benachrichtigungen eingeschaltet hast.
+            Abschalten oder die Adresse ändern kannst du in der App unter „Konto“:
+            <a href="{{ frontend_url }}/app/dashboard">Kudos Care öffnen</a>.
           </td>
         </tr>
       </table>
