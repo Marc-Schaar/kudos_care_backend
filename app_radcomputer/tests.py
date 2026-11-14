@@ -6,6 +6,14 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
+from app_radcomputer.models import RadcomputerSettings, SavedPlace
+
+
+def login_as(client, user, athlete_id: int) -> None:
+    client.force_login(user)
+    session = client.session
+    session["strava_athlete_id"] = athlete_id
+    session.save()
 
 
 def fake(status=200, json=None, content=b""):
@@ -144,3 +152,135 @@ class RadcomputerTests(APITestCase):
         res = self.client.get("/api/strava/me/")
         self.assertTrue(res.data["can_upload"])
         self.assertTrue(res.data["private_routes"])
+
+
+class RadcomputerSettingsTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create(username="strava_4711")
+        self.profile = StravaProfile.objects.create(
+            user=self.user,
+            strava_athlete_id=4711,
+            access_token="a",
+            refresh_token="r",
+            expires_at=0,
+        )
+        login_as(self.client, self.user, 4711)
+
+    def test_get_without_stored_settings_returns_defaults(self):
+        res = self.client.get("/api/radcomputer/settings/")
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(res.data["stored"])
+        self.assertEqual(res.data["ftp"], 200)
+        self.assertEqual(res.data["theme"], "night")
+        self.assertFalse(RadcomputerSettings.objects.exists())
+
+    def test_put_creates_then_partial_update_keeps_other_fields(self):
+        res = self.client.put(
+            "/api/radcomputer/settings/",
+            {"ftp": 250, "theme": "day"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.data["stored"])
+        res = self.client.put(
+            "/api/radcomputer/settings/", {"audio": "beep"}, format="json"
+        )
+        stored = RadcomputerSettings.objects.get(profile=self.profile)
+        self.assertEqual((stored.ftp, stored.theme, stored.audio), (250, "day", "beep"))
+        self.assertTrue(self.client.get("/api/radcomputer/settings/").data["stored"])
+
+    def test_rejects_out_of_range_and_unknown_choice(self):
+        for body in ({"ftp": 5000}, {"auto_pause_kmh": 0}, {"theme": "pink"}):
+            res = self.client.put("/api/radcomputer/settings/", body, format="json")
+            self.assertEqual(res.status_code, 400, body)
+
+    def test_requires_login(self):
+        self.client.logout()
+        self.assertIn(
+            self.client.get("/api/radcomputer/settings/").status_code, (401, 403)
+        )
+
+
+class SavedPlaceTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create(username="strava_4711")
+        self.profile = StravaProfile.objects.create(
+            user=self.user,
+            strava_athlete_id=4711,
+            access_token="a",
+            refresh_token="r",
+            expires_at=0,
+        )
+        login_as(self.client, self.user, 4711)
+
+    def add(self, name="Zuhause", lat=52.5163, lon=13.3777):
+        return self.client.post(
+            "/api/radcomputer/places/",
+            {"name": name, "lat": lat, "lon": lon},
+            format="json",
+        )
+
+    def test_place_is_stored_encrypted_and_listed_in_plaintext(self):
+        res = self.add()
+        self.assertEqual(res.status_code, 201)
+        raw = SavedPlace.objects.get().ciphertext
+        # Weder Name noch Koordinaten dürfen im Klartext in der Datenbank stehen.
+        for plain in ("Zuhause", "52.5163", "13.3777"):
+            self.assertNotIn(plain, raw)
+        listed = self.client.get("/api/radcomputer/places/").data
+        self.assertEqual(
+            listed,
+            [{"id": res.data["id"], "name": "Zuhause", "lat": 52.5163, "lon": 13.3777}],
+        )
+
+    def test_same_name_replaces_existing_place(self):
+        first = self.add(lat=50, lon=8)
+        second = self.add(lat=51, lon=9)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.data["id"], second.data["id"])
+        self.assertEqual(SavedPlace.objects.count(), 1)
+        self.assertEqual(SavedPlace.objects.get().data["lat"], 51)
+
+    def test_delete_and_athlete_scoping(self):
+        other_user = User.objects.create(username="strava_9")
+        other = StravaProfile.objects.create(
+            user=other_user,
+            strava_athlete_id=9,
+            access_token="a",
+            refresh_token="r",
+            expires_at=0,
+        )
+        foreign = SavedPlace(profile=other)
+        foreign.data = {"name": "Fremd", "lat": 1, "lon": 2}
+        foreign.save()
+
+        self.assertEqual(self.client.get("/api/radcomputer/places/").data, [])
+        res = self.client.delete(f"/api/radcomputer/places/{foreign.id}/")
+        self.assertEqual(res.status_code, 404)
+        self.assertTrue(SavedPlace.objects.filter(id=foreign.id).exists())
+
+        own = self.add().data["id"]
+        self.assertEqual(
+            self.client.delete(f"/api/radcomputer/places/{own}/").status_code, 204
+        )
+        self.assertFalse(SavedPlace.objects.filter(id=own).exists())
+
+    def test_rejects_invalid_coordinates(self):
+        self.assertEqual(self.add(lat=91).status_code, 400)
+        self.assertEqual(self.add(name="").status_code, 400)
+
+    def test_undecryptable_entry_is_skipped_not_fatal(self):
+        self.add()
+        broken = SavedPlace.objects.create(profile=self.profile, ciphertext="kaputt")
+        with self.assertLogs("my_app_debug", level="ERROR") as logs:
+            listed = self.client.get("/api/radcomputer/places/").data
+        self.assertEqual([p["name"] for p in listed], ["Zuhause"])
+        self.assertIn(str(broken.id), logs.output[0])
+
+    def test_account_deletion_removes_places_and_settings(self):
+        self.add()
+        self.client.put("/api/radcomputer/settings/", {"ftp": 300}, format="json")
+        res = self.client.delete("/api/strava/me/?confirm=true")
+        self.assertIn(res.status_code, (200, 204))
+        self.assertFalse(SavedPlace.objects.exists())
+        self.assertFalse(RadcomputerSettings.objects.exists())
