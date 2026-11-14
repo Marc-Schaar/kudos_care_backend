@@ -1,5 +1,7 @@
-from django.db import models
+from typing import TYPE_CHECKING
+
 from django.contrib.auth.models import User
+from django.db import models
 
 
 class StravaProfile(models.Model):
@@ -18,8 +20,13 @@ class StravaProfile(models.Model):
     access_token = models.CharField(max_length=255)
     refresh_token = models.CharField(max_length=255)
     expires_at = models.IntegerField()
+    # Von Strava erteilte Rechte der letzten Anmeldung, kommagetrennt. Leer bei Profilen
+    # von vor diesem Feld: dann ist nur der Kudos-Standard (activity:read_all) sicher.
+    scope = models.CharField(max_length=255, blank=True, default="")
 
-    sync_status = models.CharField(max_length=10, choices=SYNC_STATUS_CHOICES, default="idle")
+    sync_status = models.CharField(
+        max_length=10, choices=SYNC_STATUS_CHOICES, default="idle"
+    )
     sync_started_at = models.DateTimeField(null=True, blank=True)
     sync_finished_at = models.DateTimeField(null=True, blank=True)
     sync_error = models.CharField(max_length=255, blank=True, default="")
@@ -29,10 +36,12 @@ class StravaProfile(models.Model):
     sync_progress_total = models.IntegerField(null=True, blank=True)
 
     # Benachrichtigungen (siehe app_notifications) — Kill-Switch fuer alle automatischen
-    # E-Mails, aktuell nur per Admin togglebar (kein Frontend-Toggle).
+    # E-Mails. Vom Nutzer selbst ueber das Usermenue schaltbar
+    # (PATCH /api/strava/me/, app_auth/api/views.py::CurrentUserView) und zusaetzlich
+    # im Admin.
     email_notifications_enabled = models.BooleanField(
         default=True,
-        help_text="Kill-Switch fuer Warn-/Vorhersage-/Willkommens-E-Mails. Nur per Admin togglebar.",
+        help_text="Kill-Switch fuer Warn-/Vorhersage-/Willkommens-E-Mails.",
     )
     welcome_email_sent_at = models.DateTimeField(
         null=True,
@@ -42,6 +51,25 @@ class StravaProfile(models.Model):
             "Erstanmeldung, erneut auslösbar über die Admin-Action 'Willkommens-E-Mail senden'."
         ),
     )
+
+    # Einwilligungen in die Weitergabe an Dritte (siehe app_auth/consent.py). Der Zeitpunkt
+    # statt eines Flags, weil er der Nachweis ist. NULL heißt: keine Einwilligung.
+    weather_consent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Einwilligung: Startkoordinaten und Datum von Fahrten an Open-Meteo.",
+    )
+    ai_consent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Einwilligung: Fahrt-, Rad- und Teileangaben an Gemini oder Groq.",
+    )
+
+    if TYPE_CHECKING:
+        id: int
+
+    def has_scope(self, name: str) -> bool:
+        return name in {s.strip() for s in self.scope.split(",")}
 
     def __str__(self):
         return f"Strava ID: {self.strava_athlete_id}"

@@ -1,6 +1,8 @@
 import time
+
 import requests
 from django.conf import settings
+
 from app_maintenance.models import Bike, BikeType
 
 
@@ -37,27 +39,35 @@ def get_valid_access_token(profile, force=False):
     return profile.access_token
 
 
-def strava_get(profile, url, params=None, timeout=10):
+def strava_request(profile, method, url, timeout=10, **kwargs):
     """
-    GET-Request gegen die Strava-API. Antwortet Strava trotz lokal noch
-    gültigem expires_at mit 401 (Token wurde serverseitig invalidiert), wird
-    der Access-Token einmalig zwangsweise neu geholt und der Request wiederholt.
+    Request gegen die Strava-API. Antwortet Strava trotz lokal noch gültigem
+    expires_at mit 401 (Token wurde serverseitig invalidiert), wird der
+    Access-Token einmalig zwangsweise neu geholt und der Request wiederholt.
+    Dateien in `files` müssen dafür als Bytes vorliegen, nicht als Stream.
     """
     access_token = get_valid_access_token(profile)
-    response = requests.get(
+    response = requests.request(
+        method,
         url,
         headers={"Authorization": f"Bearer {access_token}"},
-        params=params,
         timeout=timeout,
+        **kwargs,
     )
 
     if response.status_code == 401:
         access_token = get_valid_access_token(profile, force=True)
-        response = requests.get(
+        response = requests.request(
+            method,
             url,
             headers={"Authorization": f"Bearer {access_token}"},
-            params=params,
             timeout=timeout,
+            **kwargs,
         )
 
     return response
+
+
+def strava_get(profile, url, params=None, timeout=10):
+    """GET-Request gegen die Strava-API, mit einmaligem Token-Refresh bei 401."""
+    return strava_request(profile, "GET", url, params=params, timeout=timeout)

@@ -1,22 +1,28 @@
+import logging
+
 import requests
 from django.conf import settings
 from django.contrib.auth import login, logout
 from django.contrib.auth.models import User
+from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
-
 from rest_framework import status
-from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from app_auth.models import StravaProfile
-from .serializers import StravaAuthSerializer
-
+from app_auth.consent import has_ai_consent, has_weather_consent
 from app_auth.mixins import CsrfExemptSessionAuthentication
+from app_auth.models import StravaProfile
 from app_notifications.tasks import send_welcome_email_task
+
+from .serializers import StravaAuthSerializer, UserSettingsSerializer
 from .utils import sync_bikes_from_strava
+
+logger = logging.getLogger("my_app_debug")
 
 
 class StravaAuthCallbackView(APIView):
@@ -70,6 +76,9 @@ class StravaAuthCallbackView(APIView):
                     "access_token": response_data.get("access_token"),
                     "refresh_token": response_data.get("refresh_token"),
                     "expires_at": response_data.get("expires_at"),
+                    # Ein neuer Token traegt genau die Rechte dieser Anmeldung, auch wenn
+                    # vorher mehr erteilt waren (z.B. activity:write fuer den Radcomputer).
+                    "scope": ",".join(sorted(granted_scopes)),
                 },
             )
 
@@ -81,6 +90,15 @@ class StravaAuthCallbackView(APIView):
                 profile.save()
                 sync_bikes_from_strava(athlete_data, profile)
                 send_welcome_email_task.delay(profile.id)
+
+            # Nur setzen, nie zurücknehmen: wer sich erneut anmeldet und das Kästchen nicht
+            # ankreuzt, widerruft damit nichts. Das geht im Benutzermenü.
+            if (
+                serializer.validated_data["weather_consent"]
+                and not profile.weather_consent_at
+            ):
+                profile.weather_consent_at = timezone.now()
+                profile.save(update_fields=["weather_consent_at"])
 
             login(request, profile.user)
 
@@ -116,15 +134,139 @@ class LogoutView(APIView):
 
 
 class CurrentUserView(APIView):
+    """
+    GET    /api/strava/me/  — Session-Check plus die im Frontend anzeigbaren Einstellungen.
+    PATCH  /api/strava/me/  — E-Mail und Benachrichtigungs-Schalter aendern.
+    DELETE /api/strava/me/?confirm=true — Konto und alle Daten loeschen.
+
+    Der echte Name bleibt bewusst aussen vor (wird nicht persistiert, siehe
+    StravaAuthCallbackView). `needs_email` treibt den Dialog beim naechsten Login:
+    ohne E-Mail-Adresse verschickt app_notifications gar nichts, der Nutzer merkt das
+    aber nie von allein.
+    """
+
+    def _profile(self, request) -> StravaProfile | None:
+        athlete_id = request.session.get("strava_athlete_id")
+        if not athlete_id:
+            return None
+        return get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
+
+    def _payload(self, profile: StravaProfile) -> dict:
+        email = getattr(profile.user, "email", "") or ""
+        return {
+            "athlete_id": profile.strava_athlete_id,
+            "email": email,
+            "email_notifications_enabled": profile.email_notifications_enabled,
+            "needs_email": not email,
+            "weather_consent": has_weather_consent(profile),
+            "ai_consent": has_ai_consent(profile),
+            # Radcomputer: Upload zu Strava und private Routen brauchen eigene Rechte,
+            # die erst auf Wunsch erteilt werden (siehe app_radcomputer).
+            "can_upload": profile.has_scope("activity:write"),
+            "private_routes": profile.has_scope("read_all"),
+        }
+
     @method_decorator(ensure_csrf_cookie)
     def get(self, request):
-        athlete_id = request.session.get("strava_athlete_id")
+        profile = self._profile(request)
+        if profile is None:
+            return Response(
+                {"error": "Nicht eingeloggt"}, status=status.HTTP_401_UNAUTHORIZED
+            )
+        return Response(self._payload(profile))
 
-        if not athlete_id:
+    def patch(self, request):
+        profile = self._profile(request)
+        if profile is None:
             return Response(
                 {"error": "Nicht eingeloggt"}, status=status.HTTP_401_UNAUTHORIZED
             )
 
-        profile = get_object_or_404(StravaProfile, strava_athlete_id=athlete_id)
+        serializer = UserSettingsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
 
-        return Response({"athlete_id": profile.strava_athlete_id})
+        user = profile.user
+        had_email = bool(user and user.email)
+
+        if "email" in data and user is not None:
+            user.email = data["email"]
+            user.save(update_fields=["email"])
+
+        if "email_notifications_enabled" in data:
+            profile.email_notifications_enabled = data["email_notifications_enabled"]
+            profile.save(update_fields=["email_notifications_enabled"])
+
+        for key, field in (
+            ("weather_consent", "weather_consent_at"),
+            ("ai_consent", "ai_consent_at"),
+        ):
+            if key not in data:
+                continue
+            # Eine wiederholte Zustimmung lässt den ursprünglichen Zeitpunkt stehen.
+            if data[key] and getattr(profile, field) is None:
+                setattr(profile, field, timezone.now())
+            elif not data[key]:
+                setattr(profile, field, None)
+            profile.save(update_fields=[field])
+
+        # Bei Erstanmeldung ohne hinterlegte E-Mail lief die Willkommens-Mail ins
+        # Leere (send_templated_email gibt dann still False zurueck). Sobald zum
+        # ersten Mal eine Adresse da ist, holen wir sie nach.
+        if (
+            not had_email
+            and user is not None
+            and user.email
+            and profile.welcome_email_sent_at is None
+        ):
+            send_welcome_email_task.delay(profile.id)
+
+        profile.refresh_from_db()
+        return Response(self._payload(profile))
+
+    def delete(self, request):
+        """
+        Löscht das Konto samt aller Daten — Art. 17 DSGVO.
+
+        Es reicht, den `User` zu löschen: `StravaProfile` hängt per
+        OneToOne-CASCADE daran, `Bike` und `Ride` per FK-CASCADE am Profil, und
+        alles Weitere (Slots, Components, Nutzungszeiträume, Checks, Streams)
+        wiederum daran. Ein Profil ohne User wäre ein Datenrest ohne Zugang —
+        deshalb der Weg über den User und nicht über das Profil.
+
+        `?confirm=true` ist Pflicht. Ein versehentliches DELETE auf diese Route
+        löscht jahrelange Fahrthistorie unwiederbringlich; eine Bestätigung nur
+        im Client schützt nicht vor einem falsch abgesetzten Aufruf.
+        """
+        profile = self._profile(request)
+        if profile is None:
+            return Response(
+                {"error": "Nicht eingeloggt"}, status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        if request.query_params.get("confirm") != "true":
+            return Response(
+                {
+                    "error": "Löschen muss bestätigt werden (?confirm=true). Alle "
+                    "Fahrten, Bikes und Komponenten werden dabei entfernt.",
+                    "code": "confirmation_required",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = profile.user
+        athlete_id = profile.strava_athlete_id
+
+        with transaction.atomic():
+            if user is not None:
+                user.delete()
+            else:
+                # Altbestand ohne verknüpften User: dann das Profil direkt.
+                profile.delete()
+
+        logout(request)
+        request.session.flush()
+        # Bewusst nur die Athleten-Id, keine Adresse — Logs leben länger und
+        # sind breiter zugänglich als die Datenbank.
+        logger.info("Konto des Athleten %s auf Wunsch gelöscht.", athlete_id)
+        return Response(status=status.HTTP_204_NO_CONTENT)

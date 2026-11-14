@@ -17,7 +17,9 @@ DEFAULTS = {
 
 
 def seed_coefficients(apps, schema_editor):
-    WeatherSensitivityCoefficient = apps.get_model("app_maintenance", "WeatherSensitivityCoefficient")
+    WeatherSensitivityCoefficient = apps.get_model(
+        "app_maintenance", "WeatherSensitivityCoefficient"
+    )
     for category, c in DEFAULTS.items():
         WeatherSensitivityCoefficient.objects.update_or_create(
             category=category,
@@ -32,7 +34,9 @@ def seed_coefficients(apps, schema_editor):
 
 
 def unseed_coefficients(apps, schema_editor):
-    WeatherSensitivityCoefficient = apps.get_model("app_maintenance", "WeatherSensitivityCoefficient")
+    WeatherSensitivityCoefficient = apps.get_model(
+        "app_maintenance", "WeatherSensitivityCoefficient"
+    )
     WeatherSensitivityCoefficient.objects.filter(category__in=DEFAULTS.keys()).delete()
 
 

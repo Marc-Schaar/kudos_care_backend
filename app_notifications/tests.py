@@ -1,8 +1,11 @@
 import itertools
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.template.loader import render_to_string
+from django.test import SimpleTestCase
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -17,13 +20,14 @@ from app_maintenance.models import (
     ComponentSlot,
     ComponentTemplate,
 )
-from app_notifications.services import send_templated_email
+from app_notifications.services import html_to_plaintext, send_templated_email
 from app_notifications.tasks import (
     check_bike_unsafe_predictions,
     check_component_warnings,
     check_component_warnings_for_bike,
     send_welcome_email_task,
 )
+from app_notifications.templatetags.notification_extras import warn_label
 
 
 def _make_profile(user, strava_athlete_id=80001, email_enabled=True):
@@ -149,14 +153,12 @@ class ComponentWarningDigestTestsBase(APITestCase):
             name=name,
             category=ComponentCategory.DRIVETRAIN,
             warn_days=warn_days,
-            is_system=False,
         )
         slot = ComponentSlot.objects.create(bike=bike, template=template)
         component = Component.objects.create(
             slot=slot,
             brand="Test",
             installed_at=date.today() - timedelta(days=installed_days_ago),
-            is_mounted=True,
         )
         return slot, component
 
@@ -332,3 +334,71 @@ class SendWelcomeEmailTaskTests(APITestCase):
         result = send_welcome_email_task(999999)
         self.assertIn("nicht gefunden", result)
         self.assertEqual(len(mail.outbox), 0)
+
+
+class HtmlToPlaintextTests(SimpleTestCase):
+    """
+    Der Plaintext-Teil jeder Mail. `strip_tags()` allein liefert hier Muell:
+    es entfernt nur Tags, nicht den Inhalt von <style>, und laesst Entities stehen.
+    """
+
+    def test_strips_stylesheet_content_not_just_tags(self):
+        html = "<html><head><style>.a { color: red; }</style></head><body><p>Hallo</p></body></html>"
+        result = html_to_plaintext(html)
+
+        self.assertIn("Hallo", result)
+        self.assertNotIn("color: red", result)
+        self.assertNotIn(".a {", result)
+
+    def test_resolves_html_entities(self):
+        self.assertEqual(html_to_plaintext("<p>A &middot; B</p>"), "A · B")
+
+    def test_collapses_excess_blank_lines(self):
+        html = "<p>Eins</p>\n\n\n\n\n<p>Zwei</p>"
+        self.assertEqual(html_to_plaintext(html), "Eins\n\nZwei")
+
+    def test_real_template_has_no_css_leftovers(self):
+        html = render_to_string(
+            "emails/welcome.html", {"frontend_url": "http://localhost:3000"}
+        )
+        result = html_to_plaintext(html)
+
+        self.assertIn("Willkommen bei Kudos Care", result)
+        self.assertNotIn("background-color", result)
+        self.assertNotIn("font-family", result)
+        self.assertNotIn("{% ", result)
+
+
+class WarnLabelFilterTests(SimpleTestCase):
+    """Rohe Status-Slugs ("critical") gehoeren nicht in eine deutsche Nutzer-Mail."""
+
+    def test_translates_known_statuses(self):
+        self.assertEqual(warn_label("critical"), "Überfällig")
+        self.assertEqual(warn_label("warn"), "Bald fällig")
+        self.assertEqual(warn_label("ok"), "In Ordnung")
+
+    def test_passes_through_unknown_values(self):
+        self.assertEqual(warn_label("etwas-neues"), "etwas-neues")
+
+    def test_warning_mail_renders_german_label(self):
+        html = render_to_string(
+            "emails/component_warnings.html",
+            {
+                "frontend_url": "http://localhost:3000",
+                "immediate": True,
+                "warnings": [
+                    {
+                        "bike": SimpleNamespace(name="Gravel"),
+                        "slot": SimpleNamespace(display_name="Kette"),
+                        "wear": {
+                            "wear_km": 100,
+                            "wear_days": 10,
+                            "warn_status_overall": "critical",
+                        },
+                    }
+                ],
+            },
+        )
+        self.assertIn("Überfällig", html)
+        # Der Slug darf nur noch als CSS-Klasse vorkommen, nicht als sichtbarer Text.
+        self.assertIn("badge-critical", html)

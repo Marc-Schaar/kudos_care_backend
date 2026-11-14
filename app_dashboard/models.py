@@ -1,4 +1,7 @@
+from typing import TYPE_CHECKING
+
 from django.contrib.gis.db import models
+
 from app_auth.models import StravaProfile
 from app_maintenance.models import Bike
 
@@ -18,6 +21,22 @@ class Ride(models.Model):
     # app_dashboard/api/services.py::build_ride_summary_prompt).
     ai_summary = models.TextField(blank=True, default="")
     ai_summary_generated_at = models.DateTimeField(null=True, blank=True)
+
+    # Zwischengespeicherte KI-Erklaerung, was diese Fahrt die Komponenten gekostet hat
+    # (siehe app_maintenance/api/services.py::build_ride_wear_impact_prompt). Anders als
+    # ai_summary haengt das nicht nur an den unveraenderlichen Ride-Zahlen, sondern auch
+    # daran, welche Komponenten zum Fahrtzeitpunkt montiert waren — Staleness daher ueber
+    # services.py::ride_wear_impact_is_stale().
+    wear_impact_summary = models.TextField(
+        blank=True,
+        default="",
+        help_text="Zwischengespeicherte KI-Erklaerung (Deutsch) des Verschleiss-Anteils dieser Fahrt.",
+    )
+    wear_impact_generated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Zeitpunkt der letzten Generierung von wear_impact_summary.",
+    )
     athlete = models.ForeignKey(
         StravaProfile,
         on_delete=models.CASCADE,
@@ -34,6 +53,11 @@ class Ride(models.Model):
         related_name="rides",
     )
 
+    if TYPE_CHECKING:
+        id: int
+        bike_id: int | None
+        streams: "RideStream"
+
     def __str__(self):
         return self.name
 
@@ -45,3 +69,6 @@ class RideStream(models.Model):
     latlngs = models.JSONField()
     time_series = models.JSONField()
     avg_headwind = models.FloatField(null=True, blank=True)
+
+    if TYPE_CHECKING:
+        id: int

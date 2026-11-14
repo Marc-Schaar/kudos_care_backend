@@ -12,14 +12,16 @@ def recompute_weather_wear_for_bike(self, bike_id: int):
     Bikes neu. Wird als Fire-and-forget-Seiteneffekt nach jedem Ride-Import
     ausgelöst (siehe app_dashboard/api/services.py::sync_activity_to_db).
     """
-    from app_maintenance.models import Bike
     from app_maintenance.api.services import WeatherWearService
+    from app_maintenance.models import Bike
     from app_notifications.tasks import check_component_warnings_for_bike
 
     try:
         bike = Bike.objects.get(pk=bike_id)
     except Bike.DoesNotExist:
-        logger.warning("recompute_weather_wear_for_bike: Bike %s existiert nicht mehr.", bike_id)
+        logger.warning(
+            "recompute_weather_wear_for_bike: Bike %s existiert nicht mehr.", bike_id
+        )
         return f"Bike {bike_id} nicht gefunden."
 
     try:
@@ -30,5 +32,7 @@ def recompute_weather_wear_for_bike(self, bike_id: int):
         check_component_warnings_for_bike.delay(bike.id)
         return f"{count} Komponenten fuer Bike {bike_id} neu berechnet."
     except Exception as exc:
-        logger.exception("Wetter-Verschleiss-Neuberechnung fuer Bike %s fehlgeschlagen.", bike_id)
+        logger.exception(
+            "Wetter-Verschleiss-Neuberechnung fuer Bike %s fehlgeschlagen.", bike_id
+        )
         raise self.retry(exc=exc)

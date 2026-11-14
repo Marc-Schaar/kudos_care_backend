@@ -1,11 +1,20 @@
 import logging
 
-from django.db.models import Max
+from django.db.models import Max, Q
 from django.utils import timezone
 
 from app_auth.models import StravaProfile
-from app_maintenance.models import Bike, Component, ComponentCheck, WeatherSensitivityCoefficient
-from .serializers import WarnStatus, compute_wear
+from app_maintenance.models import (
+    Bike,
+    Component,
+    ComponentCheck,
+    ComponentSlot,
+    WeatherSensitivityCoefficient,
+)
+
+from ..models import WarnLevel
+from .serializers import compute_wear
+from .usage import RideLedger, component_windows
 
 logger = logging.getLogger("my_app_debug")
 
@@ -35,23 +44,48 @@ def _mean(values: list[float] | None) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+DRIVER_LABELS = {
+    "rain": "Regen",
+    "heat": "Hitze",
+    "cold": "Kälte",
+    "wind": "Wind",
+}
+
+
 class WeatherWearCalculator:
     """Reine, deterministische Berechnung — keine DB-/Netzwerkzugriffe."""
 
     @staticmethod
-    def ride_multiplier(weather_data: dict | None, coeff: WeatherSensitivityCoefficient) -> float:
+    def ride_multiplier_detail(
+        weather_data: dict | None, coeff: WeatherSensitivityCoefficient
+    ) -> dict:
         """
-        Multiplikator auf die gefahrene Distanz einer einzelnen Fahrt, basierend
-        auf den stündlichen Regen-/Temperatur-/Wind-Werten aus Ride.weather_data.
-        Fehlen/leeren eines der drei Arrays -> neutral (1.0x), kein Teilergebnis
-        aus nur einem Teil der Daten.
+        Wie `ride_multiplier()`, gibt zusätzlich die Einzelbeiträge zurück — Basis für
+        die Anzeige "diese Fahrt hat X % mehr Bremsbelag gekostet, hauptsächlich wegen
+        Regen" (siehe `ride_wear_breakdown`).
+
+        `contributions` sind die Beiträge VOR dem Cap: greift `MAX_MULTIPLIER`, ist ihre
+        Summe größer als `multiplier - 1`. Sie taugen daher zur Frage "welche Bedingung
+        hat dominiert", nicht als exakte Zerlegung des Endergebnisses.
         """
         weather_data = weather_data or {}
         precip = _mean(weather_data.get("precipitation"))
         temp = _mean(weather_data.get("temperature_2m"))
         wind = _mean(weather_data.get("wind_speed_10m"))
+
+        neutral = {
+            "multiplier": 1.0,
+            "contributions": {"rain": 0.0, "heat": 0.0, "cold": 0.0, "wind": 0.0},
+            "dominant_driver": None,
+            "conditions": {
+                "precipitation": precip,
+                "temperature": temp,
+                "wind_speed": wind,
+            },
+            "capped": False,
+        }
         if precip is None or temp is None or wind is None:
-            return 1.0
+            return neutral
 
         rain_factor = _clamp(precip / RAIN_REF_MM_H, 0.0, RAIN_FACTOR_CAP)
         heat_factor = (
@@ -65,41 +99,63 @@ class WeatherWearCalculator:
             else 0.0
         )
         wind_factor = (
-            _clamp((wind - WIND_THRESHOLD_KMH) / WIND_REF_DELTA_KMH, 0.0, WIND_FACTOR_CAP)
+            _clamp(
+                (wind - WIND_THRESHOLD_KMH) / WIND_REF_DELTA_KMH, 0.0, WIND_FACTOR_CAP
+            )
             if wind > WIND_THRESHOLD_KMH
             else 0.0
         )
 
-        raw = (
-            1.0
-            + coeff.rain_sensitivity * rain_factor
-            + coeff.heat_sensitivity * heat_factor
-            + coeff.cold_sensitivity * cold_factor
-            + coeff.wind_sensitivity * wind_factor
-        )
-        return _clamp(raw, 1.0, MAX_MULTIPLIER)
+        contributions = {
+            "rain": coeff.rain_sensitivity * rain_factor,
+            "heat": coeff.heat_sensitivity * heat_factor,
+            "cold": coeff.cold_sensitivity * cold_factor,
+            "wind": coeff.wind_sensitivity * wind_factor,
+        }
+        raw = 1.0 + sum(contributions.values())
+        dominant = max(contributions, key=lambda key: contributions[key])
+
+        return {
+            "multiplier": _clamp(raw, 1.0, MAX_MULTIPLIER),
+            "contributions": contributions,
+            "dominant_driver": dominant if contributions[dominant] > 0 else None,
+            "conditions": {
+                "precipitation": precip,
+                "temperature": temp,
+                "wind_speed": wind,
+            },
+            "capped": raw > MAX_MULTIPLIER,
+        }
+
+    @staticmethod
+    def ride_multiplier(
+        weather_data: dict | None, coeff: WeatherSensitivityCoefficient
+    ) -> float:
+        """
+        Multiplikator auf die gefahrene Distanz einer einzelnen Fahrt, basierend
+        auf den stündlichen Regen-/Temperatur-/Wind-Werten aus Ride.weather_data.
+        Fehlen/leeren eines der drei Arrays -> neutral (1.0x), kein Teilergebnis
+        aus nur einem Teil der Daten.
+        """
+        return WeatherWearCalculator.ride_multiplier_detail(weather_data, coeff)[
+            "multiplier"
+        ]
 
 
 class WeatherWearService:
     """
     Orchestriert Neuberechnung/Persistierung von Component.weather_wear_km.
 
-    v1-Einschränkung: nur aktuell montierte Komponenten. Es gibt keine FK von
-    Ride zu Component/ComponentSlot, daher keine punktgenaue Rekonstruktion,
-    welches Teil zu einem früheren Zeitpunkt montiert war — ausgebaute/
-    historische Komponenten werden bewusst nicht unterstützt.
-
-    Voller Recompute, kein Delta/Watermark — jede Neuberechnung geht die
-    komplette Ride-Historie seit Einbau durch (analog recompute_wind.py).
+    Voller Recompute, kein Delta/Watermark — jede Neuberechnung geht alle Fahrten in
+    den Nutzungszeiträumen des Teils durch (analog recompute_wind.py). Das sind
+    dieselben Fahrten, die auch die km-Achse zählt (siehe api/usage.py), deshalb
+    können beide Achsen nicht auseinanderlaufen.
     """
 
     @staticmethod
     def calculate_weather_wear_km(component: Component) -> tuple[float, int]:
         """Reine Berechnung (liest DB, schreibt nicht). Gibt (weather_wear_km, ride_count) zurück."""
         from app_dashboard.models import Ride
-
-        if not component.installed_at:
-            return 0.0, 0
 
         coeff = WeatherSensitivityCoefficient.objects.filter(
             category=component.slot.template.category
@@ -112,9 +168,23 @@ class WeatherWearService:
             )
             return 0.0, 0
 
+        windows = component_windows(component)
+        if not windows:
+            return 0.0, 0
+
+        # Ein Q-Zweig je Nutzungszeitraum — nur Fahrten, bei denen das Teil auch
+        # wirklich am Rad war. Halboffen, damit beim Tausch A → B jede Fahrt genau
+        # einem Teil gehört.
+        window_filter = Q()
+        for start, end in windows:
+            branch = Q(start_date__gte=start)
+            if end is not None:
+                branch &= Q(start_date__lt=end)
+            window_filter |= branch
+
         rides = Ride.objects.filter(
+            window_filter,
             bike_id=component.slot.bike_id,
-            start_date__date__gte=component.installed_at,
             distance__isnull=False,
         ).only("distance", "weather_data")
 
@@ -134,8 +204,22 @@ class WeatherWearService:
 
     @staticmethod
     def recompute_component(component: Component) -> Component:
-        weather_wear_km, ride_count = WeatherWearService.calculate_weather_wear_km(component)
-        component.weather_wear_km = weather_wear_km
+        weather_wear_km, ride_count = WeatherWearService.calculate_weather_wear_km(
+            component
+        )
+        # + prior_weather_km: was das Teil schon hatte, bevor es hier erfasst wurde —
+        # analog zu prior_km in compute_wear().
+        total = weather_wear_km + (component.prior_weather_km or 0.0)
+        if (
+            component.weather_wear_computed_at is not None
+            and component.weather_wear_km == total
+            and component.weather_wear_ride_count == ride_count
+        ):
+            # Keine neuen Zahlen, also auch kein neuer Zeitstempel: daran hängt die
+            # Staleness der KI-Erklärung, und die kostet einen AI-Call.
+            return component
+
+        component.weather_wear_km = total
         component.weather_wear_ride_count = ride_count
         component.weather_wear_computed_at = timezone.now()
         component.save(
@@ -149,9 +233,16 @@ class WeatherWearService:
 
     @staticmethod
     def recompute_bike(bike: Bike) -> int:
-        """Rechnet ALLE aktuell montierten Komponenten des Bikes neu."""
-        components = Component.objects.filter(slot__bike=bike, is_mounted=True).select_related(
-            "slot__template"
+        """
+        Rechnet alle Teile des Bikes neu, die je gefahren wurden — nicht nur die
+        montierten: eine nachträglich synchronisierte oder gelöschte Fahrt kann auch
+        einen Reifen betreffen, der inzwischen im Regal liegt.
+        """
+        components = (
+            Component.objects.filter(slot__bike=bike, periods__isnull=False)
+            .distinct()
+            .select_related("slot__template", "slot__assembly")
+            .prefetch_related("periods")
         )
         count = 0
         for component in components:
@@ -167,11 +258,197 @@ class WeatherWearService:
         return count
 
 
-def build_weather_explanation_prompt(component: Component, wear: dict) -> tuple[str, str]:
+def ride_wear_breakdown(ride) -> dict:
+    """
+    Was EINE Fahrt die Komponenten gekostet hat — die fahrtbezogene Sicht auf denselben
+    Multiplikator, den `WeatherWearService` sonst nur aufsummiert persistiert.
+
+    Der Multiplikator hängt an der `ComponentCategory` (dort liegen die
+    Sensitivitäts-Koeffizienten), deshalb ist die Kategorie die natürliche Gruppierung:
+    alle Bremsen-Teile teilen sich denselben Prozentsatz, nur der Anteil an der jeweils
+    empfohlenen Lebensdauer unterscheidet sich je Komponente.
+
+    Berücksichtigt werden Komponenten, die **zum Zeitpunkt der Fahrt** am Rad waren —
+    nicht die heute montierten: maßgeblich sind ihre Nutzungszeiträume. Nie montierte
+    Ersatzteile und eine damals geparkte Baugruppe bleiben also draußen, ein seither
+    abgenommener Reifen ist dabei.
+    """
+    if ride.bike_id is None or ride.start_date is None or not ride.distance:
+        return {"distance_km": None, "categories": [], "component_count": 0}
+
+    distance_km = ride.distance / 1000
+
+    # Beide Bedingungen im selben filter()-Aufruf: sie müssen auf denselben
+    # Nutzungszeitraum zutreffen, nicht auf zwei verschiedene.
+    components = (
+        Component.objects.filter(
+            Q(periods__ended_at__isnull=True)
+            | Q(periods__ended_at__gt=ride.start_date),
+            slot__bike_id=ride.bike_id,
+            periods__started_at__lte=ride.start_date,
+        )
+        .distinct()
+        .select_related("slot__template", "slot__assembly")
+    )
+
+    coefficients = {
+        coeff.category: coeff for coeff in WeatherSensitivityCoefficient.objects.all()
+    }
+
+    grouped: dict[str, dict] = {}
+    total_extra_km = 0.0
+    component_count = 0
+
+    for component in components:
+        template = component.slot.template
+        coeff = coefficients.get(template.category)
+        if coeff is None:
+            continue
+
+        detail = WeatherWearCalculator.ride_multiplier_detail(ride.weather_data, coeff)
+        multiplier = detail["multiplier"]
+        effective_km = distance_km * multiplier
+        extra_km = effective_km - distance_km
+        warn_km = component.effective_warn_km
+
+        entry = grouped.setdefault(
+            template.category,
+            {
+                "category": template.category,
+                "category_display": template.get_category_display(),
+                "multiplier": round(multiplier, 3),
+                "extra_pct": round((multiplier - 1) * 100),
+                "extra_km": 0.0,
+                "dominant_driver": detail["dominant_driver"],
+                "dominant_driver_display": DRIVER_LABELS.get(detail["dominant_driver"]),
+                "components": [],
+            },
+        )
+        entry["components"].append(
+            {
+                "id": component.pk,
+                "name": component.slot.display_name,
+                "brand": component.brand,
+                "model_name": component.model_name,
+                "effective_km": round(effective_km, 1),
+                "extra_km": round(extra_km, 2),
+                "warn_km": warn_km,
+                # "Diese Fahrt hat X % der empfohlenen Lebensdauer gekostet" — die
+                # Zahl, nach der der Nutzer eigentlich fragt.
+                "share_of_life_pct": (
+                    round(effective_km / warn_km * 100, 1) if warn_km else None
+                ),
+            }
+        )
+        entry["extra_km"] = round(entry["extra_km"] + extra_km, 2)
+        total_extra_km += extra_km
+        component_count += 1
+
+    categories = sorted(
+        grouped.values(), key=lambda entry: entry["extra_pct"], reverse=True
+    )
+
+    return {
+        "distance_km": round(distance_km, 1),
+        "conditions": {
+            "precipitation": _round(
+                _mean((ride.weather_data or {}).get("precipitation"))
+            ),
+            "temperature": _round(
+                _mean((ride.weather_data or {}).get("temperature_2m"))
+            ),
+            "wind_speed": _round(
+                _mean((ride.weather_data or {}).get("wind_speed_10m"))
+            ),
+        },
+        "categories": categories,
+        "total_extra_km": round(total_extra_km, 2),
+        "component_count": component_count,
+    }
+
+
+def _round(value, digits: int = 1):
+    return None if value is None else round(value, digits)
+
+
+def build_ride_wear_impact_prompt(ride, breakdown: dict) -> tuple[str, str]:
+    """
+    Baut (system_prompt, user_prompt) für die KI-Erklärung, was eine einzelne Fahrt die
+    Komponenten gekostet hat. Wie bei den anderen Prompt-Buildern rechnet die KI nichts
+    selbst — sie erzählt die bereits von `ride_wear_breakdown()` berechneten Zahlen.
+    """
+    system_prompt = (
+        "Du bist ein Assistent für eine Fahrrad-Wartungs-App. Du bekommst bereits fertig "
+        "berechnete Zahlen dazu, wie stark eine EINZELNE Fahrt die Komponenten eines "
+        "Fahrrads abgenutzt hat — inklusive des wetterbedingten Aufschlags gegenüber der "
+        "reinen Distanz. Erkläre dem Nutzer in 2-3 kurzen, allgemeinverständlichen Sätzen "
+        "auf Deutsch, was ihn diese Fahrt gekostet hat, und nenne dabei konkret die "
+        "Bedingung, die den Aufschlag verursacht hat (z.B. 'Regen' statt 'widrige "
+        "Bedingungen'). Nutze ausschließlich die gegebenen Zahlen — führe KEINE eigenen "
+        "Berechnungen durch und erfinde KEINE zusätzlichen Werte. Gab es keinen "
+        "nennenswerten Aufschlag, sage das ruhig deutlich. Antworte nur mit dem Text, "
+        "ohne Einleitung, ohne Anführungszeichen."
+    )
+
+    conditions = breakdown.get("conditions") or {}
+    lines = [
+        f"Fahrt: {ride.name}",
+        f"Distanz: {breakdown.get('distance_km')} km",
+        f"Durchschnittlicher Niederschlag: {conditions.get('precipitation')} mm/h",
+        f"Durchschnittstemperatur: {conditions.get('temperature')} °C",
+        f"Durchschnittliche Windgeschwindigkeit: {conditions.get('wind_speed')} km/h",
+        f"Wetterbedingter Mehrverschleiß gesamt: {breakdown.get('total_extra_km')} km",
+        "Betroffene Komponenten-Kategorien:",
+    ]
+    for category in breakdown.get("categories", []):
+        driver = category.get("dominant_driver_display") or "keine besondere Bedingung"
+        lines.append(
+            f"- {category['category_display']}: +{category['extra_pct']}% "
+            f"(+{category['extra_km']} km), Haupttreiber: {driver}"
+        )
+        for component in category["components"]:
+            share = component["share_of_life_pct"]
+            share_text = (
+                f"{share}% der empfohlenen Lebensdauer"
+                if share is not None
+                else "unbekannt"
+            )
+            lines.append(f"    - {component['name']}: diese Fahrt = {share_text}")
+
+    return system_prompt, "\n".join(lines)
+
+
+def ride_wear_impact_is_stale(ride) -> bool:
+    """
+    True wenn die gecachte Erklärung neu generiert werden muss. Die Ride-Zahlen selbst
+    sind nach dem Import unveränderlich, die Aufschlüsselung hängt aber daran, welche
+    Komponenten zum Fahrtzeitpunkt montiert waren — und das ändert sich, wenn der Nutzer
+    nachträglich ein Einbaudatum korrigiert oder ein Teil austauscht. Dieselbe
+    Max-Aggregation über die Signalquelle wie `bike_condition_report_is_stale()`.
+    """
+    generated_at = ride.wear_impact_generated_at
+    if generated_at is None or not ride.wear_impact_summary:
+        return True
+    if ride.bike_id is None:
+        return False
+
+    latest_change = Component.objects.filter(slot__bike_id=ride.bike_id).aggregate(
+        latest=Max("updated_at")
+    )["latest"]
+    return bool(latest_change and latest_change > generated_at)
+
+
+def build_weather_explanation_prompt(
+    component: Component, wear: dict
+) -> tuple[str, str]:
     """Baut (system_prompt, user_prompt) fuer die KI-Erklaerung."""
     template = component.slot.template
     multiplier_pct = None
-    if wear.get("wear_km") and wear["wear_km"] > 0 and component.weather_wear_km is not None:
+    if (
+        wear.get("wear_km")
+        and wear["wear_km"] > 0
+        and component.weather_wear_km is not None
+    ):
         multiplier_pct = round((component.weather_wear_km / wear["wear_km"] - 1) * 100)
 
     system_prompt = (
@@ -197,7 +474,9 @@ def build_weather_explanation_prompt(component: Component, wear: dict) -> tuple[
     return system_prompt, user_prompt
 
 
-def build_check_instructions_prompt(component: Component, wear: dict) -> tuple[str, str]:
+def build_check_instructions_prompt(
+    component: Component, wear: dict
+) -> tuple[str, str]:
     """
     Baut (system_prompt, user_prompt) fuer eine KI-Anleitung, WIE der Nutzer die
     Komponente selbst am besten prueft. Anders als build_weather_explanation_prompt
@@ -247,7 +526,9 @@ def bike_condition_report_is_stale(bike: Bike) -> bool:
     if latest_ride and latest_ride > generated_at:
         return True
 
-    mounted = Component.objects.filter(slot__bike=bike, is_mounted=True)
+    mounted = Component.objects.mounted().filter(
+        slot__in=ComponentSlot.objects.on_bike(bike)
+    )
     latest_weather = mounted.aggregate(latest=Max("weather_wear_computed_at"))["latest"]
     if latest_weather and latest_weather > generated_at:
         return True
@@ -261,7 +542,9 @@ def bike_condition_report_is_stale(bike: Bike) -> bool:
     return False
 
 
-def build_bike_condition_report_prompt(bike: Bike, component_summaries: list[dict]) -> tuple[str, str]:
+def build_bike_condition_report_prompt(
+    bike: Bike, component_summaries: list[dict]
+) -> tuple[str, str]:
     """
     Baut (system_prompt, user_prompt) fuer den Gesamt-Zustandsbericht eines Bikes.
     `component_summaries` enthält je montierter Komponente Name/Kategorie plus das
@@ -300,7 +583,9 @@ def build_bike_condition_report_prompt(bike: Bike, component_summaries: list[dic
 # diese Funktionen auf und kuemmert sich nur um Versand/Scheduling/Dedupe-Persistierung.
 
 
-def get_new_component_warnings(profile: StravaProfile, bike: Bike | None = None) -> list[dict]:
+def get_new_component_warnings(
+    profile: StravaProfile, bike: Bike | None = None
+) -> list[dict]:
     """
     Ermittelt montierte Komponenten des Profils (optional auf ein einzelnes Bike
     eingeschraenkt), deren warn_status_overall aktuell warn/critical ist UND sich seit der
@@ -311,18 +596,28 @@ def get_new_component_warnings(profile: StravaProfile, bike: Bike | None = None)
     bikes = Bike.objects.filter(athlete=profile, retired=False)
     if bike is not None:
         bikes = bikes.filter(pk=bike.pk)
-    bikes = bikes.prefetch_related("slots__components", "slots__template")
 
     results = []
     for b in bikes:
-        for slot in b.slots.all():
+        slots = (
+            ComponentSlot.objects.on_bike(b)
+            .select_related("template")
+            .prefetch_related("components__periods", "components__checks")
+        )
+        ledger = RideLedger.for_bike(b.pk)
+        for slot in slots:
             comp = slot.mounted_component
             if comp is None:
                 continue
-            wear = compute_wear(comp, b.total_distance_km)
+            wear = compute_wear(comp, ledger)
             status = wear["warn_status_overall"]
-            if status in (WarnStatus.WARN, WarnStatus.CRITICAL) and status != comp.last_warn_notified_status:
-                results.append({"bike": b, "slot": slot, "component": comp, "wear": wear})
+            if (
+                status in (WarnLevel.WARN, WarnLevel.CRITICAL)
+                and status != comp.last_warn_notified_status
+            ):
+                results.append(
+                    {"bike": b, "slot": slot, "component": comp, "wear": wear}
+                )
     return results
 
 
@@ -334,12 +629,12 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
     compute_wear(..., as_of=...)). Bikes die bereits heute kritisch sind werden ausgeschlossen
     — das deckt bereits get_new_component_warnings() ab, keine Doppel-Meldung.
     """
-    from app_dashboard.api.services import predict_next_ride_date  # inline: Cross-App, siehe Architektur-Notiz
+    from app_dashboard.api.services import (  # inline: Cross-App, siehe Architektur-Notiz
+        predict_next_ride_date,
+    )
 
     results = []
-    bikes = Bike.objects.filter(athlete=profile, retired=False).prefetch_related(
-        "slots__components", "slots__template"
-    )
+    bikes = Bike.objects.filter(athlete=profile, retired=False)
     for bike in bikes:
         predicted_date = predict_next_ride_date(bike)
         if predicted_date is None:
@@ -347,23 +642,30 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
         if bike.predicted_unsafe_notified_for_date == predicted_date:
             continue
 
-        mounted = [(slot, slot.mounted_component) for slot in bike.slots.all()]
+        slots = (
+            ComponentSlot.objects.on_bike(bike)
+            .select_related("template")
+            .prefetch_related("components__periods", "components__checks")
+        )
+        mounted = [(slot, slot.mounted_component) for slot in slots]
         mounted = [(slot, comp) for slot, comp in mounted if comp is not None]
         if not mounted:
             continue
 
-        bike_total_km = bike.total_distance_km
-        today_worst = WarnStatus.UNKNOWN
+        ledger = RideLedger.for_bike(bike.pk)
+        today_worst = WarnLevel.UNKNOWN
         projected_components = []
         for slot, comp in mounted:
-            today_wear = compute_wear(comp, bike_total_km)
-            if today_wear["warn_status_overall"] == WarnStatus.CRITICAL:
-                today_worst = WarnStatus.CRITICAL
-            projected_wear = compute_wear(comp, bike_total_km, as_of=predicted_date)
-            if projected_wear["warn_status_overall"] == WarnStatus.CRITICAL:
-                projected_components.append({"slot": slot, "component": comp, "wear": projected_wear})
+            today_wear = compute_wear(comp, ledger)
+            if today_wear["warn_status_overall"] == WarnLevel.CRITICAL:
+                today_worst = WarnLevel.CRITICAL
+            projected_wear = compute_wear(comp, ledger, as_of=predicted_date)
+            if projected_wear["warn_status_overall"] == WarnLevel.CRITICAL:
+                projected_components.append(
+                    {"slot": slot, "component": comp, "wear": projected_wear}
+                )
 
-        if today_worst == WarnStatus.CRITICAL:
+        if today_worst == WarnLevel.CRITICAL:
             continue  # schon heute kritisch -> deckt get_new_component_warnings() ab
         if not projected_components:
             continue

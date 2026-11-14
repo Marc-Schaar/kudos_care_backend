@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
+
 from celery.schedules import crontab
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,26 +16,43 @@ if os.name == "nt":
 
 STRAVA_CLIENT_ID = os.environ.get("STRAVA_CLIENT_ID")
 STRAVA_CLIENT_SECRET = os.environ.get("STRAVA_CLIENT_SECRET")
+STRAVA_VERIFY_TOKEN = os.environ.get("STRAVA_VERIFY_TOKEN")
 
 AI_PROVIDER = os.environ.get("AI_PROVIDER", "gemini")  # "gemini" | "groq"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-lite")
+# gemini-2.0-flash-lite wurde von Google abgeschaltet (HTTP 404 "no longer
+# available", Google verweist selbst auf den Nachfolger) — nicht an einem
+# ungueltigen Key gelegen, siehe `manage.py ai_diagnose`.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# llama-3.3-70b-versatile ist aus Groqs Modell-Katalog verschwunden (HTTP 404
+# "does not exist"). gpt-oss-20b bestaetigt per Diagnose: Freitext- und
+# JSON-Modus laufen sauber innerhalb der bestehenden Token-Budgets (AI_MAX_
+# OUTPUT_TOKENS=300 in ai_providers.py), inkl. seines Reasoning-Overheads.
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+
+# Laesst Kudo (app_maintenance/api/bike_assistant.py) Produktdaten per
+# Google-Search-Grounding nachschlagen, statt sie aus dem Modellwissen zu
+# beantworten. Default aus: Grounding haengt an einem eigenen Kontingent, und ein
+# Key ohne dieses Kontingent antwortet darauf mit HTTP 429, waehrend derselbe
+# Aufruf ohne Werkzeug 200 liefert (nachgemessen auf dem aktuellen Key, ueber drei
+# Modelle hinweg). Der Code faengt das ab und weicht auf reines Modellwissen aus —
+# eingeschaltet zahlt man dafuer aber jedes Mal einen vergeblichen Anlauf.
+# Auf einem Key mit Grounding-Kontingent: AI_GROUNDING_ENABLED=True.
+AI_GROUNDING_ENABLED = os.environ.get("AI_GROUNDING_ENABLED", "False") == "True"
 
 # E-Mail-Versand (Benachrichtigungen, siehe app_notifications). Default = Brevo SMTP-Relay,
 # aber vollstaendig env-gesteuert: ein spaeterer Wechsel auf einen eigenen Mailserver aendert
 # nur .env-Werte, keinen Code.
-EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
+EMAIL_BACKEND = os.environ.get(
+    "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
+)
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp-relay.brevo.com")
 EMAIL_PORT = int(os.environ.get("EMAIL_PORT", 587))
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "True") == "True"
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
-
-# Basis-URL des Frontends fuer Links in E-Mails (z.B. "Zum Bike" in Warn-Mails).
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -46,6 +65,26 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 DEBUG = os.environ.get("DEBUG", "True") == "True"
 
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost").split(",")
+
+# Basis-URL des Frontends fuer Links in E-Mails (z.B. "Zum Bike" in Warn-Mails).
+#
+# Ohne gesetzten Wert griff hier frueher stillschweigend "http://localhost:3000".
+# In Produktion hiess das: jede verschickte Mail verlinkte auf den Rechner des
+# Empfaengers. Aufgefallen ist es erst an echten Mails. Zwei Konsequenzen:
+#
+# * Der Entwicklungs-Default zeigt jetzt auf 4200 — dort laeuft `ng serve`,
+#   3000 war ohnehin nie richtig.
+# * Ohne DEBUG ist der Wert Pflicht. Ein Startfehler ist deutlich billiger als
+#   Mails mit toten Links, die niemand bemerkt.
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "")
+if not FRONTEND_URL:
+    if DEBUG:
+        FRONTEND_URL = "http://localhost:4200"
+    else:
+        raise ImproperlyConfigured(
+            "FRONTEND_URL fehlt. Die Links in den Benachrichtigungs-Mails brauchen "
+            "die oeffentliche Adresse des Frontends (z.B. https://example.com)."
+        )
 
 CORS_ALLOWED_ORIGINS = os.environ.get(
     "CORS_ALLOWED_ORIGINS", "http://localhost:3000"
@@ -100,6 +139,7 @@ INSTALLED_APPS = [
     "app_strava_webhook",
     "app_maintenance",
     "app_notifications",
+    "app_radcomputer",
 ]
 
 MIDDLEWARE = [
@@ -217,24 +257,24 @@ STRAVA_SYNC_PAGE_SIZE = int(os.getenv("STRAVA_SYNC_PAGE_SIZE", 50))
 
 
 LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'handlers': {
-        'file': {
-            'level': 'DEBUG',
-            'class': 'logging.FileHandler',
-            'filename': os.path.join(BASE_DIR, 'debug.log'), 
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "file": {
+            "level": "DEBUG",
+            "class": "logging.FileHandler",
+            "filename": os.path.join(BASE_DIR, "debug.log"),
         },
     },
-    'loggers': {
-            'my_app_debug': {
-            'handlers': ['file'],
-            'level': 'DEBUG',
-            'propagate': False,
+    "loggers": {
+        "my_app_debug": {
+            "handlers": ["file"],
+            "level": "DEBUG",
+            "propagate": False,
         },
-        'django.db.backends': {
-            'level': 'INFO',
-            'handlers': ['file'],
+        "django.db.backends": {
+            "level": "INFO",
+            "handlers": ["file"],
         },
     },
 }

@@ -4,23 +4,24 @@ from datetime import date, timedelta
 
 import polyline
 import requests
+from django.conf import settings
+from django.contrib.gis.geos import LineString as DjangoLineString
+from django.contrib.gis.geos import Point
+from django.db.models import F
 from shapely.geometry import LineString as ShapelyLineString
 
-from django.conf import settings
-from django.contrib.gis.geos import LineString as DjangoLineString, Point
-from django.db.models import F
+from app_auth.api.utils import strava_get
+from app_auth.consent import has_weather_consent
+from app_auth.models import StravaProfile
+from app_maintenance.api.tasks import recompute_weather_wear_for_bike
+from app_maintenance.models import Bike
 
 from ..models import Ride, RideStream
-from .utils import (
-    find_hourly_index,
-    calculate_headwind,
-    calculate_heading,
+from .wind import (
+    average_headwind,
+    compute_ride_wind,
     get_filtered_weather,
 )
-from app_auth.models import StravaProfile
-from app_auth.api.utils import strava_get
-from app_maintenance.models import Bike
-from app_maintenance.api.tasks import recompute_weather_wear_for_bike
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +39,27 @@ class StravaSyncService:
         """Holt die Bikes vom /athlete Endpunkt und synchronisiert sie."""
         try:
             resp = strava_get(
-                profile, "https://www.strava.com/api/v3/athlete", timeout=REQUEST_TIMEOUT
+                profile,
+                "https://www.strava.com/api/v3/athlete",
+                timeout=REQUEST_TIMEOUT,
             )
             resp.raise_for_status()
             data = resp.json()
-            
+
             for bike_info in data.get("bikes", []):
+                # Der Name wird nur beim ersten Mal übernommen: sonst setzt jeder Sync
+                # zurück, was der Nutzer in der App umbenannt hat.
                 Bike.objects.update_or_create(
                     strava_bike_id=bike_info["id"],
-                    defaults={"name": bike_info.get("name"), "athlete": profile}
+                    defaults={"athlete": profile},
+                    create_defaults={
+                        "athlete": profile,
+                        "name": bike_info.get("name") or "Unbenanntes Rad",
+                    },
                 )
-            logger.info(f"Bikes für {profile.strava_athlete_id} erfolgreich synchronisiert.")
+            logger.info(
+                f"Bikes für {profile.strava_athlete_id} erfolgreich synchronisiert."
+            )
         except Exception as e:
             logger.error(f"Fehler beim Bike-Sync für {profile.strava_athlete_id}: {e}")
             raise
@@ -109,7 +120,9 @@ class StravaSyncService:
 
                 for activity in activities:
                     try:
-                        ride = StravaImportService.sync_activity_to_db(activity, profile)
+                        ride = StravaImportService.sync_activity_to_db(
+                            activity, profile
+                        )
                         if ride is not None:
                             # Nur tatsächlich neu importierte Aktivitäten zählen für
                             # den Fortschritt – bereits synchronisierte werden von
@@ -159,7 +172,7 @@ class StravaImportService:
         strava_id = activity_data["id"]
         if Ride.objects.filter(strava_id=strava_id).exists():
             return None
-        
+
         polyline_str = activity_data.get("map", {}).get("summary_polyline")
         start_date_local = activity_data.get("start_date_local") or ""
         start_date = start_date_local.split("T")[0] if start_date_local else None
@@ -208,23 +221,28 @@ class StravaImportService:
             )
             stream_data = None
 
-        if start_latlng and start_date:
+        avg_headwind = None
+        if start_latlng and start_date and has_weather_consent(profile):
             weather_info = WeatherService.get_historical_weather(
                 start_latlng[0], start_latlng[1], start_date
             )
-            avg_headwind = (
-                WeatherService.analyze_wind(stream_data, weather_info, ride)
-                if stream_data and weather_info
-                else 0.0
+            # Ein einziger Segment-Durchlauf speist beides: den Stunden-Zeitverlauf
+            # fuers Chart und den Durchschnitt fuer die Kopfzeile. Dadurch koennen
+            # Text, Chart und Karte gar nicht mehr auseinanderlaufen.
+            segments, _wind_source = compute_ride_wind(
+                ride, (weather_info or {}).get("hourly") or {}, stream_data
             )
+            avg_headwind = average_headwind(segments)
             ride.weather_data = {
-                **get_filtered_weather(ride, weather_info, stream_data),
+                **get_filtered_weather(ride, weather_info, segments),
                 "avg_headwind": avg_headwind,
             }
             ride.save()
 
-            if ride.bike_id:
-                recompute_weather_wear_for_bike.delay(ride.bike_id)
+        # Auch ohne Wetterdaten (Rolle, kein GPS): die Fahrt zählt für die Teile, und
+        # auch für welche, die inzwischen im Regal liegen.
+        if ride.bike_id:
+            recompute_weather_wear_for_bike.delay(ride.bike_id)
 
         if stream_data:
             RideStream.objects.update_or_create(
@@ -232,7 +250,7 @@ class StravaImportService:
                 defaults={
                     "latlngs": stream_data.get("latlng", {}).get("data"),
                     "time_series": stream_data.get("time", {}).get("data"),
-                    "avg_headwind": (ride.weather_data or {}).get("avg_headwind", 0.0),
+                    "avg_headwind": avg_headwind,
                 },
             )
 
@@ -353,29 +371,3 @@ class WeatherService:
         except requests.exceptions.RequestException as e:
             logger.error("Wetterdaten-Abruf fehlgeschlagen (%s, %s): %s", lat, lon, e)
             return None
-
-    @staticmethod
-    def analyze_wind(stream_data, weather_info, ride):
-        """
-        Berechnet den durchschnittlichen Gegenwind für eine Fahrt.
-
-        Nutzt den zur Startzeit passenden Wetterwert statt immer Index 0.
-        """
-        latlngs = stream_data.get("latlng", {}).get("data", [])
-        hourly = weather_info.get("hourly", {})
-        wind_directions = hourly.get("wind_direction_10m", [])
-        wind_speeds = hourly.get("wind_speed_10m", [])
-        times = hourly.get("time", [])
-
-        if not latlngs or not wind_directions:
-            return 0.0
-
-        wind_index = find_hourly_index(times, ride.start_date)
-
-        w_dir = wind_directions[wind_index]
-        w_speed = wind_speeds[wind_index]
-
-        heading = calculate_heading(
-            latlngs[0][0], latlngs[0][1], latlngs[-1][0], latlngs[-1][1]
-        )
-        return calculate_headwind(heading, w_dir, w_speed)

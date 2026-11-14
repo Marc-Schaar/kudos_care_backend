@@ -1,11 +1,14 @@
 from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
+from app_dashboard.models import Ride
 from app_maintenance.api.serializers import compute_wear
+from app_maintenance.api.services import WeatherWearService
 from app_maintenance.models import (
     Bike,
     BikeType,
@@ -13,6 +16,7 @@ from app_maintenance.models import (
     ComponentCategory,
     ComponentSlot,
     ComponentTemplate,
+    WeatherSensitivityCoefficient,
 )
 
 
@@ -28,7 +32,9 @@ def _make_profile(user, strava_athlete_id=12345):
 
 class ComponentCheckTests(APITestCase):
     def setUp(self):
-        self.user = get_user_model().objects.create_user(username="athlete", password="pw")
+        self.user = get_user_model().objects.create_user(
+            username="athlete", password="pw"
+        )
         self.profile = _make_profile(self.user)
         self.client.force_login(self.user)
         session = self.client.session
@@ -42,13 +48,14 @@ class ComponentCheckTests(APITestCase):
             bike_type=BikeType.ROAD,
         )
 
-    def _make_slot_with_component(self, warn_days=10, supports_condition_estimate=True, custom_warn_days=None):
+    def _make_slot_with_component(
+        self, warn_days=10, supports_condition_estimate=True, custom_warn_days=None
+    ):
         template = ComponentTemplate.objects.create(
             name="Bremsbeläge",
             category=ComponentCategory.BRAKES,
             warn_days=warn_days,
             supports_condition_estimate=supports_condition_estimate,
-            is_system=False,
         )
         slot = ComponentSlot.objects.create(bike=self.bike, template=template)
         component = Component.objects.create(
@@ -56,7 +63,6 @@ class ComponentCheckTests(APITestCase):
             brand="Shimano",
             installed_at=date.today() - timedelta(days=100),
             custom_warn_days=custom_warn_days,
-            is_mounted=True,
         )
         return template, slot, component
 
@@ -68,8 +74,7 @@ class ComponentCheckTests(APITestCase):
             {
                 "brand": "Shimano",
                 "model_name": "XT",
-                "installed_at": date.today().isoformat(),
-                "is_mounted": False,
+                "mount": False,
                 "custom_warn_days": 30,
             },
         )
@@ -87,7 +92,9 @@ class ComponentCheckTests(APITestCase):
         self.assertIsNone(response.data["last_check"])
 
     def test_check_rejects_condition_pct_when_not_supported(self):
-        _, _, component = self._make_slot_with_component(supports_condition_estimate=False)
+        _, _, component = self._make_slot_with_component(
+            supports_condition_estimate=False
+        )
 
         response = self.client.post(
             f"/api/maintenance/components/{component.id}/check/",
@@ -113,10 +120,13 @@ class ComponentCheckTests(APITestCase):
         _, _, component = self._make_slot_with_component()
         self.client.logout()
 
-        response = self.client.post(f"/api/maintenance/components/{component.id}/check/", {})
+        response = self.client.post(
+            f"/api/maintenance/components/{component.id}/check/", {}
+        )
 
         self.assertIn(
-            response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN)
+            response.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
 
     def test_weather_wear_axis_drives_overall_status_when_worse_than_km_and_days(self):
@@ -125,7 +135,9 @@ class ComponentCheckTests(APITestCase):
         template, _, component = self._make_slot_with_component(warn_days=3650)
         component.installed_at = date.today() - timedelta(days=5)
         component.custom_warn_km = 100
-        component.weather_wear_km = 150  # über dem Schwellwert, obwohl kaum Zeit vergangen ist
+        component.weather_wear_km = (
+            150  # über dem Schwellwert, obwohl kaum Zeit vergangen ist
+        )
         component.save()
 
         response = self.client.get(f"/api/maintenance/components/{component.id}/")
@@ -138,16 +150,28 @@ class ComponentCheckTests(APITestCase):
         """Regression: 'Freigeben' muss auch die Wetter-Achse zuruecksetzen, sonst
         bleibt die Komponente trotz Freigabe als ueberfaellig markiert, weil
         warn_status_weather_km sonst immer den vollen Verlauf seit Einbau nutzt."""
-        _, _, component = self._make_slot_with_component(warn_days=3650)
-        component.installed_at = date.today() - timedelta(days=5)
+        _, slot, component = self._make_slot_with_component(warn_days=3650)
         component.custom_warn_km = 100
-        component.weather_wear_km = 150
         component.save()
+        Ride.objects.create(
+            strava_id=8810,
+            name="Lange Fahrt",
+            distance=150_000,
+            start_date=timezone.now() - timedelta(days=2),
+            athlete=self.profile,
+            bike=self.bike,
+        )
+        WeatherSensitivityCoefficient.objects.get_or_create(
+            category=ComponentCategory.BRAKES
+        )
+        WeatherWearService.recompute_component(component)
 
         pre_check = self.client.get(f"/api/maintenance/components/{component.id}/")
         self.assertEqual(pre_check.data["warn_status_overall"], "critical")
 
-        response = self.client.post(f"/api/maintenance/components/{component.id}/check/", {})
+        response = self.client.post(
+            f"/api/maintenance/components/{component.id}/check/", {}
+        )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["warn_status_weather_km"], "ok")
@@ -162,36 +186,42 @@ class ComputeWearAsOfProjectionTests(APITestCase):
     """
 
     def setUp(self):
-        self.user = get_user_model().objects.create_user(username="projection-athlete", password="pw")
+        self.user = get_user_model().objects.create_user(
+            username="projection-athlete", password="pw"
+        )
         self.profile = _make_profile(self.user, strava_athlete_id=99999)
         self.bike = Bike.objects.create(
-            athlete=self.profile, strava_bike_id="proj1", name="Projektionsrad", bike_type=BikeType.ROAD
+            athlete=self.profile,
+            strava_bike_id="proj1",
+            name="Projektionsrad",
+            bike_type=BikeType.ROAD,
         )
         self.template = ComponentTemplate.objects.create(
-            name="Kette", category=ComponentCategory.DRIVETRAIN, warn_days=10, is_system=False
+            name="Kette",
+            category=ComponentCategory.DRIVETRAIN,
+            warn_days=10,
         )
         self.slot = ComponentSlot.objects.create(bike=self.bike, template=self.template)
         self.component = Component.objects.create(
             slot=self.slot,
             brand="KMC",
             installed_at=date.today() - timedelta(days=5),
-            is_mounted=True,
         )
 
     def test_as_of_projects_days_axis_into_the_future(self):
         # Heute: 5 von 10 Tagen -> ok.
-        today_wear = compute_wear(self.component, None)
+        today_wear = compute_wear(self.component)
         self.assertEqual(today_wear["warn_status_overall"], "ok")
 
         # In 10 Tagen: 15 von 10 Tagen -> critical, obwohl heute noch alles ok ist.
         future = date.today() + timedelta(days=10)
-        projected_wear = compute_wear(self.component, None, as_of=future)
+        projected_wear = compute_wear(self.component, as_of=future)
         self.assertEqual(projected_wear["wear_days"], 15)
         self.assertEqual(projected_wear["warn_status_days"], "critical")
         self.assertEqual(projected_wear["warn_status_overall"], "critical")
 
     def test_as_of_defaults_to_today(self):
         self.assertEqual(
-            compute_wear(self.component, None),
-            compute_wear(self.component, None, as_of=date.today()),
+            compute_wear(self.component),
+            compute_wear(self.component, as_of=date.today()),
         )

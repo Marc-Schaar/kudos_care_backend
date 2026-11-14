@@ -38,7 +38,9 @@ def load_new_templates(apps, schema_editor):
         )
 
     with connection.cursor() as cursor:
-        for statement in connection.ops.sequence_reset_sql(no_style(), [ComponentTemplate]):
+        for statement in connection.ops.sequence_reset_sql(
+            no_style(), [ComponentTemplate]
+        ):
             cursor.execute(statement)
 
     WeatherSensitivityCoefficient.objects.using(connection.alias).update_or_create(

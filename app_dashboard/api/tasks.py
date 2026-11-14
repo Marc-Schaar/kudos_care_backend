@@ -6,6 +6,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
 
 from app_auth.models import StravaProfile
+
 from .services import StravaSyncService
 
 logger = logging.getLogger("my_app_debug")
@@ -31,7 +32,9 @@ def run_strava_sync(profile_id):
         profile.sync_status = "error"
         status_code = e.response.status_code if e.response is not None else None
         if status_code == 403:
-            profile.sync_error = "Strava-Zugriff unzureichend. Bitte Strava-Konto neu verbinden."
+            profile.sync_error = (
+                "Strava-Zugriff unzureichend. Bitte Strava-Konto neu verbinden."
+            )
         else:
             profile.sync_error = "Synchronisation mit Strava fehlgeschlagen"
         logger.exception(

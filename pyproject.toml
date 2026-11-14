@@ -1,0 +1,28 @@
+# Konfiguration für black und isort. flake8 liest kein pyproject.toml und hat
+# eine eigene Datei (.flake8) — die dortigen Werte müssen zu den hiesigen
+# passen, sonst streiten sich Formatter und Linter über dieselbe Zeile.
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+extend-exclude = '''
+/(
+  | migrations
+  | venv
+)/
+'''
+
+[tool.isort]
+# Sortiert Importe so, wie black sie danach formatieren würde. Ohne das
+# reformatiert black jeden isort-Lauf wieder zurück.
+profile = "black"
+line_length = 88
+skip_glob = ["*/migrations/*", "venv/*"]
+known_first_party = [
+    "app_auth",
+    "app_dashboard",
+    "app_maintenance",
+    "app_notifications",
+    "app_strava_webhook",
+    "core",
+]

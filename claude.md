@@ -33,59 +33,305 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   — zusätzlich zum Worker; in Produktion als eigenes Supervisor-Programm `celery-beat`
   eingerichtet, wird von `deploy.yml` mitneugestartet
 - Tests: `python manage.py test` (kein pytest konfiguriert, trotz anderslautender Vermutung)
-- Linter/Formatter: `black . && isort . && flake8`
+- Linter/Formatter: **`PYTHONUTF8=1 isort . && black . && flake8`** (isort vor black —
+  black glättet danach, was isort umbricht). Alle drei stehen in `requirements.txt`;
+  Konfiguration in `pyproject.toml` (black + isort mit `profile = "black"`) und `.flake8`
+  (`max-line-length = 88`, `E203`/`W503`/`E501` aus, weil sie black direkt
+  widersprechen). **`PYTHONUTF8=1` ist unter Windows nicht optional:** ohne den
+  UTF-8-Modus liest isort mit der ANSI-Codepage und überspringt jede Datei, die `→` oder
+  `≈` enthält, *stillschweigend* — gemessen 8 Dateien, darunter `app_maintenance/models.py`
+  und `api/views.py`. Der Lauf meldet trotzdem Erfolg.
 
 ## Architektur — Apps
 
 - **`app_auth`** — Strava-OAuth-Login. Model `StravaProfile` (1:1 zu Django `User`,
   speichert Access/Refresh-Token + Sync-Status). Endpoints: `POST /api/strava/auth/`,
-  `GET /api/strava/me/`, `POST /api/strava/logout/`. `api/utils.py` hat
+  `GET|PATCH|DELETE /api/strava/me/`, `POST /api/strava/logout/`. `GET me/` liefert neben der
+  `athlete_id` auch `email`, `email_notifications_enabled` und `needs_email`; `PATCH me/`
+  (`UserSettingsSerializer`) schreibt beides — `email` an den Django-`User`, das Flag ans
+  `StravaProfile`. Wird zum ersten Mal eine Adresse gesetzt und `welcome_email_sent_at`
+  ist noch leer, wird die bei der Erstanmeldung ins Leere gelaufene Willkommens-Mail
+  nachgeholt.
+  `DELETE me/?confirm=true` löscht das Konto samt aller Daten (Art. 17 DSGVO): es reicht,
+  den `User` zu löschen — `StravaProfile` hängt per OneToOne-CASCADE daran, `Bike`/`Ride`
+  per FK-CASCADE am Profil, alles Weitere daran. Die Bestätigung im Query-String ist
+  Pflicht, weil ein versehentliches DELETE jahrelange Fahrthistorie entfernt.
+  **Die E-Mail-Adresse wird bewusst nicht gehasht** — sie existiert ausschließlich zum
+  Versenden (`app_notifications/services.py::send_templated_email`), an einen Hash lässt
+  sich nichts schicken, und für Adressen wäre er ohnehin in Minuten rückrechenbar.
+  Stattdessen ist sie dort entfernt, wo sie ohne Zweck sichtbar wäre: **nicht im Admin**
+  (`UserWithoutEmailAdmin` ersetzt Djangos `UserAdmin`; `StravaProfileAdmin` sucht nicht
+  über `user__email` — eine Suche verriete die Adresse auch ohne Anzeige, weil ein
+  Treffer sie bestätigt) und **nicht in Logs** (bei Versandfehlern steht die
+  Athleten-Id; Logdateien leben länger und werden breiter gelesen als die Datenbank).
+  **Einwilligungen** (`app_auth/consent.py`): `StravaProfile.weather_consent_at` und
+  `ai_consent_at` sind Zeitpunkte statt Flags, weil sie der Nachweis sind; `GET|PATCH me/`
+  bilden sie als Bools ab. Stravas API Agreement verbietet die Weitergabe von Nutzerdaten an
+  Dritte ohne ausdrückliche Einwilligung. Ohne Wetter-Einwilligung gehen beim Import keine
+  Koordinaten an Open-Meteo (`recompute_wind` überspringt solche Nutzer und holt nach einer
+  späteren Zustimmung die alten Fahrten nach). Ohne KI-Einwilligung liefern die KI-Endpoints 403
+  `ai_consent_required`; `wear-impact` gibt stattdessen die Zahlen mit
+  `ai_consent_required: true`. **Die Prüfung gehört direkt vor den Anbieter-Aufruf**, Gecachtes
+  bleibt lesbar. Neue KI-Endpoints brauchen dieselbe Prüfung, Tests die Einwilligung im Setup.
+  Offen aus derselben Durchsicht: kein Datenexport (Art. 20), und die GPS-Tracks in
+  `Ride.track`/`RideStream.latlngs` sind ein deutlich sensiblerer Datensatz als jede
+  Adresse.
+  `api/utils.py` hat
   `get_valid_access_token()`/`strava_get()` als geteilten Strava-HTTP-Helper mit
   Token-Refresh + 401-Retry — von anderen Apps wiederverwendet.
 - **`app_dashboard`** — Ride-Ingestion, Geodaten, Wetter/Wind. Models `Ride` (PostGIS-Track,
   `weather_data` JSONField, FK zu `StravaProfile`+`Bike`), `RideStream` (Rohdaten-Zeitreihe).
+  **`api/wind.py` ist die einzige Quelle für alles Windbezogene** (ersetzt das frühere
+  `api/utils.py`, das dabei entfallen ist). `build_wind_segments()` teilt den vollen
+  GPS-Stream in Abschnitte *gleicher Distanz* und rechnet je Abschnitt den dortigen Kurs
+  gegen den auf diesen Zeitpunkt interpolierten Wind (Richtung zirkulär interpoliert, sonst
+  läge zwischen 350° und 10° die Südrichtung). Davon abgeleitet: `average_headwind()`
+  (distanzgewichtet → die Kopfzeilen-Zahl) und `hourly_headwind()` (→ das Chart). Dadurch
+  können Text, Chart und Karte nicht mehr auseinanderlaufen — vorher gab es drei
+  unabhängige Berechnungen mit drei verschiedenen Ergebnissen. Ohne GPS-Stream greift
+  `build_coarse_wind_segment()` (Start-Ziel-Gerade), erkennbar an `wind_source="coarse"`.
+  Fehlen die Wetterdaten ganz, entstehen **reine Geometrie-Abschnitte**
+  (`wind_source="none"`, `headwind=None`) und die Route wird neutral gezeichnet — die
+  Einfärbung ist ein Overlay, kein Existenzgrund für die Strecke. Genau daran hing der
+  Prod-Bug „Streckenverlauf: keine Daten": Bestandsfahrten lieferten vorher gar keine
+  Abschnitte und die Karte blieb leer.
+  Die Abschnitte werden **nicht persistiert**, sondern im Detail-Request aus `RideStream`
+  + `weather_data` rekonstruiert (`hourly_from_weather_data()`); dafür liegt seit dem
+  Refactoring `wind_direction_10m` mit in `weather_data`. **Altfahrten ohne dieses Feld
+  bleiben auf `wind_source="none"` (Strecke sichtbar, keine Einfärbung), bis
+  `recompute_wind` gelaufen ist — der Backfill gehört zu jedem Deploy dieser Änderung.**
   `api/services.py`: `StravaSyncService` (Bikes + paginierte Activities),
   `StravaImportService.sync_activity_to_db` (Polyline-Decode → Shapely-RDP-Simplify →
-  Gear-Matching → Streams → Open-Meteo-Wetter → Headwind-Berechnung), `WeatherService`,
+  Gear-Matching → Streams → Open-Meteo-Wetter → Windabschnitte), `WeatherService`,
   `build_ride_summary_prompt` (baut den Prompt für die optionale KI-Fahrt-Zusammenfassung,
   nutzt denselben `app_maintenance.api.ai_providers.get_ai_provider()` wie die
   Wetter-Verschleiß-Erklärung — App-Grenze bewusst überschritten statt dupliziert).
   Celery-Task `run_strava_sync` in `api/tasks.py`. Management-Command `recompute_wind.py`
-  (Backfill, `--dry-run`). Endpoint `GET /api/activities/<id>/summary/?refresh=true`
+  (Backfill, `--dry-run`) — rechnet `weather_data` inkl. Windrichtung und
+  `RideStream.avg_headwind` neu. `GET /api/activities/<id>/` liefert neben
+  `geo_json_full` (nur noch für die Bounds) das Feld `wind_segments`: eine
+  GeoJSON-FeatureCollection mit einem Feature je Abschnitt
+  (`headwind`/`wind_direction`/`bearing`/`precipitation`), die das Frontend direkt
+  rendert — die Karte interpoliert selbst nichts mehr.
+  `GET /api/activities/<id>/wear-impact/?refresh=true` liefert, was **diese eine Fahrt**
+  die Komponenten gekostet hat (siehe `app_maintenance`); der Endpoint gibt die Zahlen
+  auch dann zurück, wenn die KI ausfällt (`ai_unavailable: true` statt 503) — der
+  Erzähltext ist die Zugabe, die Zahlen sind die Aussage.
+  Endpoint `GET /api/activities/<id>/summary/?refresh=true`
   liefert eine gecachte KI-Zusammenfassung der Fahrt (Distanz/Dauer/Wetter/Gegenwind);
   Cache-Felder `Ride.ai_summary`/`ai_summary_generated_at`, keine Staleness-Prüfung nötig
   da Ride-Zahlen nach dem Import unveränderlich sind (anders als beim Bike-Zustandsbericht).
-- **`app_maintenance`** — Kern-Domäne Verschleiß-Tracking. Models: `Bike`,
-  `ComponentTemplate` (Katalog, Fixture `fixtures/component_templates.json`), `ComponentSlot`
-  (Position am Bike, unique je `(bike, template)`), `Component` (physisches Teil,
+- **`app_maintenance`** — Kern-Domäne Verschleiß-Tracking. Ein Bike besteht aus
+  **Baugruppen** (`BikeAssembly`), jede Baugruppe bündelt ihre `ComponentSlot`s
+  (physische Verschleißteile) und `MaintenanceInterval`s (Verbrauchsmaterial/Pflege
+  ohne "Zustand"). Models: `Bike`,
+  `ComponentGroup` (Katalog-Blueprint einer Baugruppe, z.B. "Laufrad vorne"/"Antrieb" —
+  verbindet mehrere `ComponentTemplate`s; `category`/`applicable_bike_types`/`sort_order`/
+  `recommended` steuern UI-Filter + den Neu-Bike-Stepper; bewusst generisch, weitere
+  Gruppen rein über Admin/Migration anlegbar; voller Satz in Migration `0016` geseedet),
+  **`ComponentGroup.kind` trennt zwei Dinge, die vorher beide „Baugruppe" hießen:**
+  `assembly` = physische Einheit, die man am Stück ab- und aufzieht (nur die beiden
+  Laufradsätze); `area` = Teile am selben Ort, die unabhängig verschleißen (Bremsbeläge
+  3.000 km neben Bremsscheibe 15.000 km neben Bremsflüssigkeit 730 Tage; Kette 2.000 km
+  neben Kurbel 30.000 km). **Nur `swap/`** (alle Teile erneuern) wird für `area`
+  serverseitig mit 400 `not_an_assembly` abgelehnt und im Client nicht angeboten — dort
+  wird pro Zeile einzeln getauscht. `activate/` hängt bewusst **nicht** an `kind`:
+  Wechseln ist nicht destruktiv und hat reale Fälle außerhalb der Laufräder — in den
+  Produktivdaten hat ein Rad zwei „Bremse hinten"-Instanzen (Carbon-Beläge geparkt,
+  Alu-Beläge aufgezogen), weil die Belagsmischung zum Laufradsatz passen muss. Eine
+  `kind`-Prüfung dort hätte genau diesen Wechsel blockiert. Niemand hat ein zweites komplettes „Cockpit" im Keller.
+  **`MountPosition`** (`ComponentGroup.position`/`ComponentTemplate.position`) macht
+  vorne/hinten zu einem Feld. Vorher stand die Seite nur im Freitext-Namen und wurde im
+  Frontend-Diagramm per `display_name.includes('vorne')` wieder herausgelesen: ein
+  umbenannter Slot verlor damit seine Position (Fallback war das *Vorderrad*), und die
+  **Kassette** trug „hinten" nie im Namen — sie saß nur wegen einer zweiten, unabhängigen
+  Regel hinten, während Migration `0020` sie gruppenseitig nach „Laufrad hinten" verschob
+  und ihre `category` `drivetrain` blieb. Drei Quellen, keine maßgeblich. Backfill und die
+  Ausnahmen (Kassette, Freilaufkörper, Schaltwerk, Umwerfer, ...) in Migration `0023`;
+  das Diagramm liest jetzt `template_detail.position`.
+  `BikeAssembly` (per-Bike-Instanz einer `ComponentGroup`: eigener `name`, `installed_at`,
+  `status` — **mehrere Instanzen je `(bike, group)` sind erlaubt** (Sommer-/Winter-LRS),
+  aber max. eine *aktive*. Der Zustand steckt in **einem** Feld
+  (`AssemblyStatus`: `active` = am Rad; `parked` = abgezogen, aber nicht entsorgt —
+  Komponenten bleiben `is_mounted=True`, weil sie ja weiter auf dem Laufradsatz sitzen;
+  `retired` = ausgemustert, Komponenten ausgebaut, `retired_at` hält das Datum). Bis
+  Migration `0022` war das eine Kodierung über zwei Felder (`is_active` + `retired_at`),
+  die jede Lesestelle kennen musste. `is_active`/`is_parked`/`is_retired` sind seither
+  abgeleitete Properties — im API-Response bleiben `is_active`/`is_parked` erhalten, weil
+  das Frontend-Model sie voraussetzt. Die Invariante hängt jetzt an einem **partiellen
+  Unique-Constraint** (`uniq_active_assembly_per_bike_group`, `condition=status=active`);
+  `clean()` liefert nur noch die verständlichere Meldung, garantiert aber nichts — es lief
+  nie gegen eine Race zwischen zwei Requests. `status`/`retired_at` sind über
+  `PATCH assemblies/<id>/` bewusst **read-only**: ein Wechsel muss über
+  `activate`/`retire`/`swap` laufen, sonst bliebe die `AssemblyUsagePeriod` offen und der
+  abgezogene Satz sammelte weiter km. `BikeAssembly.objects.active()`/`.parked()` als
+  Queryset-Helfer; `compute_km()`/
+  `worst_status()`/`is_parked`/`open_period()`/`ensure_open_period()` als Fat-Model-Methoden),
+  `AssemblyUsagePeriod` (Zeitraum, in dem eine Baugruppe tatsächlich am Rad war:
+  `started_at`/`started_distance_km` + `ended_at`/`ended_distance_km`, offene Periode =
+  aktuell montiert, max. eine je Baugruppe. **Ohne dieses Model würde ein abgezogener
+  Laufradsatz im Keller weiter km sammeln**, da `wear_km` am Bike-Odometer hängt.
+  Angelegt/geschlossen von den `_mount_assembly`/`_park_assembly`/`_retire_assembly`-Helfern
+  in `api/views.py`; `ensure_open_period()` zieht sie für Altbestände nach, die außerhalb der
+  API entstanden sind — Schema in Migration `0018`, Backfill in `0019`),
+  `ComponentTemplate` (Katalog, Fixture `fixtures/component_templates.json`,
+  optionales FK `group`; `maintenance_kind` `part`|`consumable` — `consumable` wird als
+  `MaintenanceInterval` statt als `Component` instanziiert; `default_in_group` = Vorauswahl
+  im Baugruppen-Dialog), `ComponentSlot`
+  (Position innerhalb einer `BikeAssembly`, FK `assembly` null=alt/ungruppiert;
+  bedingte Unique-Constraints `(assembly, template)` bzw. `(bike, template)` statt des
+  früheren `unique_together`), `Component` (physisches Teil,
   `is_mounted` via `clean()`/`save()`-Override erzwungen: nur 1 montiertes Teil je Slot;
+  `distance_at_retire` = km-Stand beim Ausbau, damit ein mitten in einer Nutzungsperiode
+  getauschtes Teil sauber abgeschnitten wird;
   zusätzlich `weather_wear_km`/`weather_wear_ride_count`/`weather_wear_computed_at` — async
-  von `WeatherWearService` befüllt, nie live berechnet), `WeatherSensitivityCoefficient`
+  von `WeatherWearService` befüllt, nie live berechnet),
+  `MaintenanceInterval` (Verbrauchsmaterial/Pflege: `interval_km`/`interval_days` +
+  `last_done_at`/`last_done_distance_km`; `status(bike_total, as_of=None)` spiegelt
+  `compute_wear`; "Erledigt" = neuer `MaintenanceLog` + Baseline-Reset, kein Zustand-%),
+  `MaintenanceLog` (Historie der Erledigungen), `WeatherSensitivityCoefficient`
   (Regen/Hitze/Kälte/Wind-Gewichtung je `ComponentCategory`, geseedet in Migration `0006`
   bzw. für neu hinzugekommene Kategorien in Folgemigrationen wie `0011`,
-  Basis für eine spätere Kalibrierung aus `ComponentCheck.condition_pct`-Verlauf),
+  Basis für eine spätere Kalibrierung aus `ComponentCheck.condition_pct`-Verlauf; die
+  Landing-Page rechnet ohne Anmeldung und hält eine Kopie von Formel und Startwerten in
+  `kudos_care_frontend/.../app-landing/models/wear-formula.ts`, Änderungen dort nachziehen),
   `ComponentCheck` (Log eines Checks/Release, optional `condition_pct` + Snooze).
   `AthleteMixin` (`api/views.py`) scoped alle Querysets auf
-  `request.session["strava_athlete_id"]`. `WarnStatus` (`api/serializers.py`) berechnet
-  `ok`/`warn`/`critical`/`unknown` aus einem Ratio (≥1.0 critical, ≥0.8 warn);
+  `request.session["strava_athlete_id"]`.
+  **Query-Konventionen** (abgesichert durch `test_query_counts.py`, siehe Testing): die
+  Bike-Endpoints dürfen nicht mit der Slot-Anzahl skalieren. Drei Regeln dahinter:
+  (1) `Bike.total_distance_km` ist ein Property mit eigener `aggregate(Sum)`-Query —
+  Querysets holen den Wert stattdessen per `Bike.objects.with_total_distance()` als
+  Annotation (`_total_distance_m`), Serializer über den Helper
+  `api/serializers.py::bike_total_km(context, bike)`, der ihn je Request cacht; nie
+  direkt in einer Schleife über Slots/Intervalle lesen. (2) Ein
+  `prefetch_related("rides")` auf `Bike` ist **falsch** — es lädt je Fahrt
+  LineString-Track und `weather_data`-JSON, die kein Serializer anfasst; die Distanz
+  kommt aus der Annotation. (3) `ComponentSlot.mounted_component` iteriert bewusst
+  `components.all()` statt `.filter(is_mounted=True)`, weil ein `.filter()` auf einem
+  prefetchten Related-Manager den Prefetch-Cache umgeht. Prefetch-Ketten brauchen
+  entsprechend `slots__template__group` (für `ComponentTemplateSerializer.group_name`)
+  und `slots__components__checks`; Baugruppen-Ketten zusätzlich `slots__bike`, da Django
+  bei diesem Pfad nur `slot.assembly` zurückcacht.
+  Die Ampel hat **eine** Quelle, `models.py`: `WarnLevel` (die vier Konstanten),
+  `warn_status_from_ratio()` (Ratio → Status, ≥1.0 critical, ≥0.8 warn) und `worst_of()`
+  (schlechtester aus mehreren). `worst_of()` ist die einzige Stelle, an der aus mehreren
+  Ampeln eine wird — Achsen einer Komponente, Slots+Intervalle einer Baugruppe, Baugruppen
+  eines Bikes; vorher stand dieselbe Prioritätsschleife viermal ausgeschrieben da, und
+  `api/serializers.py` hatte mit `WarnStatus` zusätzlich einen zweiten Namen für dieselben
+  vier Konstanten. In der Prioritätsordnung steht `unknown` bewusst hinter `ok`: ein Teil
+  ohne Datenbasis soll die Bike-Ampel nicht schönen, aber auch keine Warnung erfinden.
   `compute_wear()` kombiniert km-/Tage-/Wetter-Achse zum schlechtesten Einzelwert; optionaler
   `as_of`-Parameter (Default: heute) projiziert nur die Tage-Achse auf ein zukünftiges Datum —
   genutzt von `app_notifications` für die Fahrt-Vorhersage-Warnung, km-/Wetter-Achse bleiben
   auf dem aktuellen Stand, da zukünftige Distanz unbekannt ist.
+  **`api/usage.py` ist die einzige Quelle dafür, wann ein Teil tatsächlich am Rad war**
+  (analog zu `app_dashboard/api/wind.py` für alles Windbezogene): `component_km_windows()`
+  schneidet die `AssemblyUsagePeriod`s gegen die Einbau-/Ausbau-Spanne der Komponente,
+  `component_active_km(..., since_km=...)` summiert daraus die km (auch für die
+  `ComponentCheck`-Baseline nach einer Freigabe), `component_date_windows()` liefert das
+  Datums-Pendant für den Ride-Filter. Die **Tage-Achse bleibt bewusst außen vor** — Gummi
+  und Dichtmilch altern auch im Keller, `wear_days` läuft über Parkzeiten hinweg weiter.
+  Ohne Baugruppe (ungruppierte Alt-Slots) oder ohne Perioden greift ein Fallback auf genau
+  ein Fenster ab Einbau, also das Verhalten von vor der Umstellung.
+  `ComponentSlot.objects.on_bike(bike)` (bzw. `serializers.slots_on_bike()` für bereits
+  geprefetchte Querysets) hält geparkte Baugruppen aus Bike-Ampel, Diagramm,
+  Zustandsbericht und Warn-E-Mails heraus — sonst zählte ein Satz im Keller doppelt mit.
   `api/services.py`: `WeatherWearCalculator` (reine Formel: Wetter → Verschleiß-Multiplikator
-  pro Ride) + `WeatherWearService` (voller Recompute über die Ride-Historie seit Einbau, nur
-  aktuell montierte Komponenten); außerdem `get_new_component_warnings()`/
+  pro Ride; `ride_multiplier_detail()` gibt zusätzlich die Einzelbeiträge zurück,
+  `ride_multiplier()` ist der dünne Wrapper darauf) + `WeatherWearService` (voller Recompute
+  über die Ride-Historie seit Einbau, nur aktuell montierte Komponenten — der Ride-Filter
+  läuft über `usage.component_date_windows()`, Fahrten aus einer Parkphase fallen also
+  heraus; `recompute_bike(include_parked=False)` überspringt geparkte Sätze, deren Endwert
+  einmalig beim Abziehen final berechnet wird); außerdem `get_new_component_warnings()`/
   `get_predicted_unsafe_bikes()` als fachliche Grundlage für `app_notifications` (siehe dort).
   Celery-Task `recompute_weather_wear_for_bike` in
   `api/tasks.py`, getriggert nach jedem Ride-Import (Hook in
   `app_dashboard/api/services.py::sync_activity_to_db`); löst nach erfolgreicher
   Neuberechnung zusätzlich `app_notifications.tasks.check_component_warnings_for_bike` aus.
+  `ride_wear_breakdown(ride)` beantwortet **„was hat diese eine Fahrt gekostet"**: je
+  `ComponentCategory` den wetterbedingten Aufschlag (`extra_pct`, dominanter Treiber)
+  und je Komponente `share_of_life_pct` (Anteil an der empfohlenen Lebensdauer). Die
+  Rechnung war immer schon fahrtbezogen — persistiert wurde nur die Summe. Anders als
+  `WeatherWearService` rekonstruiert das die **Historie**: berücksichtigt werden die zum
+  Fahrtzeitpunkt montierten Teile (`installed_at`/`retired_at`), nicht die heute
+  montierten. KI-Erzähltext via `build_ride_wear_impact_prompt()` + Cache-Felder
+  `Ride.wear_impact_summary`/`wear_impact_generated_at`, Staleness über
+  `ride_wear_impact_is_stale()` (Komponenten seither geändert?).
+  `api/bike_assistant.py`: **„Kudo"**, der KI-Assistent fürs Bike-Anlegen.
+  `suggest_models()` (Hersteller + Baujahr → Modellauswahl) und `suggest_setup()`
+  (Modell → Vorbelegung für den Setup-Stepper). Beide gehen über
+  `generate_json_researched()`, dürfen die Produktdaten also nachschlagen statt sie
+  zu erinnern — genau dort ist eine erfundene Antwort am teuersten, weil sie plausibel
+  aussieht. **Die Kette ist zweistufig:** `suggest_models()` liefert je Kandidat ein
+  `spec`-Feld (Serienausstattung in Stichworten), der Client zeigt es bei der Auswahl
+  an und schickt es beim Klick als `spec` an `suggest_setup()` mit. Schritt 2 ankert
+  damit an genau dem Rad, das der Nutzer angeklickt hat, statt den Modellnamen ein
+  zweites Mal zu interpretieren. Endpoints
+  `POST maintenance/assistant/models/` und `POST maintenance/bikes/<id>/assistant/setup/`,
+  beide `503` bei AI-Ausfall, damit das Frontend auf die manuelle Einrichtung zurückfällt.
+  **Sicherheitsgrenze:** die KI bekommt den erlaubten Katalog im Prompt und darf nur
+  daraus wählen; `_filter_to_catalog()` verwirft anschließend serverseitig jede
+  `template_id`, die nicht zur Gruppe und zur richtigen `maintenance_kind` gehört —
+  derselbe Schutz wie `views.py::_validate_assembly_items()`. Der Prompt allein ist keine
+  Absicherung. Marke/Modell je Zeile sind dagegen echtes Modellwissen und damit ein
+  bewusster Bruch mit „die KI erfindet nichts" — deshalb trägt jede Zeile ein
+  `confidence`-Feld, und der Stepper weist sie als Vorschlag aus.
+  **Ausstattungs-Prüfung:** `suggest_setup()` verlangt, dass das Modell erst ein
+  `spec`-Objekt meldet (`drivetrain`, `electronic_shifting`, `belt_drive`, `tubeless`,
+  `suspension`) und die Teile daraus ableitet. `_apply_spec_consistency()` prüft die
+  Auswahl anschließend **serverseitig** dagegen (`SPEC_REQUIREMENTS`, namensbasiert wie
+  `views.py::_interval_kind_for_template()`): Umwerfer bei 1x, Di2/AXS-Akku ohne
+  elektronische Schaltung, Dichtmilch ohne Tubeless und Zahnriemen ohne Riemenantrieb
+  werden **abgewählt, nicht gelöscht** — die Zeile bleibt im Stepper sichtbar und
+  wieder ankreuzbar, falls die Erkennung danebenlag. Ohne `spec` greift die Prüfung
+  gar nicht, im Zweifel gilt die KI-Auswahl. Die Antwort trägt zusätzlich
+  `researched: bool`, damit die UI keine Recherche behaupten kann, die nicht
+  stattgefunden hat.
+  **Prompt-Konventionen** (`KudoPromptTests` sichert sie ab): `include` und `confidence`
+  sind orthogonal und der Prompt sagt das ausdrücklich — `include` heißt „ist dieses Teil
+  an diesem Rad verbaut", `confidence` heißt „wie sicher bin ich bei Marke/Modell". Ein
+  Gravelbike hat immer eine Kette, auch wenn der Hersteller unbekannt ist; dann bleibt
+  `brand` leer und `confidence` ist `low`, statt die Zeile ganz wegzulassen. Der
+  Katalog-Block gibt `default_in_group` als `ueblich`/`Sonderfall` mit aus — das Frontend
+  lässt `hint.include` genau diesen Default überschreiben, die KI darf ihn also nicht
+  raten müssen. Lebensdauer-Overrides (`custom_warn_km` etc.) nur bei echter Abweichung,
+  sonst gewinnt der gepflegte Katalogwert. Die IDs im Format-Beispiel sind bewusst
+  **Platzhalter außerhalb des ID-Raums** (9001/9002/9003): vorher standen dort echte
+  Katalog-IDs, die etwas anderes bedeuteten als das, wofür sie im Beispiel standen
+  (Gruppe 1 = „Laufrad vorne" mit einer Kette darin, ein Verschleißteil unter
+  `intervals`) — das Beispiel führte dem Modell also genau die Fehler vor, die
+  `_clean_row()` hinterher wegwirft. Sichtbare Folge war, dass Kudo **gar keine
+  Wartungsintervalle** lieferte: Verbrauchsmaterial kam als `part` zurück und fiel
+  komplett aus dem Ergebnis.
   `api/ai_providers.py`: austauschbarer
-  Gemini/Groq-Adapter (`AI_PROVIDER`-Setting) für die On-Demand-KI-Erklärung. Bei
+  Gemini/Groq-Adapter (`AI_PROVIDER`-Setting) für die On-Demand-KI-Erklärung.
+  `generate_json_researched()` ist `generate_json()` plus Google-Search-Grounding
+  (`tools: [{google_search: {}}]`), gesteuert über `AI_GROUNDING_ENABLED` (Default
+  **aus**). Zwei Eigenheiten, beide gemessen und bewusst: der Recherche-Aufruf setzt
+  **kein** `responseMimeType` (ob JSON-Modus und Suchwerkzeug zusammen zulässig sind,
+  ist nicht zugesichert — das JSON wird stattdessen im Prompt verlangt und mit dem
+  Fence-Parser gelesen), und er **fällt bei Fehlschlag automatisch auf
+  `generate_json()` zurück**. Letzteres ist kein theoretischer Fall: auf dem aktuellen
+  Key liefert jeder grounded Aufruf HTTP 429 (`RESOURCE_EXHAUSTED`), während derselbe
+  Aufruf ohne Werkzeug 200 gibt — nachgeprüft über `gemini-3.5-flash-lite`,
+  `gemini-3.5-flash` und `gemini-flash-latest`. Grounding hängt an einem eigenen
+  Kontingent; deshalb der Default aus, sonst zahlt man pro Aufruf einen vergeblichen
+  Anlauf. `last_call_was_researched` sagt, ob wirklich recherchiert wurde.
+  `generate_json()` erzwingt eine JSON-Antwort (Gemini `responseMimeType`, Groq
+  `response_format`) mit deutlich höherem Token-Budget — die 300 Tokens der
+  Freitext-Erklärungen reichen für ein komplettes Bike-Setup nicht. Bei
   `AI_PROVIDER=gemini` (Default) läuft intern ein `FallbackAIProvider`: primär das günstige
   Gemini-Flash-Lite-Modell (`GEMINI_MODEL`, Default `gemini-2.0-flash-lite`), bei Fehlschlag
   (fehlender Key/Timeout/Rate-Limit/...) automatisch Fallback auf Groq. `AI_PROVIDER=groq`
-  nutzt direkt nur Groq, ohne Fallback-Kette. Zweite KI-Erklärung analog dazu:
+  nutzt direkt nur Groq, ohne Fallback-Kette. Die drei Endpoints unter `/api/maintenance/`
+  (weather-explanation, check-instructions, condition-report — NICHT die Fahrt-Zusammenfassung
+  in `app_dashboard`) rufen statt `get_ai_provider().generate_text()` direkt
+  `ai_providers.py::generate_reviewed_text()` auf: lässt die generierte Antwort zusätzlich vom
+  jeweils anderen Gemini/Groq-Modell auf Sinnhaftigkeit/Konsistenz mit den Ausgangsdaten
+  gegenprüfen (fail-open, falls das Gegenstück-Modell keinen Key hat oder die Prüf-Anfrage
+  selbst fehlschlägt), bei durchgefallener Prüfung genau eine Neugenerierung, danach wird
+  ungeprüft ausgeliefert statt ein zweites Mal zu prüfen. Zweite KI-Erklärung analog dazu:
   `bikes/<id>/condition-report/` fasst `compute_wear()` über alle aktuell montierten
   Komponenten eines Bikes zusammen (statt nur eine Komponente/nur die Wetter-Achse);
   Cache-Felder `Bike.condition_report`/`condition_report_generated_at`, Staleness über
@@ -100,8 +346,127 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   (kein Zahlen-Vergleich nötig) — ungültig sobald sich `warn_status_overall` seit der letzten
   Generierung geändert hat (typischerweise nach einer Freigabe via `ComponentCheckView`).
   Management-Command `recompute_weather_wear.py` (Backfill, `--dry-run`).
-  Endpoints unter `/api/maintenance/`: `bikes/`, `bikes/<id>/slots/`, `bikes/<id>/condition-report/`,
-  `slots/<id>/mount|unmount`, `slots/<id>/components/`, `components/<id>/check/`,
+  **Baugruppen-Flow** (`api/views.py`): `GET groups/?bike_type=` liefert den
+  `ComponentGroup`-Katalog mit genesteten Templates (getrennt `parts`/`consumables`).
+  `GET bikes/<id>/assemblies/` liefert die aktiven `BikeAssembly`s (Slots inkl. Wear +
+  Intervalle inkl. Status), die geparkten Alternativen (`parked_assemblies` — inaktiv, aber
+  nicht ausgemustert), die noch nicht zugeordneten Alt-Slots (`ungrouped_slots`), die
+  ausgebauten Ersatzteile (`spare_components`, siehe unten) und die zum Bike-Typ passenden
+  Katalog-Gruppen (`available_groups`). Letzteres enthält bewusst **auch Gruppen mit bereits
+  aktiver Instanz** (Flag `has_active_instance`, gesetzt via `ComponentGroupSerializer`-Context
+  `used_group_ids`) — sonst ließe sich über den "Baugruppe hinzufügen"-Dialog nie ein zweiter
+  Satz (Sommer-/Winter-LRS) anlegen, obwohl `POST` das längst unterstützt (siehe unten). Bis
+  Anfang September 2026 wurden solche Gruppen serverseitig herausgefiltert — ein Prod-Bug, bei
+  dem ein zweiter Laufradsatz im "+ Baugruppe hinzufügen"-Dialog schlicht nicht mehr auftauchte.
+  `POST bikes/<id>/assemblies/`
+  legt eine Baugruppe komplett an (ein Dialog = eine Baugruppe): `BikeAssembly` +
+  `ComponentSlot`s (+ montierte `Component`s) für die inkludierten `parts` +
+  `MaintenanceInterval`s für die inkludierten `intervals`, atomar, nach demselben
+  Unmount-dann-Mount-Muster wie `SlotMountView`; Templates werden serverseitig gegen
+  `group.templates` geprüft, Bike-Typ-Mismatch → 400. Ist für die Gruppe **bereits eine
+  Instanz aufgezogen, entsteht die neue geparkt** (kein 409 mehr) — die bestehende soll nicht
+  ungefragt verdrängt werden; das optionale Body-Feld `activate: true` erzwingt den direkten
+  Wechsel. Ein Part-Item kann statt `brand`/`model_name` eines von zwei
+  Übernahme-Feldern mitgeben: `existing_slot_id` übernimmt eine bereits vorhandene, noch
+  ungruppierte `ComponentSlot` (typischerweise ein Alt-Teil aus `ungrouped_slots`, **durchgehend
+  montiert**) per Slot-Umhängen; `reuse_component_id` reaktiviert stattdessen ein bereits
+  **ausgebautes** Teil (`spare_components` — z.B. der zurückgelegte Laufradsatz aus dem Keller;
+  Kandidaten sind schlicht alle `is_mounted=False`-Components des Bikes je Template, unabhängig
+  davon, ob deren alte Baugruppe noch existiert/aktiv ist), indem die Component in einen frisch
+  angelegten Slot dieser Baugruppe umzieht. Beide Felder legen keine neue `Component` an; sie
+  schließen sich gegenseitig aus. Der Unterschied bei der Nutzungsperiode:
+  bei `existing_slot_id` (nie ausgebaut, durchgehender Verlauf) zieht `_build_assembly_from_request`
+  den Periodenbeginn auf das früheste Einbaudatum/km unter allen übernommenen Teilen zurück,
+  damit der Verlauf nicht durch die neue `AssemblyUsagePeriod` abgeschnitten wird (siehe
+  `api/usage.py`) — neu angelegte Teile bleiben beim gemeinsamen `installed_at`. Bei
+  `reuse_component_id` (echte Standzeit dazwischen) passiert das bewusst **nicht** — die neue
+  Nutzungsperiode zählt km erst ab jetzt, sonst zählten km mit, die währenddessen ein anderer
+  Satz gefahren ist. Der davor real aufgelaufene Verschleiß geht dabei aber **nicht** verloren:
+  `Component.carried_over_wear_km`/`carried_over_weather_wear_km` frieren ihn einmalig ein (weil
+  `component_active_km()`/`component_date_windows()` nur die Perioden der *aktuellen* Baugruppe
+  sehen), `compute_wear()` bzw. `WeatherWearService.recompute_component()` addieren ihn auf den
+  künftig neu berechneten Wert drauf — die km-Achse macht also am eingefrorenen Stand weiter,
+  nicht bei 0. Die Tage-Achse altert ohnehin unverändert seit dem ursprünglichen `installed_at`
+  weiter — exakt wie bei einer geparkten statt ausgebauten Baugruppe.
+  `SpareComponentSerializer.prior_wear_km` zeigt den (voraussichtlichen) Carry-over-Wert schon
+  im Vorschlag an, bevor er tatsächlich übernommen wird. `_spare_components_for_bike` liefert
+  bewusst **alle** ausgebauten Kandidaten je Template, ohne auf einen zu reduzieren — ein Slot
+  kann mehrere frühere Teile gleichzeitig ausgebaut haben (z.B. mehrere historische Felgen auf
+  einem seit Jahren bestehenden, inzwischen ausgemusterten Slot), und keine Datums-Heuristik
+  ("zuletzt ausgebaut"/"zuletzt eingebaut"/"am längsten montiert") erriet zuverlässig "die eine
+  richtige" — mal gewann ein am selben Tag angelegtes Test-Artefakt, mal ein uralter
+  Platzhalter-Eintrag. Der Client (`AssemblyChecklistComponent`) zeigt bei mehr als einem
+  Kandidaten je Template ein Auswahlfeld statt zu raten. `_validate_assembly_items`
+  prüft entsprechend, dass der referenzierte Slot/die referenzierte Component zum Bike und zum
+  Template der Zeile gehört (und bei `existing_slot_id` zusätzlich ein montiertes Teil hat).
+  Drei getrennte Aktionen auf einer Instanz, die man nicht verwechseln darf:
+  `POST assemblies/<id>/activate/` **wechselt** zwischen zwei vorhandenen Sätzen (der bisher
+  aufgezogene wird geparkt, seine Teile bleiben montiert),
+  `POST assemblies/<id>/retire/` **mustert aus** (Komponenten ausgebaut,
+  `retired_at`/`distance_at_retire` gesetzt), und `POST assemblies/<id>/swap/` **erneuert die
+  Teile** (alte Instanz ausgemustert, neue aktive mit frischen Teilen — der alte
+  „Baugruppe tauschen"-Pfad). Beim Erneuern bleiben die **nicht angehakten** Teile am
+  Rad: ihr Slot zieht in die neue Instanz um (`_carry_over_slots()`,
+  `_retire_assembly(keep_slot_ids=...)`), mit Verlauf und zurückdatiertem
+  Periodenbeginn. Vorher fielen sie ersatzlos weg — die alte Instanz wurde komplett
+  ausgemustert, die neue nur aus den angehakten Zeilen aufgebaut; wer an einem Antrieb
+  nur die Kette erneuerte, verlor Kurbel und Tretlager vom Rad (nachgestellt: 1 von 3
+  Teilen blieb montiert).
+  `DELETE assemblies/<id>/` **löst nur die Gruppierung auf**: Slots und Intervalle werden
+  entkoppelt (`assembly = None`, tauchen danach unter „Ohne Baugruppe" auf), die Teile
+  bleiben montiert. Vorher cascadierte das über Slots/Components/Intervalle/Perioden —
+  die Gruppierung wegzuwerfen hieß, die Kette samt Verschleiß-Historie wegzuwerfen.
+  Kollidiert ein Slot mit einem bereits ungruppierten desselben Templates
+  (`uniq_bike_template_ungrouped`), bricht der Aufruf vorher mit 400
+  `ungrouped_conflict` ab statt in einen IntegrityError zu laufen.
+  `POST intervals/<id>/log/` = "Erledigt".
+  `POST bikes/<id>/slots/` (freies Einzel-Slot-Anlegen) entfällt für den Client — Slots
+  entstehen über den Baugruppen-Create oder `POST assemblies/<id>/items/`; `GET` bleibt.
+  **`POST assemblies/<id>/items/`** trägt ein einzelnes Element in eine bestehende
+  Baugruppe nach (der Assistent greift nur beim Anlegen; vorher musste man die ganze
+  Baugruppe neu bauen). `template.maintenance_kind` entscheidet, ob ein `ComponentSlot`
+  oder ein `MaintenanceInterval` entsteht; Template muss zur Gruppe gehören.
+  **`POST bikes/<id>/installed-at/`** setzt das Einbaudatum für **alle** montierten Teile
+  auf einmal, optional auf eine Baugruppe begrenzt. `distance_at_install` kommt aus
+  `_odometer_at()`, nicht vom Client — sonst sehen Teile und Nutzungsperiode
+  verschiedene Zahlen.
+  **`BikeAssembly.sync_open_period_start()`** zieht den Beginn der laufenden Periode auf
+  den frühesten Einbaupunkt der montierten Teile zurück und wird nach jedem Anlegen/
+  Ändern einer Komponente aufgerufen. Ohne das zeigte der naheliegende Ablauf
+  „Baugruppe heute anlegen, danach die Teile aufs echte Datum korrigieren" **0 km**:
+  `api/usage.py` schneidet die km gegen die Perioden, und die begann nach dem Einbau
+  (an Produktivdaten gesehen: Teile seit 30.03. bei 5 km, Periode ab 02.09. bei
+  1.208 km). Der Beginn wird nur zurückgezogen, nie nach vorne geschoben, und **nie vor
+  das Ende der letzten abgeschlossenen Periode** — sonst überlappen beide und
+  `assembly_km_windows()` summiert denselben Zeitraum zweimal (gemessen: 19.691 km an
+  einem Rad mit 9.868 km).
+  **Einzeltausch im Slot** (`slots/<id>/mount|unmount`, neues Teil über
+  `slots/<id>/components/`) läuft über die Helfer `_unmount_current()` und `_remount()`.
+  Beide gehören zusammen und beheben zwei Fehler, die den Wechsel zwischen zwei Teilen
+  in einem Slot (z.B. zwei Bremsbelag-Sätze) unbrauchbar machten: (1) beim Ausbauen wurde
+  nur `retired_at` gesetzt, nie `distance_at_retire` — damit griff der Altbestands-
+  Fallback in `api/usage.py` („ausgebaut, aber ohne km-Stand → bis heute rechnen", für
+  Daten vor Migration `0018` gedacht) und das ausgebaute Teil sammelte unbegrenzt weiter
+  km (gemessen: nach 100 km ausgebaut, stand bei 150, als der Nachfolger 50 km gefahren
+  war). (2) Beim Wiedermontieren fehlte jede Buchführung über die Standzeit — eine
+  Komponente hat genau einen Einbaupunkt, der zurückgeholte Belag zählte die km des
+  anderen mit (180 statt 130). `_remount()` friert den bisherigen Verschleiß deshalb in
+  `carried_over_wear_km`/`carried_over_weather_wear_km` ein und setzt den Einbaupunkt auf
+  jetzt — dasselbe Muster wie `reuse_component_id` im Baugruppen-Create. Katalog + Zuordnung aller
+  System-Templates zu Gruppen in Migration `0016`, Backfill bestehender Slots →
+  `BikeAssembly`/`MaintenanceInterval` (erzwungen) in `0017`. Kassette gehört seit
+  Migration `0020` zur Gruppe "Laufrad hinten" (nicht mehr "Antrieb") — sie sitzt physisch
+  auf dem Freilaufkörper und wird beim Laufradwechsel typischerweise mitgetauscht, taucht
+  also jetzt bei `assemblies/<id>/activate|swap/` auf "Laufrad hinten" mit auf. `0020` hängt
+  dafür auch bestehende Kassette-Slots in den aktiven "Laufrad hinten"-Satz desselben Bikes
+  um; ohne aktiven Satz bleibt der Slot ungruppiert statt eine Baugruppe zu erzwingen.
+  Endpoints unter `/api/maintenance/`: `assistant/models/`,
+  `bikes/<id>/assistant/setup/`, `bikes/`, `bikes/<id>/condition-report/`,
+  `groups/`, `bikes/<id>/assemblies/` (GET/POST), `assemblies/<id>/` (PATCH/DELETE),
+  `assemblies/<id>/activate/`, `assemblies/<id>/retire/`,
+  `assemblies/<id>/swap/`, `bikes/<id>/intervals/`, `intervals/<id>/` (PATCH/DELETE),
+  `intervals/<id>/log/`, `bikes/<id>/slots/` (nur GET), `slots/<id>/mount|unmount`,
+  `slots/<id>/components/`, `components/<id>/check/`,
   `components/<id>/weather-explanation/`, `components/<id>/check-instructions/`, `templates/`.
 - **`app_notifications`** — E-Mail-Versand, kein eigenes Domain-Model (keine Endpoints, kein
   `urls.py`). Dedupe-/Status-Felder für Benachrichtigungen liegen stattdessen direkt an den
@@ -110,7 +475,16 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `Component.last_warn_notified_status`, `Bike.predicted_unsafe_notified_for_date`.
   `services.py::send_templated_email()` rendert ein gemeinsames HTML-Template
   (`templates/emails/base_email.html`, alle E-Mails erben per `{% extends %}` davon) mit
-  Plaintext-Fallback via `strip_tags`; gibt bei Opt-out/fehlender E-Mail/Versandfehler `False`
+  Plaintext-Fallback via `html_to_plaintext()`. Letzteres statt `strip_tags` allein, weil
+  `strip_tags` nur Tags entfernt, nicht den Inhalt von `<style>` — sonst landet das
+  komplette Stylesheet im Plaintext-Teil; zusätzlich werden HTML-Entities aufgelöst.
+  Das Layout ist **tabellenbasiert** (Outlook rendert mit Word und bricht bei
+  div/flex), hell mit dunklem Marken-Band und Lime-CTA — durchgehend dunkel wie die App
+  invertieren Outlook und einige Gmail-Dark-Modes teilweise. Webfonts werden in Mail-
+  Clients meist nicht geladen, es zählen die Fallback-Stacks. Deutsche Status-Labels
+  kommen aus dem Template-Filter `templatetags/notification_extras.py::warn_label`
+  (vorher stand dort der rohe Slug „critical"). Design prüfen ohne Versand:
+  `python manage.py preview_emails --text --open`. gibt bei Opt-out/fehlender E-Mail/Versandfehler `False`
   zurück statt zu werfen. Drei E-Mail-Typen, alle über `tasks.py`: (1) Willkommens-Mail
   (`send_welcome_email_task`) — automatisch bei Erstanmeldung (Hook in
   `app_auth/api/views.py::StravaAuthCallbackView`), rückwirkend für Bestandsnutzer per
@@ -132,6 +506,15 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `process_strava_webhook` (max_retries=3): `delete` löscht `Ride`, `create` importiert via
   `StravaImportService`. Management-Command `resync_strava_activities.py` für manuelles
   Re-Enqueue fehlgeschlagener Imports.
+- **`app_radcomputer`** — Backend für den Radcomputer im Frontend (Fahrt aufzeichnen am
+  Lenker). Keine Models, nur Durchreichen an Strava über `app_auth.api.utils.strava_request`
+  (Token-Refresh + einmaliger Retry bei 401): `POST /api/radcomputer/upload/` (TCX/GPX/FIT,
+  multipart) → Strava `/uploads`, `GET upload/<id>/` → Verarbeitungsstand,
+  `GET routes/` → gespeicherte Routen des Athleten (Radrouten zuerst, IDs als String, weil
+  länger als JS-Zahlen), `GET routes/<id>/gpx/` → GPX. Upload braucht `activity:write`;
+  fehlt es in `StravaProfile.scope`, antworten Upload-Endpunkte mit 403 `code=scope_missing`
+  und das Frontend holt die Erlaubnis nach. Hochgeladene Fahrten kommen über den
+  Webhook (`app_strava_webhook`) automatisch als `Ride` zurück.
 - **`core`** — Projekt-Config: `settings.py`, `urls.py`, `celery.py`.
 
 ## URL-Struktur (`core/urls.py`)
@@ -142,6 +525,7 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
 "api/"          -> app_auth             (/api/strava/auth|me|logout/)
 "api/"          -> app_dashboard        (/api/strava/sync*, /api/activities/*)
 "api/"          -> app_maintenance      (/api/maintenance/*)
+"api/radcomputer/" -> app_radcomputer  (/api/radcomputer/upload|routes/*)
 ```
 
 ## Auth-Flow
@@ -155,16 +539,44 @@ persistiert (kein DB-Feld, daher auch nicht im Admin sichtbar) — `StravaAuthCa
 gibt ihn nur einmalig im Login-Response direkt aus `athlete_data` zurück, `GET /api/strava/me/`
 liefert nur die `athlete_id`. Das Frontend cached den Namen für die Begrüßung clientseitig
 in `localStorage` (`StravaService.setLoggedInUser`/`displayNameStorageKey`), nicht im Backend.
+`StravaProfile.scope` hält die bei der **letzten** Anmeldung erteilten Strava-Rechte
+(kommagetrennt). Strava ersetzt sie bei jeder Anmeldung: Ein normaler Kudos-Login nach dem
+Freischalten im Radcomputer nimmt `activity:write` also wieder weg. Profile von vor dem
+Feld haben `""`. `GET /api/strava/me/` liefert daraus `can_upload`/`private_routes`.
 **Nur Session-Cookie-Auth**, kein JWT. `CsrfExemptSessionAuthentication`
 (`app_auth/mixins.py`) nur auf Login/Logout. Jede View setzt `permission_classes` explizit.
 
+### Dev-Mock ohne echten Strava-Login
+
+Für lokale Entwicklung ohne Strava-OAuth-Roundtrip: `POST /api/dev/login/`
+(`app_auth/api/dev_views.py::DevLoginView`) loggt einen festen Fake-Athleten
+(`app_auth/dev_auth.py::DEV_ATHLETE_ID`) ein — legt `User`+`StravaProfile` on-demand an,
+ruft `login()` und setzt `strava_athlete_id` in der Session, genau wie
+`StravaAuthCallbackView`. Die Route wird nur bei `settings.DEBUG=True` in
+`app_auth/api/urls.py` registriert (existiert in Produktion also gar nicht), die View
+prüft `DEBUG` zusätzlich selbst als zweite Absicherung. Passende Testdaten dazu liefert
+das Management-Command `python manage.py seed_dev_data` (`app_maintenance/management/
+commands/seed_dev_data.py`, ebenfalls nur mit `DEBUG=True` lauffähig): legt ein Bike,
+montierte Komponenten (aus der bestehenden `component_templates`-Fixture) und eine
+Ride-Historie mit synthetischen Wetterdaten an und berechnet `weather_wear_km` synchron
+(kein Celery-Worker nötig). Die Fake-Routen sind **geschlossene Schleifen** mit passendem
+`RideStream` (`_loop_route()`), nicht die frühere Zwei-Punkt-Gerade — nur so drehen sich
+die Kurse über die Fahrt und die Windabschnitte auf der Karte unterscheiden sich
+überhaupt. `--reset` löscht vorhandene Fake-Daten vorher, `--rides N`
+steuert die Anzahl der Fake-Rides. Läuft weiterhin gegen die echte Postgres/PostGIS-DB
+(kein SQLite-Fallback) — "fake" bezieht sich auf Auth-Roundtrip und Dateninhalt, nicht auf
+die DB-Engine.
+
 ## Bekannte Lücken / Quirks (Stand: siehe Git-History für Aktualität)
 
-- `app_strava_webhook/api/views.py` liest `settings.STRAVA_VERIFY_TOKEN`, das Setting ist
-  **nirgends definiert** (weder `settings.py` noch `.env`) → GET-Verification würde mit
-  `AttributeError` crashen. Vor Produktiv-Einsatz des Webhooks fixen.
-- `ComponentSlot.wear_km` (models.py) enthält toten Code (`stravaprofile_set`-Zeile).
-- `BikeListView.get_queryset` hat auskommentierten Debug-Code.
+- Der Strava-Push-Webhook lief in Produktion nie: `settings.STRAVA_VERIFY_TOKEN` war
+  nirgends definiert → `GET /strava/webhook/` (Strava-Verify-Callback beim Anlegen der
+  Subscription) crashte mit `AttributeError`, seitdem existierte nie eine funktionierende
+  Subscription (0 `process_strava_webhook`-Tasks in den Celery-Logs). Setting ist inzwischen
+  in `settings.py`/`.env` ergänzt (siehe Env Vars unten). Zusätzlich meldet Strava's
+  `GET /api/v3/push_subscriptions` aktuell `403 Application Status: Inactive` — die
+  Strava-App selbst ist auf strava.com/settings/api als inaktiv markiert, unabhängig vom
+  Server. Muss dort reaktiviert werden, bevor die Subscription per API angelegt werden kann.
 - `debug.log` ist aktuell in Git getrackt (siehe `git status`) — sollte vermutlich in
   `.gitignore`, prüfen bevor weitere Commits den Log-Diff aufblähen.
 - `core/celery.py` ruft `app.autodiscover_tasks()` ohne Argumente auf — das sucht bei
@@ -178,17 +590,31 @@ in `localStorage` (`StravaService.setLoggedInUser`/`displayNameStorageKey`), nic
   `api/`), gerade weil seine Tasks von Celery Beat direkt per Namen aufgerufen werden (kein
   View importiert sie) — `autodiscover_tasks()` findet es dort nativ, ohne auf die fragile
   Import-Kette angewiesen zu sein.
+- `ComponentTemplateSerializer.Meta.fields` hatte lange `default_in_group` und
+  `maintenance_kind` vergessen, obwohl beide Felder im Model existieren und das
+  Frontend-Model (`ComponentTemplate` in `maintenance.models.ts`) sie als vorhanden
+  voraussetzt — die API lieferte sie einfach nicht mit. Sichtbare Folge: im
+  Baugruppen-Anlegen-Dialog waren **alle** Teile-/Verbrauchsmaterial-Checkboxen
+  unabhängig vom Katalog-Flag unchecked (`t.default_in_group` kam im Frontend als
+  `undefined` an → falsy). Gefunden erst beim Durchklicken der echten UI per
+  Playwright — API-Testskripte gegen `django.test.Client` hatten das nie bemerkt, weil
+  sie die Rohdaten selbst prüften statt die Anzeige. Jetzt behoben; bei künftigen
+  Serializer-Feldern im Zweifel gegen das Frontend-Model gegenchecken statt anzunehmen,
+  dass "das Feld existiert ja im Model" ausreicht.
 ## Env Vars (`.env`, nicht committed)
 
 `DJANGO_SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`,
 `CSRF_TRUSTED_ORIGINS`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`,
 `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`,
+`STRAVA_VERIFY_TOKEN` (frei wählbarer Token für den `hub.verify_token`-Handshake beim
+Anlegen der Push-Subscription, muss zu keinem externen Wert passen),
 `AI_PROVIDER` (`gemini`|`groq`, Default `gemini`), `GEMINI_API_KEY`, `GEMINI_MODEL`,
+`AI_GROUNDING_ENABLED` (Default `False`; `True` nur auf einem Key mit
+Grounding-Kontingent, siehe `app_maintenance` oben),
 `GROQ_API_KEY`, `GROQ_MODEL`, `EMAIL_BACKEND` (Default Djangos SMTP-Backend),
 `EMAIL_HOST` (Default `smtp-relay.brevo.com`), `EMAIL_PORT` (Default `587`),
 `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS` (Default `True`),
-`DEFAULT_FROM_EMAIL` (Default = `EMAIL_HOST_USER`), `FRONTEND_URL` (für Links in E-Mails,
-Default `http://localhost:3000`), `MAINTENANCE_EMAIL_CHECK_HOUR` (Default `7`, Stunde der
+`DEFAULT_FROM_EMAIL` (Default = `EMAIL_HOST_USER`), `FRONTEND_URL` (Basis für die Links in E-Mails; **ohne `DEBUG` Pflicht** — fehlt der Wert, bricht der Start mit `ImproperlyConfigured` ab. Vorher griff still `http://localhost:3000`, wodurch **jede Produktions-Mail auf den Rechner des Empfängers verlinkte**; aufgefallen ist das erst an echten Mails. Dev-Default ist jetzt `http://localhost:4200`, wo `ng serve` läuft), `MAINTENANCE_EMAIL_CHECK_HOUR` (Default `7`, Stunde der
 täglichen `app_notifications`-Checks). Die AI-Keys werden nur für die optionale
 KI-Erklärung gebraucht — ohne sie liefert der Endpoint kontrolliert 503, der Rest der App
 funktioniert unabhängig davon; E-Mail-Versand ist analog fehlertolerant
@@ -204,18 +630,131 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   `run_strava_sync`-Task (Success, 403-Reconnect, Generic-Failure) via `unittest.mock`,
   `ActivitySummaryViewTests` (KI-Fahrt-Zusammenfassung, Caching/Refresh, `requests.post`
   gemockt über `app_maintenance.api.ai_providers.requests.post`).
+- `app_dashboard/test_wind.py`: reine Formel-Tests (`SimpleTestCase`, keine DB) für
+  `api/wind.py`. Kernfall ist `OutAndBackTests` — Hin-und-Rück-Route bei konstantem Wind
+  muss auf dem Hinweg Gegenwind, auf dem Rückweg Rückenwind und im Mittel ~0 liefern;
+  genau das war mit der alten Start-Ziel-Berechnung nicht der Fall. Dazu
+  zirkuläre Windrichtungs-Interpolation, grober Fallback ohne Stream,
+  Distanzgewichtung des Durchschnitts und die Vorzeichen-Konvention
+  (positiv = Gegenwind), an der die UI-Einfärbung hängt.
 - `app_maintenance/tests.py`: `ComponentCheckTests` (Custom-Warn-Days, Overdue/Critical,
   `condition_pct`-Rejection, Release via Check mit Snooze, Auth-Required, Wetter-Achse
   treibt `warn_status_overall`), `ComputeWearAsOfProjectionTests` (Tage-Achse-Projektion für
   die Fahrt-Vorhersage-Warnung, `as_of` defaultet auf heute).
 - `app_maintenance/test_weather_wear.py`: `WeatherWearCalculatorTests` (reine Formel, keine
-  DB), `WeatherWearServiceTests` (Recompute gegen echte `Ride`-Objekte),
+  DB), `WeatherWearServiceTests` (Recompute gegen echte `Ride`-Objekte, inkl.
+  `carried_over_weather_wear_km` wird draufaddiert statt überschrieben),
   `ComponentWeatherExplanationViewTests` (KI-Endpoint, `requests.post` gemockt in
-  `ai_providers.py`), `ComponentCheckInstructionsViewTests` (KI-Prüfanleitung, Caching,
+  `ai_providers.py`, inkl. Zweit-Prüfung durch das jeweils andere Gemini/Groq-Modell:
+  bestandene Prüfung liefert die Antwort direkt, durchgefallene Prüfung löst genau eine
+  Neugenerierung aus), `ComponentCheckInstructionsViewTests` (KI-Prüfanleitung, Caching,
   Invalidierung durch Status-Änderung nach Freigabe), `BikeConditionReportViewTests`
   (KI-Zustandsbericht, Caching, Invalidierung durch neuen Ride-Import),
   `RecomputeWeatherWearForBikeTaskTests` (löst nach erfolgreicher Neuberechnung
-  `app_notifications.tasks.check_component_warnings_for_bike` aus, aber nicht bei Fehlschlag).
+  `app_notifications.tasks.check_component_warnings_for_bike` aus, aber nicht bei Fehlschlag),
+  `WeatherWearParkedAssemblyTests` (Fahrten aus einer Parkphase zählen nicht mit, Altbestand
+  ohne Perioden rechnet unverändert weiter, `recompute_bike` überspringt geparkte Sätze).
+- `app_maintenance/test_usage_periods.py`: reine Fenster-Arithmetik aus `api/usage.py`
+  (`SimpleTestCase`, keine DB, Modelle als Stubs — im Stil von `app_dashboard/test_wind.py`).
+  Kernfälle: Parklücke fällt aus den km- und Datums-Fenstern, Fallback ohne Baugruppe/ohne
+  Perioden entspricht exakt dem früheren Verhalten, `since_km`-Baseline nach einer Freigabe,
+  frisch montiertes Teil = 0 km (nicht `unknown`).
+- `app_maintenance/test_assemblies.py` (Auszug): `AssemblyStatusFieldTests` — die drei
+  Properties lesen aus `status`; der partielle Unique-Constraint greift auch dann, wenn
+  `clean()` gar nicht läuft (Test setzt per `.update()` eine zweite Instanz auf `active`
+  und erwartet `IntegrityError`); mehrere `parked`/`retired` je Gruppe bleiben erlaubt;
+  `status` ist per PATCH nicht schreibbar; `is_active`/`is_parked` stehen weiter im
+  Response.
+- `app_maintenance/test_bike_assistant.py` (Auszug): `KudoPromptTests` (Format-Beispiel
+  darf keine echten Katalog-IDs benutzen, `default_in_group` steht im Prompt, keine
+  `?`-Platzhalter mehr in der Lebensdauer) und `KudoSpecConsistencyTests` (Umwerfer bei
+  1x wird abgewählt, Di2-Akku ohne elektronische Schaltung ebenso, ohne `spec` bleibt
+  alles stehen, Widersprüche werden abgewählt statt gelöscht, `researched` lügt nicht,
+  Grounding wird nur bei `AI_GROUNDING_ENABLED` angefragt — und ein 429 darauf fällt
+  auf reines Modellwissen zurück, statt den Nutzer ohne Vorbelegung stehenzulassen).
+- `app_maintenance/test_assembly_grouping.py`: `AssemblySwapKeepsUncheckedPartsTests`
+  (das nicht angehakte Teil bleibt montiert, dieselbe Component statt einer Kopie, hängt
+  danach an der neuen Instanz), `GroupKindTests` (`area` lehnt activate/swap mit 400 ab,
+  echte Baugruppe nicht), `AssemblyDeleteDissolvesTests` (Löschen behält die Teile und
+  entkoppelt sie, sie erscheinen als `ungrouped_slots`, Kollision mit einem bestehenden
+  ungruppierten Slot wird abgelehnt), `MountPositionTests` (Regressionstest gegen die
+  Migrations-Daten: Kassette ist fest `rear`, obwohl „hinten" nicht im Namen steht; nur
+  die Laufradsätze sind `assembly`).
+- `app_maintenance/test_slot_swap_wear.py`: `SlotSwapWearTests` — Verschleiß beim
+  Einzeltausch, wenn sich zwei Teile einen Slot teilen. Ein ausgebautes Teil bleibt bei
+  seiner Zahl stehen, ein neu montiertes startet bei 0, und beim Hin-und-Herwechseln
+  zählt jeder Belag nur seine eigenen km (130/50 statt 180/80); mehrfaches Wechseln
+  addiert sich, statt sich zu überschreiben.
+- `app_maintenance/test_installed_at.py`: `BackdatedInstallTests` (rückdatiertes
+  Einbaudatum zieht die Nutzungsperiode mit; ein später eingebautes Teil verkürzt sie
+  nicht), `BulkInstalledAtTests` (`installed-at/` setzt alle Teile und Perioden, lässt
+  sich auf eine Baugruppe begrenzen, lehnt Zukunftsdaten ab), `AssemblyAddItemTests`
+  (Nachtragen von Teil bzw. Verbrauchsmaterial, Duplikat und gruppenfremdes Template
+  werden abgelehnt), `PeriodOverlapTests` (der Beginn stoppt am Ende der vorherigen
+  Periode — sonst steht die Baugruppe über der Gesamtleistung des Rads).
+- `app_maintenance/test_query_counts.py`: `QueryScalingTests` — Regressionstests gegen
+  N+1. Bewusst **keine** festen Query-Zahlen (die wären bei jeder Serializer-Änderung rot),
+  sondern die Invariante: dieselbe Route mit 3 und mit 15 Slots muss gleich viele Queries
+  brauchen (`/bikes/`, `/bikes/<id>/`, `/bikes/<id>/assemblies/`). Dazu: Ride-Geometrie
+  darf in der Bike-Liste nicht geladen werden, `with_total_distance()` macht
+  `total_distance_km` query-frei (ohne Annotation bleibt der Aggregat-Fallback), und
+  `mounted_component` muss den Prefetch-Cache nutzen.
+- `app_maintenance/test_assemblies.py`: `AssemblyCreateTests` (atomar Slots+Components+
+  Intervalle, überspringt `include:false`, lehnt template-fremd/Consumable-in-Parts ab,
+  Bike-Typ-Mismatch → 400, zweite Instanz derselben Gruppe entsteht geparkt bzw. verdrängt
+  mit `activate:true`, `BikeAssembly.clean()`-Invariante,
+  Auth), `AssemblyListTests` (`assemblies`/`parked_assemblies`/`ungrouped_slots`/
+  `spare_components`/`available_groups` — Gruppe mit aktiver Instanz bleibt in
+  `available_groups` enthalten, nur mit `has_active_instance: true` markiert statt
+  herausgefiltert, `assembly_km` = Summe der Nutzungszeiträume (nicht mehr der
+  Einbau-km-Stand des ältesten Teils — ein einzelner Reifenwechsel darf die Laufleistung
+  des Satzes nicht zurücksetzen), `worst_status` bezieht
+  überfällige Intervalle ein), `AssemblySwapTests` (alte Instanz inaktiv + Komponenten
+  ausgebaut, neue aktiv, Historie abfragbar), `AssemblyActivateTests` (Wechsel parkt die
+  andere Instanz ohne sie auszumustern, Hin- und Zurückwechseln, ausgemusterte lassen sich
+  nicht wieder aufziehen, Athleten-Scoping, Auth), `ParkedAssemblyWearTests` (**der Kernfall**:
+  geparkter Satz sammelt keine km, altert aber weiter in Tagen; seine Slots verschwinden aus
+  der Bike-Übersicht), `LegacyAssemblyWithoutPeriodsTests` (Baugruppen ohne Nutzungszeitraum
+  — Altbestand, Admin, `seed_dev_data` — bekommen beim Abziehen rückwirkend einen, sonst
+  liefe der Alt-Fallback weiter), `AssemblyReuseExistingComponentTests` ("vorhandene
+  Komponente übernehmen": Slot wird umgehängt statt eine zweite Component anzulegen, der
+  Verlauf des übernommenen Teils bleibt erhalten statt durch die neue Nutzungsperiode
+  abgeschnitten zu werden, Ablehnung bei fremdem Bike/bereits gruppiertem Slot/
+  Template-Mismatch/fehlendem montierten Teil, derselbe Mechanismus funktioniert auch über
+  `swap/`), `AssemblyReuseSpareComponentTests` (verwandter Fall für bereits *ausgebaute*
+  Teile über `reuse_component_id`: Component zieht in einen frischen Slot um statt eine
+  zweite anzulegen, der vor dem Ausbau aufgelaufene Verschleiß bleibt via
+  `carried_over_wear_km` erhalten (macht bei Wiedermontage am eingefrorenen Stand weiter,
+  nicht bei 0) während die Tage-Achse seit dem ursprünglichen Einbau ohnehin weiterzählt,
+  Ablehnung bei noch montierter/fremder Bike-Component/Template-Mismatch, gegenseitiger
+  Ausschluss mit `existing_slot_id`) — Regressionstest für den Prod-Bug, bei dem ein
+  ausgemustertes Teil (Mavic-Felge) nirgends mehr als Übernahme-Vorschlag auftauchte,
+  `test_spare_components_lists_every_candidate_for_a_template` (mehrere ausgebaute Teile
+  desselben Templates fallen in `spare_components` nicht auf einen Kandidaten zusammen —
+  Regressionstest dafür, dass eine Datums-Heuristik dort regelmäßig danebenlag),
+  `CassetteBelongsToRearWheelGroupTests`
+  (Regressionstest gegen die echten Migrations-Daten: Kassette gehört zu "Laufrad hinten",
+  nicht mehr zu "Antrieb").
+- `app_maintenance/test_intervals.py`: `MaintenanceIntervalStatusTests` (km-/Tage-Ratio,
+  `as_of`-Projektion der Tage-Achse, `unknown` ohne Grenzen), `MaintenanceIntervalLogViewTests`
+  (`/log/` setzt Baseline zurück + hängt `MaintenanceLog` an, explizite Werte,
+  Athleten-Scoping, Ad-hoc-Intervall anlegen/löschen).
+- `app_maintenance/test_ride_wear_impact.py`: `RideWearBreakdownTests` (Regenfahrt kostet
+  mehr als dieselbe Trockenfahrt; Historie: zum Fahrtzeitpunkt montierte Teile zählen,
+  nie montierte Ersatzteile nicht), `RideMultiplierDetailTests`,
+  `ActivityWearImpactViewTests` (Caching, Invalidierung bei Komponenten-Änderung, und
+  vor allem: ein KI-Ausfall liefert weiterhin 200 mit den Zahlen, kein 503).
+- `app_maintenance/test_bike_assistant.py`: `KudoCatalogGuardTests` — die eigentliche
+  Sicherheitsgrenze. Erfundene `template_id`s, Templates aus einer fremden Gruppe und
+  als Teil ausgegebenes Verbrauchsmaterial müssen serverseitig herausfallen; dazu
+  ```json-Fences, kaputtes JSON und Provider-Ausfall. `KudoModelSuggestionTests`
+  (leere Liste = „Hersteller unbekannt" vs. `None` = „KI kaputt" — ein Unterschied),
+  `AssistantEndpointTests` (503-Pfad, fremdes Bike → 404, Auth).
+- `app_notifications/test_frontend_url.py`: `FrontendUrlInEmailsTests` — kein Link in
+  einer Mail zeigt auf localhost, und die Basis-URL kommt ausschließlich aus
+  `settings.FRONTEND_URL` (nichts im Template festverdrahtet). Regressionstest gegen den
+  Produktionsfehler, bei dem der stille Default jede Mail auf den Empfängerrechner
+  verlinkte.
 - `app_notifications/tests.py`: `SendTemplatedEmailTests` (Opt-out-Flag, fehlende
   E-Mail-Adresse), `PredictNextRideDateTests` (Median-Vorhersage, Clamping bei
   Überfälligkeit auf "heute", zu wenig Historie → `None`), `CheckComponentWarningsTests`/
@@ -224,8 +763,17 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   zwischen event- und tages-getriggertem Check), `CheckBikeUnsafePredictionsTests`
   (Projektion, Ausschluss bereits heute kritischer Bikes, Dedupe via
   `predicted_unsafe_notified_for_date`), `SendWelcomeEmailTaskTests`.
-- `app_auth/tests.py`: `StravaAuthCallbackWelcomeEmailTests` (Willkommens-Mail-Trigger nur bei
+  Dazu `HtmlToPlaintextTests` (Stylesheet-Inhalt und HTML-Entities dürfen nicht im
+  Plaintext-Teil landen) und `WarnLabelFilterTests` (deutsche Labels statt roher Slugs).
+- `app_auth/tests.py`: `CurrentUserSettingsTests` (GET/PATCH `me/`, `needs_email`,
+  Nachholen der Willkommens-Mail beim ersten Setzen einer Adresse — und nur dann),
+  `StravaAuthCallbackWelcomeEmailTests` (Willkommens-Mail-Trigger nur bei
   Erstanlage eines Profils, nicht bei Re-Login) — sonst keine weiteren Tests für `app_auth`.
+  `app_auth/test_privacy.py`: `AdminHidesEmailTests` (Adresse weder in `list_display`
+  noch in den Fieldsets noch in `search_fields`), `EmailStaysOutOfLogsTests` (ein
+  fehlgeschlagener Versand loggt die Athleten-Id statt der Adresse),
+  `AccountDeletionTests` (Bestätigung ist Pflicht, Löschen entfernt User, Profil, Bikes,
+  Rides und Komponenten, Session ist danach weg, fremde Athleten bleiben unberührt).
   Keine Tests für `app_strava_webhook`.
 
 ---
