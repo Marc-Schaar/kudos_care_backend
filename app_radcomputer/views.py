@@ -2,8 +2,11 @@
 Radcomputer: Fahrten zu Strava hochladen und gespeicherte Strava-Routen holen.
 
 Nutzt den Strava-Zugang aus app_auth (Session-Login, Token-Refresh). Hochladen braucht
-das Recht activity:write, das der normale Kudos-Login nicht anfragt; das Frontend holt
-es auf Wunsch nach. Fehlt es, antworten die Endpunkte mit 403 und code=scope_missing.
+das Recht activity:write. Der Kudos-Login fragt es mit an; Strava lässt Nutzer einzelne
+Rechte aber abwählen. Fehlt es, antworten die Endpunkte mit 403 und code=scope_missing,
+und das Frontend bietet das Nachholen an.
+
+Dazu Einstellungen und gespeicherte Orte des Radcomputers (Orte nur verschlüsselt).
 
 Eine hochgeladene Fahrt landet über den Strava-Webhook automatisch auch in Kudos Care.
 """
@@ -21,6 +24,10 @@ from rest_framework.views import APIView
 
 from app_auth.api.utils import strava_request
 from app_auth.models import StravaProfile
+
+from .crypto import InvalidToken
+from .models import RadcomputerSettings, SavedPlace
+from .serializers import RadcomputerSettingsSerializer, SavedPlaceSerializer
 
 logger = logging.getLogger("my_app_debug")
 
@@ -206,3 +213,91 @@ class RouteGpxView(RadcomputerView):
         return HttpResponse(
             res.content, content_type="application/gpx+xml; charset=utf-8"
         )
+
+
+# --- Einstellungen und gespeicherte Orte ------------------------------------------------
+
+MAX_PLACES = 50
+
+
+class SettingsView(RadcomputerView):
+    """
+    GET /api/radcomputer/settings/  — gespeicherte Einstellungen; `stored: false` heißt,
+                                      es gibt noch keine (dann die Standardwerte).
+    PUT /api/radcomputer/settings/  — legt an oder aktualisiert. Teilweise Angaben sind
+                                      erlaubt, damit ältere Clients ohne neue Felder nichts
+                                      zurücksetzen.
+    """
+
+    def get(self, request):
+        profile = self.get_athlete()
+        instance = RadcomputerSettings.objects.filter(profile=profile).first()
+        data = RadcomputerSettingsSerializer(
+            instance or RadcomputerSettings(profile=profile)
+        ).data
+        return Response({**data, "stored": instance is not None})
+
+    def put(self, request):
+        profile = self.get_athlete()
+        instance, _ = RadcomputerSettings.objects.get_or_create(profile=profile)
+        serializer = RadcomputerSettingsSerializer(
+            instance, data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({**serializer.data, "stored": True})
+
+
+def _place_payload(place: SavedPlace) -> dict | None:
+    try:
+        return {"id": place.id, **place.data}
+    except (InvalidToken, ValueError, KeyError):
+        # Falscher Schlüssel oder kaputter Eintrag: überspringen statt die Liste zu
+        # sprengen. Ohne Namen loggen, der wäre Klartext.
+        logger.error("Gespeicherter Ort %s nicht entschlüsselbar", place.id)
+        return None
+
+
+class SavedPlaceListView(RadcomputerView):
+    """
+    GET  /api/radcomputer/places/  — alle Orte, entschlüsselt.
+    POST /api/radcomputer/places/  — {name, lat, lon}; ein Ort gleichen Namens wird ersetzt
+                                     (wie bisher im Frontend), Antwort 201 bzw. 200.
+    """
+
+    def get(self, request):
+        places = SavedPlace.objects.filter(profile=self.get_athlete())
+        return Response([p for p in map(_place_payload, places) if p is not None])
+
+    def post(self, request):
+        profile = self.get_athlete()
+        serializer = SavedPlaceSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        existing = None
+        places = list(SavedPlace.objects.filter(profile=profile))
+        for place in places:
+            payload = _place_payload(place)
+            if payload and payload["name"] == data["name"]:
+                existing = place
+                break
+        if existing is None and len(places) >= MAX_PLACES:
+            return _error(f"Höchstens {MAX_PLACES} Orte speicherbar.", 400)
+
+        place = existing or SavedPlace(profile=profile)
+        place.data = data
+        place.save()
+        return Response(
+            {"id": place.id, **place.data},
+            status=status.HTTP_200_OK if existing else status.HTTP_201_CREATED,
+        )
+
+
+class SavedPlaceDetailView(RadcomputerView):
+    """DELETE /api/radcomputer/places/<id>/"""
+
+    def delete(self, request, place_id: int):
+        place = get_object_or_404(SavedPlace, id=place_id, profile=self.get_athlete())
+        place.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

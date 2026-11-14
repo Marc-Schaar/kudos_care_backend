@@ -512,9 +512,21 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   multipart) → Strava `/uploads`, `GET upload/<id>/` → Verarbeitungsstand,
   `GET routes/` → gespeicherte Routen des Athleten (Radrouten zuerst, IDs als String, weil
   länger als JS-Zahlen), `GET routes/<id>/gpx/` → GPX. Upload braucht `activity:write`;
-  fehlt es in `StravaProfile.scope`, antworten Upload-Endpunkte mit 403 `code=scope_missing`
-  und das Frontend holt die Erlaubnis nach. Hochgeladene Fahrten kommen über den
+  der Login fragt es mit an, Strava lässt es aber abwählen — fehlt es in
+  `StravaProfile.scope`, antworten Upload-Endpunkte mit 403 `code=scope_missing` und das
+  Frontend holt die Erlaubnis nach. Hochgeladene Fahrten kommen über den
   Webhook (`app_strava_webhook`) automatisch als `Ride` zurück.
+  Dazu zwei Models, beide per CASCADE am `StravaProfile` (Kontolöschung räumt sie mit
+  ab): `RadcomputerSettings` (1:1, explizite Felder mit Choices/Bereichen statt JSON;
+  `GET|PUT settings/`, `PUT` ist ein partielles Upsert, `GET` liefert ohne Datensatz die
+  Defaults mit `stored: false`) und `SavedPlace` (feste Ziele, `GET|POST places/`,
+  `DELETE places/<id>/`, max. 50, `POST` mit vorhandenem Namen ersetzt). **Name und
+  Koordinaten stehen nur verschlüsselt in `SavedPlace.ciphertext`** (`crypto.py`, Fernet,
+  Schlüssel `FIELD_ENCRYPTION_KEYS`) — ein Ort „Zuhause" ist die Wohnadresse. Deshalb
+  kein Unique-Constraint/keine Suche auf dem Namen (bräuchte Klartext), die
+  Eindeutigkeit stellt die View her; `__str__` und Logs nennen nur die Id, nicht
+  entschlüsselbare Einträge werden übersprungen und geloggt statt die Liste zu sprengen.
+  Kein Admin für beide.
 - **`core`** — Projekt-Config: `settings.py`, `urls.py`, `celery.py`.
 
 ## URL-Struktur (`core/urls.py`)
@@ -611,7 +623,10 @@ Anlegen der Push-Subscription, muss zu keinem externen Wert passen),
 `AI_PROVIDER` (`gemini`|`groq`, Default `gemini`), `GEMINI_API_KEY`, `GEMINI_MODEL`,
 `AI_GROUNDING_ENABLED` (Default `False`; `True` nur auf einem Key mit
 Grounding-Kontingent, siehe `app_maintenance` oben),
-`GROQ_API_KEY`, `GROQ_MODEL`, `EMAIL_BACKEND` (Default Djangos SMTP-Backend),
+`GROQ_API_KEY`, `GROQ_MODEL`, `FIELD_ENCRYPTION_KEYS` (kommagetrennte Fernet-Schlüssel
+für `app_radcomputer/crypto.py`, der erste verschlüsselt, alle entschlüsseln → Rotation;
+**ohne `DEBUG` Pflicht**, lokal aus `SECRET_KEY` abgeleitet; geht er verloren, sind die
+gespeicherten Orte unlesbar — gehört ins Backup der `.env`), `EMAIL_BACKEND` (Default Djangos SMTP-Backend),
 `EMAIL_HOST` (Default `smtp-relay.brevo.com`), `EMAIL_PORT` (Default `587`),
 `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS` (Default `True`),
 `DEFAULT_FROM_EMAIL` (Default = `EMAIL_HOST_USER`), `FRONTEND_URL` (Basis für die Links in E-Mails; **ohne `DEBUG` Pflicht** — fehlt der Wert, bricht der Start mit `ImproperlyConfigured` ab. Vorher griff still `http://localhost:3000`, wodurch **jede Produktions-Mail auf den Rechner des Empfängers verlinkte**; aufgefallen ist das erst an echten Mails. Dev-Default ist jetzt `http://localhost:4200`, wo `ng serve` läuft), `MAINTENANCE_EMAIL_CHECK_HOUR` (Default `7`, Stunde der

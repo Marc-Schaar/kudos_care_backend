@@ -15,4 +15,11 @@ urlpatterns = [
         views.RouteGpxView.as_view(),
         name="radcomputer-route-gpx",
     ),
+    path("settings/", views.SettingsView.as_view(), name="radcomputer-settings"),
+    path("places/", views.SavedPlaceListView.as_view(), name="radcomputer-places"),
+    path(
+        "places/<int:place_id>/",
+        views.SavedPlaceDetailView.as_view(),
+        name="radcomputer-place-detail",
+    ),
 ]

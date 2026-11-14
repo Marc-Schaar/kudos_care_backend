@@ -10,6 +10,7 @@ click-plugins==1.1.1.2
 click-repl==0.3.0
 click==8.4.1
 colorama==0.4.6
+cryptography==46.0.3
 django-cors-headers==4.9.0
 Django==6.0.5
 djangorestframework==3.17.1

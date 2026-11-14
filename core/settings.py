@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import os
 from pathlib import Path
 
@@ -84,6 +86,32 @@ if not FRONTEND_URL:
         raise ImproperlyConfigured(
             "FRONTEND_URL fehlt. Die Links in den Benachrichtigungs-Mails brauchen "
             "die oeffentliche Adresse des Frontends (z.B. https://example.com)."
+        )
+
+# Schluessel fuer verschluesselt gespeicherte Daten (app_radcomputer/crypto.py, z.B.
+# gespeicherte Orte). Kommagetrennte Fernet-Schluessel: der erste verschluesselt, alle
+# entschluesseln (Rotation). Erzeugen mit
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Geht der Schluessel verloren, sind die Daten weg — er gehoert ins Backup der .env.
+# Ohne DEBUG Pflicht; lokal wird einer aus dem SECRET_KEY abgeleitet.
+FIELD_ENCRYPTION_KEYS = [
+    k.strip()
+    for k in os.environ.get("FIELD_ENCRYPTION_KEYS", "").split(",")
+    if k.strip()
+]
+if not FIELD_ENCRYPTION_KEYS:
+    if DEBUG:
+        FIELD_ENCRYPTION_KEYS = [
+            base64.urlsafe_b64encode(
+                hashlib.sha256(
+                    f"kudos-field-encryption:{SECRET_KEY or 'dev'}".encode()
+                ).digest()
+            ).decode()
+        ]
+    else:
+        raise ImproperlyConfigured(
+            "FIELD_ENCRYPTION_KEYS fehlt. Gespeicherte Orte im Radcomputer werden "
+            "damit verschluesselt."
         )
 
 CORS_ALLOWED_ORIGINS = os.environ.get(
