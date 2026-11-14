@@ -20,6 +20,9 @@ class StravaProfile(models.Model):
     access_token = models.CharField(max_length=255)
     refresh_token = models.CharField(max_length=255)
     expires_at = models.IntegerField()
+    # Von Strava erteilte Rechte der letzten Anmeldung, kommagetrennt. Leer bei Profilen
+    # von vor diesem Feld: dann ist nur der Kudos-Standard (activity:read_all) sicher.
+    scope = models.CharField(max_length=255, blank=True, default="")
 
     sync_status = models.CharField(
         max_length=10, choices=SYNC_STATUS_CHOICES, default="idle"
@@ -64,6 +67,9 @@ class StravaProfile(models.Model):
 
     if TYPE_CHECKING:
         id: int
+
+    def has_scope(self, name: str) -> bool:
+        return name in {s.strip() for s in self.scope.split(",")}
 
     def __str__(self):
         return f"Strava ID: {self.strava_athlete_id}"

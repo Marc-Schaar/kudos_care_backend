@@ -76,6 +76,9 @@ class StravaAuthCallbackView(APIView):
                     "access_token": response_data.get("access_token"),
                     "refresh_token": response_data.get("refresh_token"),
                     "expires_at": response_data.get("expires_at"),
+                    # Ein neuer Token traegt genau die Rechte dieser Anmeldung, auch wenn
+                    # vorher mehr erteilt waren (z.B. activity:write fuer den Radcomputer).
+                    "scope": ",".join(sorted(granted_scopes)),
                 },
             )
 
@@ -157,6 +160,10 @@ class CurrentUserView(APIView):
             "needs_email": not email,
             "weather_consent": has_weather_consent(profile),
             "ai_consent": has_ai_consent(profile),
+            # Radcomputer: Upload zu Strava und private Routen brauchen eigene Rechte,
+            # die erst auf Wunsch erteilt werden (siehe app_radcomputer).
+            "can_upload": profile.has_scope("activity:write"),
+            "private_routes": profile.has_scope("read_all"),
         }
 
     @method_decorator(ensure_csrf_cookie)

@@ -139,6 +139,7 @@ INSTALLED_APPS = [
     "app_strava_webhook",
     "app_maintenance",
     "app_notifications",
+    "app_radcomputer",
 ]
 
 MIDDLEWARE = [

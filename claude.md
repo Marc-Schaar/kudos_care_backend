@@ -506,6 +506,15 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `process_strava_webhook` (max_retries=3): `delete` löscht `Ride`, `create` importiert via
   `StravaImportService`. Management-Command `resync_strava_activities.py` für manuelles
   Re-Enqueue fehlgeschlagener Imports.
+- **`app_radcomputer`** — Backend für den Radcomputer im Frontend (Fahrt aufzeichnen am
+  Lenker). Keine Models, nur Durchreichen an Strava über `app_auth.api.utils.strava_request`
+  (Token-Refresh + einmaliger Retry bei 401): `POST /api/radcomputer/upload/` (TCX/GPX/FIT,
+  multipart) → Strava `/uploads`, `GET upload/<id>/` → Verarbeitungsstand,
+  `GET routes/` → gespeicherte Routen des Athleten (Radrouten zuerst, IDs als String, weil
+  länger als JS-Zahlen), `GET routes/<id>/gpx/` → GPX. Upload braucht `activity:write`;
+  fehlt es in `StravaProfile.scope`, antworten Upload-Endpunkte mit 403 `code=scope_missing`
+  und das Frontend holt die Erlaubnis nach. Hochgeladene Fahrten kommen über den
+  Webhook (`app_strava_webhook`) automatisch als `Ride` zurück.
 - **`core`** — Projekt-Config: `settings.py`, `urls.py`, `celery.py`.
 
 ## URL-Struktur (`core/urls.py`)
@@ -516,6 +525,7 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
 "api/"          -> app_auth             (/api/strava/auth|me|logout/)
 "api/"          -> app_dashboard        (/api/strava/sync*, /api/activities/*)
 "api/"          -> app_maintenance      (/api/maintenance/*)
+"api/radcomputer/" -> app_radcomputer  (/api/radcomputer/upload|routes/*)
 ```
 
 ## Auth-Flow
@@ -529,6 +539,10 @@ persistiert (kein DB-Feld, daher auch nicht im Admin sichtbar) — `StravaAuthCa
 gibt ihn nur einmalig im Login-Response direkt aus `athlete_data` zurück, `GET /api/strava/me/`
 liefert nur die `athlete_id`. Das Frontend cached den Namen für die Begrüßung clientseitig
 in `localStorage` (`StravaService.setLoggedInUser`/`displayNameStorageKey`), nicht im Backend.
+`StravaProfile.scope` hält die bei der **letzten** Anmeldung erteilten Strava-Rechte
+(kommagetrennt). Strava ersetzt sie bei jeder Anmeldung: Ein normaler Kudos-Login nach dem
+Freischalten im Radcomputer nimmt `activity:write` also wieder weg. Profile von vor dem
+Feld haben `""`. `GET /api/strava/me/` liefert daraus `can_upload`/`private_routes`.
 **Nur Session-Cookie-Auth**, kein JWT. `CsrfExemptSessionAuthentication`
 (`app_auth/mixins.py`) nur auf Login/Logout. Jede View setzt `permission_classes` explizit.
 
