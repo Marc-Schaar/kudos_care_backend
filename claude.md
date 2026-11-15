@@ -264,6 +264,16 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `kind`/`id`/`status_today`/`status_then`, die Beschriftung macht der Client aus
   `assemblies/`. `is_overdue` kennzeichnet ein Rad, dessen Rhythmus schon überschritten
   ist (dann ist `predicted_date` heute, statt dass die App jeden Tag "heute" behauptet).
+  `ride_day_weather(bike, day)` hängt an Prognose (`weather`) und Vorhersage-Mail einen
+  kurzen **Wetterbericht für den Fahrtag**: Abruf in `app_dashboard/api/forecast_weather.py`
+  (Open-Meteo, nur das Fahrfenster 8–20 Uhr Ortszeit, Ort = Startpunkt der letzten Fahrt,
+  auf ~1 km gerundet, 1 h gecacht, Horizont 15 Tage). Die Stundenwerte haben die Form von
+  `Ride.weather_data`, damit `weather_wear_note()` mit **derselben**
+  `WeatherWearCalculator`-Formel sagt, was das Wetter fürs Rad heißt (stärkste betroffene
+  Kategorie unter den montierten Teilen). Ohne Wetter-Einwilligung geht nichts raus
+  (`status: consent_required`); `out_of_range`/`no_location`/`unavailable` erklären das
+  Fehlen. Das Wetter verändert die Verschleiß-Projektion bewusst **nicht** — es ist eine
+  Vorhersage über eine Vorhersage.
   `MaintenanceInterval.status()`/`usage_ratio()` haben dafür dasselbe `extra_km` wie
   `compute_wear()`; ohne das tauchte "Kette ölen alle 300 km" in keiner Prognose auf.
   `api/bike_assistant.py`: **„Kudo"**, der KI-Assistent fürs Bike-Anlegen.
@@ -812,6 +822,9 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   Plaintext-Teil landen). `app_notifications/test_presentation.py` (`SimpleTestCase`,
   Stubs statt DB): `WearLineTests` (dieselbe Restwert-Regel wie das Frontend — km inkl.
   Wetteraufschlag gegen Tage, „drüber" zählt weiter, Singular „1 Tag"),
+  `app_maintenance/test_ride_day_weather.py`: Fahrfenster statt Tageswerte, keine Abfrage
+  ohne Einwilligung bzw. jenseits des Horizonts, gerundete Koordinaten, Ausfall wird nicht
+  gecacht, Verschleiß-Satz (Regen nennt Antrieb + Kette, Plural-Verb), Mail-Wortlaut.
   `GroupingAndSubjectTests` (je Rad, Dringendstes zuerst, Betreff nennt das Teil,
   deutsches Datum) und `RenderedWarningMailTests` (Link aufs Rad, kein roher Slug und
   kein „? km" im sichtbaren Text).

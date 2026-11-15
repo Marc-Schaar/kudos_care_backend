@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Iterable
 from datetime import date
 
 from django.db.models import Max, Q
@@ -8,6 +9,7 @@ from app_auth.models import StravaProfile
 from app_maintenance.models import (
     Bike,
     Component,
+    ComponentCategory,
     ComponentCheck,
     ComponentSlot,
     MaintenanceInterval,
@@ -682,9 +684,121 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
                 "predicted_date": predicted_date,
                 "predicted_km": predicted_km,
                 "components": projected_components,
+                "weather": ride_day_weather(bike, predicted_date)["report"],
             }
         )
     return results
+
+
+# --- Wetter am Fahrtag ------------------------------------------------------------------
+
+#: Unter dieser Schwelle lohnt kein Satz über Wetterverschleiß.
+WEATHER_NOTE_MIN_PCT = 5
+
+# Mit Artikel und Verbform, weil der Satz sonst "Bremsen verschleißt" sagt.
+_CATEGORY_PHRASES: dict[str, tuple[str, bool]] = {
+    ComponentCategory.DRIVETRAIN: ("der Antrieb", False),
+    ComponentCategory.BRAKES: ("die Bremsen", True),
+    ComponentCategory.WHEELS: ("die Laufräder", True),
+    ComponentCategory.SUSPENSION: ("die Federung", False),
+    ComponentCategory.COCKPIT: ("das Cockpit", False),
+    ComponentCategory.FRAME: ("Rahmen und Lager", True),
+    ComponentCategory.ELECTRIC: ("der E-Antrieb", False),
+    ComponentCategory.LIGHTING: ("die Beleuchtung", False),
+    ComponentCategory.ACCESSORIES: ("das Zubehör", False),
+}
+_DRIVER_PHRASES = {
+    "rain": "Bei Nässe",
+    "heat": "Bei der Hitze",
+    "cold": "Bei der Kälte",
+    "wind": "Bei dem Wind",
+}
+
+
+def weather_wear_note(weather_hourly: dict, categories: Iterable[str]) -> dict:
+    """
+    Was das vorhergesagte Wetter fürs Rad bedeutet: dieselbe Formel wie für vergangene
+    Fahrten (`WeatherWearCalculator`), angewendet auf die Stundenwerte des Fahrfensters.
+    Genannt wird die am stärksten betroffene Kategorie unter den montierten Teilen.
+    """
+    coeffs = {
+        c.category: c
+        for c in WeatherSensitivityCoefficient.objects.filter(
+            category__in=set(categories)
+        )
+    }
+    best: tuple[float, str, str | None] | None = None
+    for category, coeff in coeffs.items():
+        detail = WeatherWearCalculator.ride_multiplier_detail(weather_hourly, coeff)
+        extra = (detail["multiplier"] - 1.0) * 100
+        if best is None or extra > best[0]:
+            best = (extra, category, detail["dominant_driver"])
+
+    if best is None or best[0] < WEATHER_NOTE_MIN_PCT or best[2] is None:
+        return {
+            "extra_pct": round(best[0]) if best else 0,
+            "category": best[1] if best else None,
+            "driver": None,
+            "text": "Kein Wetteraufschlag: das Rad verschleißt normal.",
+        }
+
+    extra, category, driver = best
+    subject, plural = _CATEGORY_PHRASES.get(category, ("das Rad", False))
+    verb = "verschleißen" if plural else "verschleißt"
+    text = (
+        f"{_DRIVER_PHRASES[driver]} {verb} {subject} etwa {round(extra)} % schneller."
+    )
+    if driver == "rain" and ComponentCategory.DRIVETRAIN in coeffs:
+        text += " Die Kette danach reinigen und ölen."
+    return {
+        "extra_pct": round(extra),
+        "category": category,
+        "driver": driver,
+        "text": text,
+    }
+
+
+def ride_day_weather(bike: Bike, day: date) -> dict:
+    """
+    Kurzer Wetterbericht für den voraussichtlichen Fahrtag: `{"status": ..., "report": ...}`.
+
+    `status` sagt, warum es keinen Bericht gibt, damit die App nur den Fall erklärt, in
+    dem der Nutzer etwas tun kann: `consent_required` (ohne Wetter-Einwilligung gehen keine
+    Koordinaten an Open-Meteo), `out_of_range` (weiter als der Vorhersagehorizont),
+    `no_location` (keine Fahrt mit Startpunkt), `unavailable` (Open-Meteo-Ausfall).
+    Ort ist der Start der letzten Fahrt des Rads — ein Wohnort ist nirgends gespeichert,
+    und gefahren wird meist von dort, wo die letzte Fahrt begann.
+    """
+    from app_auth.consent import has_weather_consent
+    from app_dashboard.api.forecast_weather import fetch_day_forecast, in_horizon
+    from app_dashboard.models import Ride
+
+    if not has_weather_consent(bike.athlete):
+        return {"status": "consent_required", "report": None}
+    if not in_horizon(day):
+        return {"status": "out_of_range", "report": None}
+
+    start = (
+        Ride.objects.filter(bike=bike, start_latlng__isnull=False)
+        .order_by("-start_date")
+        .values_list("start_latlng", flat=True)
+        .first()
+    )
+    if start is None:
+        return {"status": "no_location", "report": None}
+
+    forecast = fetch_day_forecast(start.y, start.x, day)
+    if forecast is None:
+        return {"status": "unavailable", "report": None}
+
+    categories = (
+        ComponentSlot.objects.on_bike(bike)
+        .values_list("template__category", flat=True)
+        .distinct()
+    )
+    report = {k: v for k, v in forecast.items() if k != "hourly"}
+    report["wear"] = weather_wear_note(forecast["hourly"], categories)
+    return {"status": "ok", "report": report}
 
 
 #: Was die Prognose überhaupt meldet: alles, was am Fahrtag mindestens "bald fällig"
@@ -771,4 +885,5 @@ def next_ride_forecast(bike: Bike) -> dict:
         "rides_considered": rhythm.rides_considered,
         "last_ride": rhythm.last_ride,
         "items": items,
+        "weather": ride_day_weather(bike, predicted_date),
     }

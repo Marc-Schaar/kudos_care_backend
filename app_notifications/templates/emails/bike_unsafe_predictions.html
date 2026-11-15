@@ -17,6 +17,15 @@
       <span class="bike-meta">Nächste Fahrt voraussichtlich {{ group.predicted_day }}{% if group.predicted_distance %}, {{ group.predicted_distance }}{% endif %}</span>
     </td>
   </tr>
+  {% if group.weather %}
+  <tr>
+    <td class="weather-cell">
+      <div class="weather-head">{{ group.weather.headline }}</div>
+      <div class="weather-facts">{{ group.weather.facts|join:". " }}.</div>
+      {% if group.weather.wear %}<div class="weather-wear status-{{ group.weather.tone }}">{% if group.weather.tone == "warn" %}▲ {% endif %}{{ group.weather.wear }}</div>{% endif %}
+    </td>
+  </tr>
+  {% endif %}
   {% for line in group.lines %}{% include "emails/_wear_line.html" with prefix="dann" %}{% endfor %}
 </table>
 <table role="presentation" class="actions" cellpadding="0" cellspacing="0">

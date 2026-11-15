@@ -140,6 +140,59 @@ class BikeGroup:
     predicted_day: str = ""
     # "~55 km", leer ohne Schätzung.
     predicted_distance: str = ""
+    weather: "WeatherNote | None" = None
+
+
+@dataclass(frozen=True)
+class WeatherNote:
+    """Der kurze Wetterbericht für den Fahrtag, fertig formuliert (siehe `weather_note`)."""
+
+    headline: str
+    facts: list[str]
+    wear: str
+    # Färbt den Verschleiß-Satz: "warn" mit Wetteraufschlag, sonst "ok".
+    tone: str
+
+
+def _temp(value: float) -> str:
+    return f"{round(value)}".replace("-", "−")
+
+
+def weather_note(report: dict | None) -> WeatherNote | None:
+    """
+    `ride_day_weather()["report"]` als Mailzeile. Gleiche Wortwahl wie das Dashboard
+    (`next-ride/weather.ts` im Frontend) — Änderungen dort nachziehen.
+    """
+    if not report:
+        return None
+    low, high = _temp(report["temp_min"]), _temp(report["temp_max"])
+    span = f"{low} °C" if low == high else f"{low} bis {high} °C"
+    headline = f"{report['condition']}, {span}" if report.get("condition") else span
+
+    facts = []
+    probability = report.get("precipitation_probability")
+    rain_mm = report.get("precipitation_mm") or 0
+    if probability is not None:
+        rain = f"{probability} % Regenrisiko"
+        if rain_mm >= 0.5:
+            rain += f", {str(round(rain_mm, 1)).replace('.', ',')} mm"
+        facts.append(rain)
+    wind = f"{format_count(report['wind_kmh'])} km/h"
+    if report.get("wind_from"):
+        wind = f"Wind aus {report['wind_from']}, {wind}"
+    else:
+        wind = f"Wind {wind}"
+    if report.get("gusts_kmh"):
+        wind += f", Böen {format_count(report['gusts_kmh'])}"
+    facts.append(wind)
+
+    wear = report.get("wear") or {}
+    return WeatherNote(
+        headline=headline,
+        facts=facts,
+        wear=wear.get("text", ""),
+        tone="warn" if wear.get("driver") else "ok",
+    )
 
 
 def _sorted(lines: list[WearLine]) -> list[WearLine]:
@@ -173,6 +226,7 @@ def group_predictions(predictions: Iterable[dict]) -> list[BikeGroup]:
                 if p.get("predicted_km")
                 else ""
             ),
+            weather=weather_note(p.get("weather")),
             lines=_sorted(
                 [
                     wear_line(c["slot"].display_name, c["component"], c["wear"])

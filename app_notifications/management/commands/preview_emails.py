@@ -82,6 +82,21 @@ def _sample_context() -> dict:
             "bike": gravel,
             "predicted_date": predicted,
             "predicted_km": 54.6,
+            "weather": {
+                "condition": "Regen",
+                "temp_min": 4.2,
+                "temp_max": 9.6,
+                "precipitation_mm": 3.4,
+                "precipitation_probability": 70,
+                "wind_kmh": 24.0,
+                "gusts_kmh": 46.0,
+                "wind_from": "West",
+                "wear": {
+                    "driver": "rain",
+                    "text": "Bei Nässe verschleißt der Antrieb etwa 45 % schneller."
+                    " Die Kette danach reinigen und ölen.",
+                },
+            },
             "components": [
                 {
                     "slot": SimpleNamespace(display_name="Reifen hinten"),
