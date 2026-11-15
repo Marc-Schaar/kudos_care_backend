@@ -6,7 +6,8 @@ das Recht activity:write. Der Kudos-Login fragt es mit an; Strava lässt Nutzer 
 Rechte aber abwählen. Fehlt es, antworten die Endpunkte mit 403 und code=scope_missing,
 und das Frontend bietet das Nachholen an.
 
-Dazu Einstellungen und gespeicherte Orte des Radcomputers (Orte nur verschlüsselt).
+Dazu Einstellungen und gespeicherte Orte des Radcomputers (Orte nur verschlüsselt) sowie
+der aktuelle Wind am Standort (Open-Meteo, nur mit Wetter-Einwilligung).
 
 Eine hochgeladene Fahrt landet über den Strava-Webhook automatisch auch in Kudos Care.
 """
@@ -14,6 +15,7 @@ Eine hochgeladene Fahrt landet über den Strava-Webhook automatisch auch in Kudo
 import logging
 
 import requests
+from django.core.cache import cache
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -23,6 +25,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from app_auth.api.utils import strava_request
+from app_auth.consent import has_weather_consent
 from app_auth.models import StravaProfile
 
 from .crypto import InvalidToken
@@ -301,3 +304,99 @@ class SavedPlaceDetailView(RadcomputerView):
         place = get_object_or_404(SavedPlace, id=place_id, profile=self.get_athlete())
         place.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --- Aktueller Wind ---------------------------------------------------------------------
+
+OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast"
+# Zwei Nachkommastellen ≈ 1 km: reicht für ein Wettermodell mit km-Raster, und Open-Meteo
+# erfährt nicht die genaue Position. Gleichzeitig der Cache-Schlüssel.
+WIND_COORD_DIGITS = 2
+# Open-Meteo rechnet die aktuellen Werte im 15-Minuten-Takt neu.
+WIND_CACHE_SECONDS = 10 * 60
+WIND_TIMEOUT_SECONDS = 8
+
+
+def _coordinate(raw: str | None, limit: float) -> float | None:
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if value != value or abs(value) > limit:  # NaN oder außerhalb
+        return None
+    return round(value, WIND_COORD_DIGITS)
+
+
+class WindView(RadcomputerView):
+    """
+    GET /api/radcomputer/wind/?lat=..&lon=..  — aktueller Wind am Standort.
+
+    Antwort: {speed_kmh, gusts_kmh, direction_deg, observed_at, lat, lon}. `direction_deg`
+    ist meteorologisch, also die Richtung, AUS der der Wind kommt (0 = Nord), wie in
+    `app_dashboard/api/wind.py`. `lat`/`lon` sind die gerundeten Koordinaten, für die
+    der Wert gilt.
+
+    Live-Koordinaten gehen an einen Dritten, deshalb nur mit Wetter-Einwilligung (403
+    `weather_consent_required`). Koordinaten werden nicht geloggt.
+    """
+
+    def get(self, request):
+        profile = self.get_athlete()
+        if not has_weather_consent(profile):
+            return _error(
+                "Für Winddaten fehlt die Einwilligung in die Wetterdaten.",
+                status.HTTP_403_FORBIDDEN,
+                code="weather_consent_required",
+            )
+        lat = _coordinate(request.query_params.get("lat"), 90)
+        lon = _coordinate(request.query_params.get("lon"), 180)
+        if lat is None or lon is None:
+            return _error("lat und lon fehlen oder sind ungültig.", 400)
+
+        key = f"rc-wind:{lat:.{WIND_COORD_DIGITS}f}:{lon:.{WIND_COORD_DIGITS}f}"
+        payload = cache.get(key)
+        if payload is None:
+            payload = _fetch_wind(lat, lon)
+            if payload is None:
+                return _error("Winddaten sind gerade nicht verfügbar.", 502)
+            cache.set(key, payload, WIND_CACHE_SECONDS)
+        return Response(payload)
+
+
+def _fetch_wind(lat: float, lon: float) -> dict | None:
+    try:
+        res = requests.get(
+            OPEN_METEO_FORECAST,
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "current": "wind_speed_10m,wind_direction_10m,wind_gusts_10m",
+                "wind_speed_unit": "kmh",
+                "timezone": "GMT",
+            },
+            timeout=WIND_TIMEOUT_SECONDS,
+        )
+        res.raise_for_status()
+        current = res.json().get("current") or {}
+    except (requests.RequestException, ValueError, AttributeError) as exc:
+        logger.warning(
+            "Open-Meteo (aktueller Wind) fehlgeschlagen: %s", type(exc).__name__
+        )
+        return None
+
+    speed = current.get("wind_speed_10m")
+    direction = current.get("wind_direction_10m")
+    if not isinstance(speed, (int, float)) or not isinstance(direction, (int, float)):
+        logger.warning("Open-Meteo lieferte keinen aktuellen Wind")
+        return None
+    gusts = current.get("wind_gusts_10m")
+    observed = current.get("time")
+    return {
+        "speed_kmh": float(speed),
+        "gusts_kmh": float(gusts) if isinstance(gusts, (int, float)) else None,
+        "direction_deg": float(direction) % 360,
+        # timezone=GMT: Open-Meteo liefert die Zeit ohne Zonenangabe.
+        "observed_at": f"{observed}Z" if isinstance(observed, str) else None,
+        "lat": lat,
+        "lon": lon,
+    }

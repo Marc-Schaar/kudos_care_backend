@@ -525,6 +525,13 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   `StravaProfile.scope`, antworten Upload-Endpunkte mit 403 `code=scope_missing` und das
   Frontend holt die Erlaubnis nach. Hochgeladene Fahrten kommen über den
   Webhook (`app_strava_webhook`) automatisch als `Ride` zurück.
+  `GET wind/?lat=&lon=` liefert den **aktuellen** Wind am Standort (Open-Meteo-Forecast,
+  `speed_kmh`/`gusts_kmh`/`direction_deg` meteorologisch = woher, wie `api/wind.py`). Live-
+  Koordinaten an einen Dritten → nur mit Wetter-Einwilligung (403
+  `weather_consent_required`, nichts verlässt den Server). Koordinaten werden auf 2
+  Nachkommastellen (~1 km) gerundet, bevor sie rausgehen; das ist zugleich der
+  Cache-Schlüssel (10 min, Djangos Default-Cache). Open-Meteo-Ausfall → 502, wird nicht
+  gecacht. Koordinaten nie loggen. Der Radcomputer fragt alle 10 min bzw. 5 km neu.
   Dazu zwei Models, beide per CASCADE am `StravaProfile` (Kontolöschung räumt sie mit
   ab): `RadcomputerSettings` (1:1, explizite Felder mit Choices/Bereichen statt JSON;
   `GET|PUT settings/`, `PUT` ist ein partielles Upsert, `GET` liefert ohne Datensatz die
@@ -546,7 +553,7 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
 "api/"          -> app_auth             (/api/strava/auth|me|logout/)
 "api/"          -> app_dashboard        (/api/strava/sync*, /api/activities/*)
 "api/"          -> app_maintenance      (/api/maintenance/*)
-"api/radcomputer/" -> app_radcomputer  (/api/radcomputer/upload|routes/*)
+"api/radcomputer/" -> app_radcomputer  (/api/radcomputer/upload|routes|wind|settings|places/*)
 ```
 
 ## Auth-Flow

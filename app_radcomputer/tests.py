@@ -1,8 +1,11 @@
 import time
 from unittest.mock import Mock, patch
 
+import requests
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
@@ -284,3 +287,119 @@ class SavedPlaceTests(APITestCase):
         self.assertIn(res.status_code, (200, 204))
         self.assertFalse(SavedPlace.objects.exists())
         self.assertFalse(RadcomputerSettings.objects.exists())
+
+
+WIND_URL = "/api/radcomputer/wind/"
+
+
+def open_meteo(current: dict | None = None, status: int = 200) -> Mock:
+    res = Mock()
+    res.status_code = status
+    res.json.return_value = {
+        "current": (
+            current
+            if current is not None
+            else {
+                "time": "2026-11-15T10:45",
+                "wind_speed_10m": 18.4,
+                "wind_direction_10m": 250,
+                "wind_gusts_10m": 33.1,
+            }
+        )
+    }
+    if status >= 400:
+        res.raise_for_status.side_effect = requests.HTTPError(str(status))
+    else:
+        res.raise_for_status.return_value = None
+    return res
+
+
+@patch("app_radcomputer.views.requests.get")
+class WindTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create(username="strava_4711")
+        self.profile = StravaProfile.objects.create(
+            user=self.user,
+            strava_athlete_id=4711,
+            access_token="acc-1",
+            refresh_token="ref-1",
+            expires_at=int(time.time()) + 3600,
+            weather_consent_at=timezone.now(),
+        )
+        login_as(self.client, self.user, 4711)
+
+    def wind(self, lat="51.23456", lon="6.78912"):
+        return self.client.get(WIND_URL, {"lat": lat, "lon": lon})
+
+    def test_returns_current_wind(self, get):
+        get.return_value = open_meteo()
+        res = self.wind()
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(
+            res.data,
+            {
+                "speed_kmh": 18.4,
+                "gusts_kmh": 33.1,
+                "direction_deg": 250.0,
+                "observed_at": "2026-11-15T10:45Z",
+                "lat": 51.23,
+                "lon": 6.79,
+            },
+        )
+
+    def test_sends_only_rounded_coordinates(self, get):
+        get.return_value = open_meteo()
+        self.wind()
+        params = get.call_args.kwargs["params"]
+        self.assertEqual((params["latitude"], params["longitude"]), (51.23, 6.79))
+        self.assertEqual(params["wind_speed_unit"], "kmh")
+
+    def test_without_consent_nothing_leaves_the_server(self, get):
+        self.profile.weather_consent_at = None
+        self.profile.save()
+        res = self.wind()
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "weather_consent_required")
+        get.assert_not_called()
+
+    def test_nearby_positions_share_the_cache(self, get):
+        get.return_value = open_meteo()
+        self.wind(lat="51.2341", lon="6.7901")
+        res = self.wind(lat="51.2349", lon="6.7898")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(get.call_count, 1)
+
+    def test_rejects_missing_or_invalid_coordinates(self, get):
+        for lat, lon in (("", "6.7"), ("abc", "6.7"), ("91", "6.7"), ("51", "181")):
+            with self.subTest(lat=lat, lon=lon):
+                self.assertEqual(self.wind(lat=lat, lon=lon).status_code, 400)
+        self.assertEqual(self.client.get(WIND_URL).status_code, 400)
+        get.assert_not_called()
+
+    def test_open_meteo_failure_is_502_and_not_cached(self, get):
+        get.side_effect = requests.ConnectionError("down")
+        self.assertEqual(self.wind().status_code, 502)
+        get.side_effect = None
+        get.return_value = open_meteo()
+        self.assertEqual(self.wind().status_code, 200)
+
+    def test_http_error_and_missing_values_are_502(self, get):
+        get.return_value = open_meteo(status=500)
+        self.assertEqual(self.wind().status_code, 502)
+        get.return_value = open_meteo(current={"time": "2026-11-15T10:45"})
+        self.assertEqual(self.wind().status_code, 502)
+
+    def test_missing_gusts_are_null(self, get):
+        get.return_value = open_meteo(
+            current={"wind_speed_10m": 5, "wind_direction_10m": 360}
+        )
+        res = self.wind()
+        self.assertIsNone(res.data["gusts_kmh"])
+        self.assertIsNone(res.data["observed_at"])
+        self.assertEqual(res.data["direction_deg"], 0.0)
+
+    def test_requires_login(self, get):
+        self.client.logout()
+        self.assertIn(self.wind().status_code, (401, 403))
+        get.assert_not_called()

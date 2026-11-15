@@ -15,6 +15,7 @@ urlpatterns = [
         views.RouteGpxView.as_view(),
         name="radcomputer-route-gpx",
     ),
+    path("wind/", views.WindView.as_view(), name="radcomputer-wind"),
     path("settings/", views.SettingsView.as_view(), name="radcomputer-settings"),
     path("places/", views.SavedPlaceListView.as_view(), name="radcomputer-places"),
     path(
