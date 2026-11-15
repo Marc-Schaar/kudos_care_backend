@@ -62,6 +62,7 @@ from .services import (
     build_bike_condition_report_prompt,
     build_check_instructions_prompt,
     build_weather_explanation_prompt,
+    next_ride_forecast,
 )
 from .usage import RideLedger, moment_for, ride_clock_now
 
@@ -622,6 +623,21 @@ class ComponentCheckInstructionsView(AthleteMixin, APIView):
                 "cached": False,
             }
         )
+
+
+class BikeNextRideView(AthleteMixin, APIView):
+    """
+    GET /api/maintenance/bikes/{pk}/next-ride/
+
+    Prognose fürs Dashboard: wann das Bike voraussichtlich wieder gefahren wird, wie
+    weit, und welche Teile/Intervalle bis dahin fällig werden (siehe
+    `services.next_ride_forecast`). Ohne genug Fahrten ist `predicted_date` null —
+    kein Fehler, sondern der Normalfall für ein neues Rad.
+    """
+
+    def get(self, request, pk: int) -> Response:
+        bike = get_object_or_404(Bike, pk=pk, athlete=self.get_athlete())
+        return Response(next_ride_forecast(bike))
 
 
 class BikeConditionReportView(AthleteMixin, APIView):

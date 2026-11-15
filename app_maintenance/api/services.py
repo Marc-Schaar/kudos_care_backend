@@ -1,4 +1,5 @@
 import logging
+from datetime import date
 
 from django.db.models import Max, Q
 from django.utils import timezone
@@ -9,6 +10,7 @@ from app_maintenance.models import (
     Component,
     ComponentCheck,
     ComponentSlot,
+    MaintenanceInterval,
     WeatherSensitivityCoefficient,
 )
 
@@ -683,3 +685,92 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
             }
         )
     return results
+
+
+#: Was die Prognose überhaupt meldet: alles, was am Fahrtag mindestens "bald fällig"
+#: ist. Ob das neu ist oder schon heute so steht, entscheidet der Client über
+#: `status_today` — dort steht "schon fällig" bereits unter "Als Nächstes dran".
+_FORECAST_LEVELS = (WarnLevel.WARN, WarnLevel.CRITICAL)
+
+
+def next_ride_forecast(bike: Bike) -> dict:
+    """
+    Die Prognose fürs Dashboard: wann dieses Bike voraussichtlich wieder gefahren
+    wird, wie weit, und was bis dahin fällig wird. Dieselbe Projektion wie die
+    Vorhersage-Mail (`get_predicted_unsafe_bikes`: Tage-Achse auf den Fahrtag, km- und
+    Wetter-Achse um die geschätzte Strecke), aber für **jeden** Abstand und ab "bald
+    fällig" statt erst ab kritisch — die Mail ist der Alarm, das hier die Vorschau.
+
+    Liefert die Posten nur als Schlüssel + Status, nicht als eigene Darstellung: der
+    Client hat Titel, Baugruppe und Restwert schon aus `assemblies/` und darf sie nicht
+    ein zweites Mal anders beschriften.
+    """
+    from app_dashboard.api.services import (  # inline: Cross-App, siehe Architektur-Notiz
+        MIN_RIDES_FOR_PREDICTION,
+        ride_rhythm,
+    )
+    from app_dashboard.models import Ride
+
+    rhythm = ride_rhythm(bike)
+    base = {
+        "min_rides": MIN_RIDES_FOR_PREDICTION,
+        "ride_count": Ride.objects.filter(bike=bike, start_date__isnull=False).count(),
+    }
+    if rhythm is None:
+        return {**base, "predicted_date": None, "items": []}
+
+    predicted_date = rhythm.next_ride
+    extra_km = rhythm.median_km or 0.0
+    ledger = RideLedger.for_bike(bike.pk)
+    items: list[dict] = []
+
+    slots = (
+        ComponentSlot.objects.on_bike(bike)
+        .select_related("template")
+        .prefetch_related("components__periods", "components__checks")
+    )
+    for slot in slots:
+        comp = slot.mounted_component
+        if comp is None:
+            continue
+        then = compute_wear(comp, ledger, as_of=predicted_date, extra_km=extra_km)
+        if then["warn_status_overall"] not in _FORECAST_LEVELS:
+            continue
+        items.append(
+            {
+                "kind": "part",
+                "id": comp.pk,
+                "status_today": compute_wear(comp, ledger)["warn_status_overall"],
+                "status_then": then["warn_status_overall"],
+            }
+        )
+
+    intervals = MaintenanceInterval.objects.filter(bike=bike).select_related(
+        "assembly"
+    )
+    for interval in intervals:
+        if not interval.is_on_bike:
+            continue
+        status_then = interval.status(ledger, as_of=predicted_date, extra_km=extra_km)
+        if status_then not in _FORECAST_LEVELS:
+            continue
+        items.append(
+            {
+                "kind": "interval",
+                "id": interval.pk,
+                "status_today": interval.status(ledger),
+                "status_then": status_then,
+            }
+        )
+
+    return {
+        **base,
+        "predicted_date": predicted_date,
+        "days_until": (predicted_date - date.today()).days,
+        "is_overdue": rhythm.is_overdue,
+        "predicted_km": rhythm.median_km,
+        "median_gap_days": rhythm.median_gap_days,
+        "rides_considered": rhythm.rides_considered,
+        "last_ride": rhythm.last_ride,
+        "items": items,
+    }

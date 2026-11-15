@@ -11,6 +11,7 @@ from .views import (
     BikeAssemblyDetailView,
     BikeAssemblyListView,
     BikeConditionReportView,
+    BikeNextRideView,
     BikeDetailView,
     BikeInstalledAtView,
     BikeListView,
@@ -103,6 +104,11 @@ urlpatterns = [
         "maintenance/intervals/<int:pk>/log/",
         MaintenanceIntervalLogView.as_view(),
         name="interval-log",
+    ),
+    path(
+        "maintenance/bikes/<int:pk>/next-ride/",
+        BikeNextRideView.as_view(),
+        name="bike-next-ride",
     ),
     path(
         "maintenance/bikes/<int:pk>/condition-report/",

@@ -1,5 +1,6 @@
 import logging
 import statistics
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 import polyline
@@ -321,54 +322,92 @@ def build_ride_summary_prompt(ride: Ride) -> tuple[str, str]:
     return system_prompt, user_prompt
 
 
-def predict_next_ride_date(bike: Bike) -> date | None:
+@dataclass(frozen=True)
+class RideRhythm:
     """
-    Schätzt, wann dieses Bike voraussichtlich wieder gefahren wird — Basis für die
-    "voraussichtlich unsafe bei nächster Fahrt"-Benachrichtigung (siehe
-    app_maintenance.api.services.get_predicted_unsafe_bikes). Reine Heuristik: Median
-    der Tage-Lücken zwischen den letzten `LOOKBACK_RIDE_COUNT` Fahrten dieses Bikes,
-    angewandt auf die letzte Fahrt. Median statt Mittelwert, da robuster gegen einzelne
-    Ausreißer (z.B. eine lange Winterpause).
+    Wie dieses Bike zuletzt gefahren wurde, als Grundlage für die Fahrt-Vorhersage.
+    Reine Heuristik auf den letzten `LOOKBACK_RIDE_COUNT` Fahrten, kein ML.
 
-    Gibt None zurück, wenn zu wenig Historie vorliegt (`MIN_RIDES_FOR_PREDICTION`) für
-    eine halbwegs verlässliche Schätzung.
+    `next_ride_raw` ist die ungeklemmte Schätzung: liegt sie in der Vergangenheit, ist
+    der Nutzer nach seinem eigenen Rhythmus "überfällig" (Winterpause, Urlaub). Die
+    App sagt das dann so, statt jeden Tag aufs Neue "heute" zu behaupten.
     """
-    ride_dates = list(
+
+    rides_considered: int
+    last_ride: date
+    median_gap_days: float
+    median_km: float | None
+    next_ride_raw: date
+
+    @property
+    def next_ride(self) -> date:
+        # Keine Rückwärts-Projektion: compute_wear(as_of=...) soll nie in die
+        # Vergangenheit schauen, also ist "heute" der früheste sinnvolle Punkt.
+        return max(self.next_ride_raw, date.today())
+
+    @property
+    def is_overdue(self) -> bool:
+        return self.next_ride_raw < date.today()
+
+
+def ride_rhythm(bike: Bike) -> RideRhythm | None:
+    """
+    Median der Tage-Lücken und der Distanzen über die letzten Fahrten dieses Bikes.
+    Median statt Mittelwert, damit eine lange Pause oder eine einzelne Tagestour die
+    Schätzung nicht verzieht. None bei zu wenig Historie (`MIN_RIDES_FOR_PREDICTION`).
+
+    Eine Query für Datum und Strecke — vorher fragten `predict_next_ride_date` und
+    `predict_next_ride_km` getrennt.
+    """
+    rows = list(
         Ride.objects.filter(bike=bike, start_date__isnull=False)
         .order_by("-start_date")
-        .values_list("start_date", flat=True)[:LOOKBACK_RIDE_COUNT]
+        .values_list("start_date", "distance")[:LOOKBACK_RIDE_COUNT]
     )
-    if len(ride_dates) < MIN_RIDES_FOR_PREDICTION:
+    if len(rows) < MIN_RIDES_FOR_PREDICTION:
         return None
 
-    gaps_days = [
-        (ride_dates[i] - ride_dates[i + 1]).days for i in range(len(ride_dates) - 1)
-    ]
+    dates = [start for start, _ in rows]
+    gaps_days = [(dates[i] - dates[i + 1]).days for i in range(len(dates) - 1)]
     median_gap = statistics.median(gaps_days)
 
-    predicted = ride_dates[0].date() + timedelta(days=median_gap)
-    # Ist der Nutzer laut eigenem Muster schon "überfällig" fürs Fahren, ist "heute" der
-    # sinnvollste Vorhersage-Punkt (keine Rückwärts-Projektion für compute_wear).
-    return max(predicted, date.today())
+    distances = [dist for _, dist in rows if dist is not None]
+    median_km = (
+        round(statistics.median(distances) / 1000, 1)
+        if len(distances) >= MIN_RIDES_FOR_PREDICTION
+        else None
+    )
+
+    last_ride = dates[0].date()
+    return RideRhythm(
+        rides_considered=len(rows),
+        last_ride=last_ride,
+        median_gap_days=median_gap,
+        median_km=median_km,
+        next_ride_raw=last_ride + timedelta(days=median_gap),
+    )
+
+
+def predict_next_ride_date(bike: Bike) -> date | None:
+    """
+    Wann dieses Bike voraussichtlich wieder gefahren wird (frühestens heute) — Basis
+    für die "voraussichtlich unsafe bei nächster Fahrt"-Benachrichtigung (siehe
+    app_maintenance.api.services.get_predicted_unsafe_bikes) und die Prognose im
+    Dashboard. Details in `ride_rhythm()`.
+    """
+    rhythm = ride_rhythm(bike)
+    return rhythm.next_ride if rhythm else None
 
 
 def predict_next_ride_km(bike: Bike) -> float | None:
     """
-    Schätzt die Strecke der nächsten Fahrt: Median der Distanzen der letzten
-    `LOOKBACK_RIDE_COUNT` Fahrten, gleiche Mindest-Historie wie `predict_next_ride_date`.
-    Median, damit eine einzelne Tagestour die Schätzung nicht aufbläst.
+    Schätzt die Strecke der nächsten Fahrt (Median, siehe `ride_rhythm()`).
 
     Ohne diesen Wert projizierte die Vorhersage-Mail nur die Tage-Achse, und die meisten
     Teile sind über km begrenzt — die Mail ging dadurch praktisch nie raus.
     """
-    distances = list(
-        Ride.objects.filter(bike=bike, start_date__isnull=False, distance__isnull=False)
-        .order_by("-start_date")
-        .values_list("distance", flat=True)[:LOOKBACK_RIDE_COUNT]
-    )
-    if len(distances) < MIN_RIDES_FOR_PREDICTION:
-        return None
-    return round(statistics.median(distances) / 1000, 1)
+    rhythm = ride_rhythm(bike)
+    return rhythm.median_km if rhythm else None
 
 
 class WeatherService:

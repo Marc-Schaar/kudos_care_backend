@@ -1263,26 +1263,35 @@ class MaintenanceInterval(models.Model):
         return interval_km_since_done(self, ledger or RideLedger.for_bike(self.bike_id))
 
     def usage_ratio(
-        self, ledger: RideLedger | None = None, as_of: date | None = None
+        self,
+        ledger: RideLedger | None = None,
+        as_of: date | None = None,
+        extra_km: float = 0.0,
     ) -> float | None:
-        """Verbrauchter Anteil des Intervalls, schlechteste Achse. None = keine Grenze."""
+        """
+        Verbrauchter Anteil des Intervalls, schlechteste Achse. None = keine Grenze.
+        `extra_km` rechnet eine geschätzte nächste Fahrt drauf, wie bei `compute_wear`.
+        """
         as_of = as_of or date.today()
         ratios: list[float] = []
         if self.interval_km:
-            ratios.append(self.km_since_done(ledger) / self.interval_km)
+            ratios.append((self.km_since_done(ledger) + extra_km) / self.interval_km)
         if self.interval_days and self.last_done_at:
             ratios.append((as_of - self.last_done_at).days / self.interval_days)
         return max(ratios) if ratios else None
 
     def status(
-        self, ledger: RideLedger | None = None, as_of: date | None = None
+        self,
+        ledger: RideLedger | None = None,
+        as_of: date | None = None,
+        extra_km: float = 0.0,
     ) -> str:
         """
         Ampel wie `compute_wear`: schlechtester Wert aus km- und Tage-Achse.
-        `as_of` projiziert nur die Tage-Achse (Default: heute) — analog zur
-        Fahrt-Vorhersage in app_notifications.
+        `as_of` projiziert die Tage-Achse (Default: heute), `extra_km` die km-Achse —
+        zusammen die Fahrt-Vorhersage (Dashboard-Prognose, app_notifications).
         """
-        return warn_status_from_ratio(self.usage_ratio(ledger, as_of))
+        return warn_status_from_ratio(self.usage_ratio(ledger, as_of, extra_km))
 
 
 class MaintenanceLog(models.Model):
