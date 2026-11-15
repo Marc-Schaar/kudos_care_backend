@@ -100,14 +100,34 @@ class RideWearBreakdownTests(APITestCase):
         breakdown = ride_wear_breakdown(self._ride(DRY, strava_id=1))
         brakes = breakdown["categories"][0]
         self.assertEqual(brakes["extra_pct"], 0)
-        self.assertEqual(breakdown["total_extra_km"], 0.0)
+        self.assertEqual(brakes["extra_km"], 0.0)
 
     def test_rainy_ride_costs_extra_on_the_same_component(self):
         breakdown = ride_wear_breakdown(self._ride(RAINY, strava_id=2))
         brakes = breakdown["categories"][0]
         self.assertGreater(brakes["extra_pct"], 0)
-        self.assertGreater(breakdown["total_extra_km"], 0.0)
+        self.assertGreater(brakes["extra_km"], 0.0)
+        self.assertNotIn("total_extra_km", breakdown)
         self.assertEqual(brakes["dominant_driver"], "rain")
+
+    def test_category_surcharge_does_not_grow_with_part_count(self):
+        """Zwei Bremsteile zahlen denselben Aufschlag, nicht zusammen den doppelten."""
+        disc = ComponentTemplate.objects.create(
+            name="Bremsscheibe vorne",
+            category=ComponentCategory.BRAKES,
+            warn_km=15000,
+        )
+        Component.objects.create(
+            slot=ComponentSlot.objects.create(bike=self.bike, template=disc),
+            installed_at=date.today() - timedelta(days=200),
+        )
+
+        breakdown = ride_wear_breakdown(self._ride(RAINY, strava_id=20))
+        brakes = breakdown["categories"][0]
+
+        self.assertEqual(len(brakes["components"]), 2)
+        per_part = brakes["components"][0]["extra_km"]
+        self.assertAlmostEqual(brakes["extra_km"], per_part, places=2)
         self.assertEqual(brakes["dominant_driver_display"], "Regen")
 
     def test_share_of_life_answers_what_the_ride_cost(self):

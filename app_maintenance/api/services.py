@@ -296,7 +296,6 @@ def ride_wear_breakdown(ride) -> dict:
     }
 
     grouped: dict[str, dict] = {}
-    total_extra_km = 0.0
     component_count = 0
 
     for component in components:
@@ -318,7 +317,10 @@ def ride_wear_breakdown(ride) -> dict:
                 "category_display": template.get_category_display(),
                 "multiplier": round(multiplier, 3),
                 "extra_pct": round((multiplier - 1) * 100),
-                "extra_km": 0.0,
+                # Je Kategorie, nicht je Teil aufsummiert: der Aufschlag hängt am
+                # Multiplikator der Kategorie, und den zahlt jedes ihrer Teile gleich.
+                # Summiert stünde bei zwei Bremsteilen der doppelte Aufschlag da.
+                "extra_km": round(extra_km, 2),
                 "dominant_driver": detail["dominant_driver"],
                 "dominant_driver_display": DRIVER_LABELS.get(detail["dominant_driver"]),
                 "components": [],
@@ -340,8 +342,6 @@ def ride_wear_breakdown(ride) -> dict:
                 ),
             }
         )
-        entry["extra_km"] = round(entry["extra_km"] + extra_km, 2)
-        total_extra_km += extra_km
         component_count += 1
 
     categories = sorted(
@@ -362,7 +362,6 @@ def ride_wear_breakdown(ride) -> dict:
             ),
         },
         "categories": categories,
-        "total_extra_km": round(total_extra_km, 2),
         "component_count": component_count,
     }
 
@@ -397,7 +396,6 @@ def build_ride_wear_impact_prompt(ride, breakdown: dict) -> tuple[str, str]:
         f"Durchschnittlicher Niederschlag: {conditions.get('precipitation')} mm/h",
         f"Durchschnittstemperatur: {conditions.get('temperature')} °C",
         f"Durchschnittliche Windgeschwindigkeit: {conditions.get('wind_speed')} km/h",
-        f"Wetterbedingter Mehrverschleiß gesamt: {breakdown.get('total_extra_km')} km",
         "Betroffene Komponenten-Kategorien:",
     ]
     for category in breakdown.get("categories", []):
