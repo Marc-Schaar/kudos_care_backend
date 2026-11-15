@@ -258,6 +258,15 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   montierten. KI-Erzähltext via `build_ride_wear_impact_prompt()` + Cache-Felder
   `Ride.wear_impact_summary`/`wear_impact_generated_at`, Staleness über
   `ride_wear_impact_is_stale()` (Komponenten seither geändert?).
+  `attach_segment_wear(breakdown, segments)` hängt je Kategorie `segment_extra_km` an
+  (Index = `wind_segments`-Feature-Index) — für den Verlauf „wo der Aufschlag entstand"
+  auf der Fahrt-Seite. **Das verteilt nur, es rechnet nicht neu:** die Summe ist der
+  `extra_km` der Kategorie. Die App rechnet je Fahrt aus dem gemittelten Stundenwetter;
+  dieselbe Formel je Abschnitt ergäbe wegen Schwellen/Caps eine andere Summe, und die
+  Seite nennte zwei Zahlen für eine Fahrt. Das Abschnittswetter bestimmt nur das Gewicht
+  (`Länge × (Abschnitts-Multiplikator − 1)`, über
+  `WeatherWearCalculator.conditions_multiplier_detail()`), ohne Abschnittswetter wird nach
+  Länge verteilt.
   `next_ride_forecast(bike)` ist dieselbe Projektion für die **Dashboard-Prognose**
   (`GET bikes/<id>/next-ride/`): bei jedem Abstand und schon ab `warn` statt erst ab
   kritisch — die Mail ist der Alarm, das hier die Vorschau. Liefert Posten nur als
@@ -799,6 +808,10 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   nie montierte Ersatzteile nicht), `RideMultiplierDetailTests`,
   `ActivityWearImpactViewTests` (Caching, Invalidierung bei Komponenten-Änderung, und
   vor allem: ein KI-Ausfall liefert weiterhin 200 mit den Zahlen, kein 503).
+- `app_maintenance/test_segment_wear.py`: `AttachSegmentWearTests` (Summe = `extra_km`
+  der Kategorie, Aufschlag landet im Regen, ohne Abschnittswetter nach Länge verteilt)
+  und `WearImpactSegmentProfileViewTests` (Länge passt zu `wind_segments`, Schauer am
+  Ende landet in der zweiten Hälfte).
 - `app_maintenance/test_bike_assistant.py`: `KudoCatalogGuardTests` — die eigentliche
   Sicherheitsgrenze. Erfundene `template_id`s, Templates aus einer fremden Gruppe und
   als Teil ausgegebenes Verbrauchsmaterial müssen serverseitig herausfallen; dazu

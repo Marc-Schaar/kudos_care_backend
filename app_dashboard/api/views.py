@@ -15,6 +15,7 @@ from app_auth.mixins import CsrfExemptSessionAuthentication
 from app_auth.models import StravaProfile
 from app_maintenance.api.ai_providers import generate_reviewed_text, get_ai_provider
 from app_maintenance.api.services import (
+    attach_segment_wear,
     build_ride_wear_impact_prompt,
     ride_wear_breakdown,
     ride_wear_impact_is_stale,
@@ -239,6 +240,13 @@ class ActivityWearImpactView(APIView):
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
+
+        # Dieselben Abschnitte wie im Detail-Request (gleiche Funktion, gleiche
+        # Eingaben), damit der Index zu `wind_segments` passt.
+        segments, _ = compute_ride_wind(
+            ride, hourly_from_weather_data(ride.weather_data)
+        )
+        attach_segment_wear(breakdown, segments)
 
         force_refresh = request.query_params.get("refresh") == "true"
         needs_generation = force_refresh or ride_wear_impact_is_stale(ride)

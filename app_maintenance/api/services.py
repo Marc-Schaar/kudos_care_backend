@@ -73,10 +73,25 @@ class WeatherWearCalculator:
         hat dominiert", nicht als exakte Zerlegung des Endergebnisses.
         """
         weather_data = weather_data or {}
-        precip = _mean(weather_data.get("precipitation"))
-        temp = _mean(weather_data.get("temperature_2m"))
-        wind = _mean(weather_data.get("wind_speed_10m"))
+        return WeatherWearCalculator.conditions_multiplier_detail(
+            _mean(weather_data.get("precipitation")),
+            _mean(weather_data.get("temperature_2m")),
+            _mean(weather_data.get("wind_speed_10m")),
+            coeff,
+        )
 
+    @staticmethod
+    def conditions_multiplier_detail(
+        precip: float | None,
+        temp: float | None,
+        wind: float | None,
+        coeff: WeatherSensitivityCoefficient,
+    ) -> dict:
+        """
+        Dieselbe Formel für einzelne Werte statt Stundenreihen. Gebraucht für die
+        Verteilung des Fahrt-Aufschlags auf die Abschnitte (`attach_segment_wear`), wo
+        jeder Abschnitt sein eigenes interpoliertes Wetter hat.
+        """
         neutral = {
             "multiplier": 1.0,
             "contributions": {"rain": 0.0, "heat": 0.0, "cold": 0.0, "wind": 0.0},
@@ -372,6 +387,63 @@ def ride_wear_breakdown(ride) -> dict:
 
 def _round(value, digits: int = 1):
     return None if value is None else round(value, digits)
+
+
+def attach_segment_wear(breakdown: dict, segments: list[dict]) -> dict:
+    """
+    Verteilt den Aufschlag jeder Kategorie auf die Windabschnitte der Fahrt
+    (`app_dashboard/api/wind.py::compute_ride_wind`) und hängt ihn als
+    `segment_extra_km` an: eine Liste in Abschnittsreihenfolge, gleicher Index wie
+    `wind_segments.features[].properties.index`.
+
+    **Die Summe ist der `extra_km` der Kategorie, nicht eine eigene Rechnung.** Die App
+    rechnet den Verschleiß je Fahrt aus dem gemittelten Stundenwetter; dieselbe Formel
+    je Abschnitt angewandt ergäbe wegen der Schwellen und Caps eine andere Summe, und
+    die Seite nennte dann zwei Zahlen für dieselbe Fahrt. Das Abschnittswetter
+    entscheidet deshalb nur, **wo** der Aufschlag entsteht: Gewicht je Abschnitt ist
+    `Länge × (Abschnitts-Multiplikator − 1)`. Ist dieses Gewicht überall 0 (kein
+    Abschnittswetter, oder das Mittel liegt über einer Schwelle, die kein Abschnitt
+    einzeln reißt), wird nach Länge verteilt.
+    """
+    if not segments:
+        for entry in breakdown.get("categories", []):
+            entry["segment_extra_km"] = []
+        return breakdown
+
+    lengths = [max(0.0, s.get("distance_km") or 0.0) for s in segments]
+    total_length = sum(lengths)
+    coefficients = {
+        coeff.category: coeff
+        for coeff in WeatherSensitivityCoefficient.objects.filter(
+            category__in=[e["category"] for e in breakdown.get("categories", [])]
+        )
+    }
+
+    for entry in breakdown.get("categories", []):
+        extra = entry.get("extra_km") or 0.0
+        coeff = coefficients.get(entry["category"])
+        if extra <= 0 or coeff is None or total_length <= 0:
+            entry["segment_extra_km"] = [0.0] * len(segments)
+            continue
+
+        weights = []
+        for segment, length in zip(segments, lengths):
+            multiplier = WeatherWearCalculator.conditions_multiplier_detail(
+                segment.get("precipitation"),
+                segment.get("temperature"),
+                segment.get("wind_speed"),
+                coeff,
+            )["multiplier"]
+            weights.append(length * (multiplier - 1.0))
+
+        total_weight = sum(weights)
+        if total_weight <= 0:
+            weights, total_weight = lengths, total_length
+
+        entry["segment_extra_km"] = [
+            round(extra * weight / total_weight, 4) for weight in weights
+        ]
+    return breakdown
 
 
 def build_ride_wear_impact_prompt(ride, breakdown: dict) -> tuple[str, str]:
