@@ -81,6 +81,7 @@ def _sample_context() -> dict:
         {
             "bike": gravel,
             "predicted_date": predicted,
+            "predicted_km": 54.6,
             "components": [
                 {
                     "slot": SimpleNamespace(display_name="Reifen hinten"),

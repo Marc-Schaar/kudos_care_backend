@@ -5,8 +5,8 @@
 {% block content %}
 <h1>Vor deiner nächsten Fahrt</h1>
 <p class="lede">
-  So wie du bisher fährst, bist du bald wieder unterwegs. Bis dahin werden diese Teile
-  fällig. Am besten schaust du sie dir vorher an.
+  So wie du bisher fährst, bist du bald wieder unterwegs. Mit dieser Fahrt werden
+  diese Teile fällig. Am besten schaust du sie dir vorher an.
 </p>
 
 {% for group in groups %}
@@ -14,7 +14,7 @@
   <tr class="bike-head">
     <td>
       <h2>{{ group.bike.name }}</h2>
-      <span class="bike-meta">Nächste Fahrt voraussichtlich {{ group.predicted_day }}</span>
+      <span class="bike-meta">Nächste Fahrt voraussichtlich {{ group.predicted_day }}{% if group.predicted_distance %}, {{ group.predicted_distance }}{% endif %}</span>
     </td>
   </tr>
   {% for line in group.lines %}{% include "emails/_wear_line.html" with prefix="dann" %}{% endfor %}

@@ -9,7 +9,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from app_auth.models import StravaProfile
-from app_dashboard.api.services import predict_next_ride_date
+from app_dashboard.api.services import predict_next_ride_date, predict_next_ride_km
 from app_dashboard.models import Ride
 from app_maintenance.models import (
     Bike,
@@ -128,6 +128,23 @@ class PredictNextRideDateTests(APITestCase):
         predicted = predict_next_ride_date(self.bike)
         self.assertEqual(predicted, date.today())
 
+    def test_predicts_median_distance_in_km(self):
+        self._create_rides(gap_days=7, count=5, last_ride_days_ago=6)
+        # Eine Tagestour darf den Median nicht verschieben.
+        Ride.objects.create(
+            strava_id=next(self._ride_id_counter),
+            name="Tagestour",
+            distance=180000,
+            start_date=timezone.now() - timedelta(days=1),
+            athlete=self.profile,
+            bike=self.bike,
+        )
+        self.assertEqual(predict_next_ride_km(self.bike), 20.0)
+
+    def test_distance_none_with_insufficient_history(self):
+        self._create_rides(gap_days=7, count=2, last_ride_days_ago=6)
+        self.assertIsNone(predict_next_ride_km(self.bike))
+
 
 class ComponentWarningDigestTestsBase(APITestCase):
     def setUp(self):
@@ -145,12 +162,13 @@ class ComponentWarningDigestTestsBase(APITestCase):
         )
 
     def _make_overdue_component(
-        self, bike, warn_days=10, installed_days_ago=100, name="Kette"
+        self, bike, warn_days=10, installed_days_ago=100, name="Kette", warn_km=None
     ):
         template = ComponentTemplate.objects.create(
             name=name,
             category=ComponentCategory.DRIVETRAIN,
             warn_days=warn_days,
+            warn_km=warn_km,
         )
         slot = ComponentSlot.objects.create(bike=bike, template=template)
         component = Component.objects.create(
@@ -302,6 +320,35 @@ class CheckBikeUnsafePredictionsTests(ComponentWarningDigestTestsBase):
 
         check_bike_unsafe_predictions()
         self.assertEqual(len(mail.outbox), 1)
+
+    def test_sends_when_next_ride_km_crosses_the_limit(self):
+        """
+        Der eigentliche Fall: ein km-begrenztes Teil kurz vor der Grenze. Vorher
+        projizierte die Vorhersage nur Tage und meldete so etwas nie.
+        """
+        bike = self._make_bike("up5")
+        self._add_ride_history(bike)  # 5 x 20 km = 100 km, naechste Fahrt ~20 km
+        self._make_overdue_component(
+            bike, warn_days=None, installed_days_ago=100, warn_km=110
+        )
+
+        check_bike_unsafe_predictions()
+
+        self.assertEqual(len(mail.outbox), 1)
+        body = mail.outbox[0].body
+        self.assertIn("~20 km", body)
+        self.assertIn("120 von 110 km", body)
+
+    def test_no_mail_when_next_ride_stays_below_limit(self):
+        bike = self._make_bike("up6")
+        self._add_ride_history(bike)  # 100 km + ~20 km = 120 km < 200 km * 1.0
+        self._make_overdue_component(
+            bike, warn_days=None, installed_days_ago=100, warn_km=200
+        )
+
+        check_bike_unsafe_predictions()
+
+        self.assertEqual(len(mail.outbox), 0)
 
     def test_skips_bikes_without_enough_ride_history(self):
         bike = self._make_bike("up4")

@@ -90,7 +90,13 @@ def wear_line(name: str, component: Any, wear: dict) -> WearLine:
     weitesten ist; km zählen inklusive Wetteraufschlag, wie im Frontend.
     """
     wear_km = wear.get("wear_km") or 0.0
-    weather_km = getattr(component, "weather_wear_km", None) or 0.0
+    # Aus dem Ergebnis, nicht vom Teil: bei der Vorhersage ist es auf die nächste
+    # Fahrt projiziert, und die Zeile muss die Zahl zeigen, die den Status bestimmt hat.
+    weather_km = (
+        wear["weather_wear_km"]
+        if "weather_wear_km" in wear
+        else getattr(component, "weather_wear_km", None)
+    ) or 0.0
     used_km = max(wear_km, weather_km)
     limit_km = getattr(component, "effective_warn_km", None)
     limit_days = getattr(component, "effective_warn_days", None)
@@ -132,6 +138,8 @@ class BikeGroup:
     bike: Any
     lines: list[WearLine] = field(default_factory=list)
     predicted_day: str = ""
+    # "~55 km", leer ohne Schätzung.
+    predicted_distance: str = ""
 
 
 def _sorted(lines: list[WearLine]) -> list[WearLine]:
@@ -160,6 +168,11 @@ def group_predictions(predictions: Iterable[dict]) -> list[BikeGroup]:
         BikeGroup(
             bike=p["bike"],
             predicted_day=format_day(p["predicted_date"]),
+            predicted_distance=(
+                f"~{format_count(p['predicted_km'])} km"
+                if p.get("predicted_km")
+                else ""
+            ),
             lines=_sorted(
                 [
                     wear_line(c["slot"].display_name, c["component"], c["wear"])

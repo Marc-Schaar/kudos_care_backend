@@ -352,6 +352,25 @@ def predict_next_ride_date(bike: Bike) -> date | None:
     return max(predicted, date.today())
 
 
+def predict_next_ride_km(bike: Bike) -> float | None:
+    """
+    Schätzt die Strecke der nächsten Fahrt: Median der Distanzen der letzten
+    `LOOKBACK_RIDE_COUNT` Fahrten, gleiche Mindest-Historie wie `predict_next_ride_date`.
+    Median, damit eine einzelne Tagestour die Schätzung nicht aufbläst.
+
+    Ohne diesen Wert projizierte die Vorhersage-Mail nur die Tage-Achse, und die meisten
+    Teile sind über km begrenzt — die Mail ging dadurch praktisch nie raus.
+    """
+    distances = list(
+        Ride.objects.filter(bike=bike, start_date__isnull=False, distance__isnull=False)
+        .order_by("-start_date")
+        .values_list("distance", flat=True)[:LOOKBACK_RIDE_COUNT]
+    )
+    if len(distances) < MIN_RIDES_FOR_PREDICTION:
+        return None
+    return round(statistics.median(distances) / 1000, 1)
+
+
 class WeatherService:
     @staticmethod
     def get_historical_weather(lat, lon, date):

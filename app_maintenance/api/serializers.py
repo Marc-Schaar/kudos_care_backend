@@ -78,7 +78,10 @@ def slots_on_bike(bike: Bike) -> list[ComponentSlot]:
 
 
 def compute_wear(
-    component: Component, ledger: RideLedger | None = None, as_of: date | None = None
+    component: Component,
+    ledger: RideLedger | None = None,
+    as_of: date | None = None,
+    extra_km: float = 0.0,
 ) -> dict:
     """
     Berechnet Verschleiß und Warn-Status einer Komponente. Gibt ein Dict zurück das
@@ -99,9 +102,15 @@ def compute_wear(
     Achse — damit lassen sich Teile untereinander und gegen Intervalle sortieren.
 
     `as_of` erlaubt eine Projektion auf ein zukünftiges Datum (siehe
-    app_notifications — "voraussichtlich unsafe bei nächster Fahrt"): nur die
-    Tage-Achse wird dadurch wirklich projiziert, die km bleiben beim heutigen Stand,
-    da zukünftige Distanz nicht bekannt ist. Default (None) = heute.
+    app_notifications — "voraussichtlich unsafe bei nächster Fahrt"), Default (None)
+    = heute. Es verschiebt nur die Tage-Achse. Die km bis dahin kommen getrennt über
+    `extra_km` (geschätzte Strecke der nächsten Fahrt): ohne sie sah die Vorhersage
+    km-begrenzte Teile — also fast alle — nie kommen und schickte praktisch nie eine
+    Mail. `extra_km` zählt auf der km- und der Wetter-Achse mit Faktor 1, denn das
+    Wetter der nächsten Fahrt ist unbekannt; die Projektion ist also eher zu milde.
+
+    `weather_wear_km` im Ergebnis ist der (ggf. projizierte) Wetter-km-Stand, damit
+    die Mail-Zeile dieselbe Zahl zeigt, nach der hier der Status bestimmt wurde.
     """
     as_of = as_of or date.today()
     if component.is_retired and component.retired_at:
@@ -110,7 +119,9 @@ def compute_wear(
     warn_km = component.effective_warn_km
     warn_days = component.effective_warn_days
 
-    wear_km = round(component_km(component, ledger) + (component.prior_km or 0.0), 1)
+    wear_km = round(
+        component_km(component, ledger) + (component.prior_km or 0.0) + extra_km, 1
+    )
     # max(): direkt nach Mitternacht kann der Server (UTC) noch beim Vortag sein.
     wear_days = (
         max((as_of - component.installed_at).days, 0)
@@ -121,8 +132,9 @@ def compute_wear(
     # ── Status-Baseline: letzte Prüfung falls vorhanden, sonst Einbau ────────
     latest_check = component.checks.first()
     if latest_check is not None:
-        km_for_status = component_km(
-            component, ledger, since=latest_check.baseline_moment()
+        km_for_status = (
+            component_km(component, ledger, since=latest_check.baseline_moment())
+            + extra_km
         )
         days_for_status = max((as_of - latest_check.checked_at).days, 0)
         threshold_km = latest_check.snooze_km or warn_km
@@ -155,9 +167,11 @@ def compute_wear(
     # Freigabe für diese Achse wirkungslos und die Komponente erscheint trotz
     # "Freigeben" weiter als überfällig.
     weather_km_for_status = None
+    weather_wear_km = None
     if component.weather_wear_km is not None:
+        weather_wear_km = component.weather_wear_km + extra_km
         baseline = latest_check.checked_at_weather_wear_km if latest_check else None
-        weather_km_for_status = component.weather_wear_km - (baseline or 0.0)
+        weather_km_for_status = weather_wear_km - (baseline or 0.0)
     status_weather, ratio_weather = axis_status(weather_km_for_status, warn_km)
 
     ratios = [r for r in (ratio_km, ratio_days, ratio_weather) if r is not None]
@@ -165,6 +179,7 @@ def compute_wear(
     return {
         "wear_km": wear_km,
         "wear_days": wear_days,
+        "weather_wear_km": weather_wear_km,
         "wear_ratio": round(max(ratios), 3) if ratios else None,
         "warn_status_km": status_km,
         "warn_status_days": status_days,

@@ -622,13 +622,16 @@ def get_new_component_warnings(
 def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
     """
     Ermittelt Bikes des Profils, die HEUTE noch nicht kritisch sind, aber laut Fahrt-Vorhersage
-    (predict_next_ride_date) bis zur naechsten voraussichtlichen Fahrt voraussichtlich
-    kritisch werden (Tage-Achse auf das vorhergesagte Datum projiziert, siehe
-    compute_wear(..., as_of=...)). Bikes die bereits heute kritisch sind werden ausgeschlossen
-    — das deckt bereits get_new_component_warnings() ab, keine Doppel-Meldung.
+    (predict_next_ride_date/predict_next_ride_km) mit der naechsten voraussichtlichen
+    Fahrt kritisch werden: Tage-Achse auf das vorhergesagte Datum projiziert, km- und
+    Wetter-Achse um die geschaetzte Strecke dieser Fahrt erhoeht (siehe
+    compute_wear(..., as_of=..., extra_km=...)). Bikes die bereits heute kritisch sind
+    werden ausgeschlossen — das deckt bereits get_new_component_warnings() ab, keine
+    Doppel-Meldung.
     """
     from app_dashboard.api.services import (  # inline: Cross-App, siehe Architektur-Notiz
         predict_next_ride_date,
+        predict_next_ride_km,
     )
 
     results = []
@@ -639,6 +642,7 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
             continue
         if bike.predicted_unsafe_notified_for_date == predicted_date:
             continue
+        predicted_km = predict_next_ride_km(bike) or 0.0
 
         slots = (
             ComponentSlot.objects.on_bike(bike)
@@ -657,7 +661,9 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
             today_wear = compute_wear(comp, ledger)
             if today_wear["warn_status_overall"] == WarnLevel.CRITICAL:
                 today_worst = WarnLevel.CRITICAL
-            projected_wear = compute_wear(comp, ledger, as_of=predicted_date)
+            projected_wear = compute_wear(
+                comp, ledger, as_of=predicted_date, extra_km=predicted_km
+            )
             if projected_wear["warn_status_overall"] == WarnLevel.CRITICAL:
                 projected_components.append(
                     {"slot": slot, "component": comp, "wear": projected_wear}
@@ -672,6 +678,7 @@ def get_predicted_unsafe_bikes(profile: StravaProfile) -> list[dict]:
             {
                 "bike": bike,
                 "predicted_date": predicted_date,
+                "predicted_km": predicted_km,
                 "components": projected_components,
             }
         )

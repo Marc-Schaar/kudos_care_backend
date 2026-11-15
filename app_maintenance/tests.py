@@ -225,3 +225,20 @@ class ComputeWearAsOfProjectionTests(APITestCase):
             compute_wear(self.component),
             compute_wear(self.component, as_of=date.today()),
         )
+
+    def test_extra_km_projects_km_and_weather_axes(self):
+        self.template.warn_km = 100
+        self.template.save()
+        self.component.weather_wear_km = 60.0
+        self.component.save()
+        self.component.refresh_from_db()
+
+        today_wear = compute_wear(self.component)
+        self.assertEqual(today_wear["warn_status_weather_km"], "ok")
+
+        # Die nächste Fahrt (50 km) schiebt die Wetter-Achse über die Grenze.
+        projected = compute_wear(self.component, extra_km=50)
+        self.assertEqual(projected["wear_km"], today_wear["wear_km"] + 50)
+        self.assertEqual(projected["weather_wear_km"], 110.0)
+        self.assertEqual(projected["warn_status_weather_km"], "critical")
+        self.assertEqual(projected["warn_status_overall"], "critical")
