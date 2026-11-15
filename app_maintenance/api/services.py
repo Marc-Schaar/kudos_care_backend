@@ -745,9 +745,7 @@ def next_ride_forecast(bike: Bike) -> dict:
             }
         )
 
-    intervals = MaintenanceInterval.objects.filter(bike=bike).select_related(
-        "assembly"
-    )
+    intervals = MaintenanceInterval.objects.filter(bike=bike).select_related("assembly")
     for interval in intervals:
         if not interval.is_on_bike:
             continue
