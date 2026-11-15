@@ -258,6 +258,14 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   montierten. KI-Erzähltext via `build_ride_wear_impact_prompt()` + Cache-Felder
   `Ride.wear_impact_summary`/`wear_impact_generated_at`, Staleness über
   `ride_wear_impact_is_stale()` (Komponenten seither geändert?).
+  `next_ride_forecast(bike)` ist dieselbe Projektion für die **Dashboard-Prognose**
+  (`GET bikes/<id>/next-ride/`): bei jedem Abstand und schon ab `warn` statt erst ab
+  kritisch — die Mail ist der Alarm, das hier die Vorschau. Liefert Posten nur als
+  `kind`/`id`/`status_today`/`status_then`, die Beschriftung macht der Client aus
+  `assemblies/`. `is_overdue` kennzeichnet ein Rad, dessen Rhythmus schon überschritten
+  ist (dann ist `predicted_date` heute, statt dass die App jeden Tag "heute" behauptet).
+  `MaintenanceInterval.status()`/`usage_ratio()` haben dafür dasselbe `extra_km` wie
+  `compute_wear()`; ohne das tauchte "Kette ölen alle 300 km" in keiner Prognose auf.
   `api/bike_assistant.py`: **„Kudo"**, der KI-Assistent fürs Bike-Anlegen.
   `suggest_models()` (Hersteller + Baujahr → Modellauswahl) und `suggest_setup()`
   (Modell → Vorbelegung für den Setup-Stepper). Beide gehen über
@@ -462,6 +470,7 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   um; ohne aktiven Satz bleibt der Slot ungruppiert statt eine Baugruppe zu erzwingen.
   Endpoints unter `/api/maintenance/`: `assistant/models/`,
   `bikes/<id>/assistant/setup/`, `bikes/`, `bikes/<id>/condition-report/`,
+  `bikes/<id>/next-ride/`,
   `groups/`, `bikes/<id>/assemblies/` (GET/POST), `assemblies/<id>/` (PATCH/DELETE),
   `assemblies/<id>/activate/`, `assemblies/<id>/retire/`,
   `assemblies/<id>/swap/`, `bikes/<id>/intervals/`, `intervals/<id>/` (PATCH/DELETE),
@@ -505,7 +514,8 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   (`check_component_warnings`, Celery Beat); (3) Fahrt-Vorhersage
   (`check_bike_unsafe_predictions`, täglich) — sagt aus dem Ride-Verlauf eines Bikes (Median
   der Tage-Lücken zwischen den letzten Fahrten, siehe
-  `app_dashboard/api/services.py::predict_next_ride_date`) das nächste voraussichtliche
+  `app_dashboard/api/services.py::ride_rhythm`, die einzige Quelle für Fahrtrhythmus und
+  -strecke; `predict_next_ride_date`/`_km` sind dünne Wrapper) das nächste voraussichtliche
   Fahrtdatum voraus und warnt, wenn eine Komponente bis dahin voraussichtlich kritisch wird
   (`compute_wear(..., as_of=predicted_date)`), obwohl sie **heute** noch nicht kritisch ist —
   ist sie das schon, deckt (2) den Fall bereits ab, keine doppelte Mail. `tasks.py` liegt
@@ -770,6 +780,10 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   `as_of`-Projektion der Tage-Achse, `unknown` ohne Grenzen), `MaintenanceIntervalLogViewTests`
   (`/log/` setzt Baseline zurück + hängt `MaintenanceLog` an, explizite Werte,
   Athleten-Scoping, Ad-hoc-Intervall anlegen/löschen).
+- `app_maintenance/test_next_ride.py`: `NextRideForecastTests` (ohne genug Fahrten keine
+  Prognose, aber `ride_count`/`min_rides`; Datum/Strecke/`days_until`; ein Teil, das die
+  nächste Fahrt über die Grenze schiebt, erscheint, ein weit entferntes nicht; Intervalle
+  werden um die Strecke projiziert; Pause → `is_overdue`; fremdes Rad 404, Auth).
 - `app_maintenance/test_ride_wear_impact.py`: `RideWearBreakdownTests` (Regenfahrt kostet
   mehr als dieselbe Trockenfahrt; Historie: zum Fahrtzeitpunkt montierte Teile zählen,
   nie montierte Ersatzteile nicht), `RideMultiplierDetailTests`,
