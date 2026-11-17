@@ -30,13 +30,16 @@ jobs:
         env:
           HOST: ${{ secrets.SERVER_IP }}
           DEPLOY_USER: ${{ secrets.SERVER_USER }}
+          # Nach dem Umzug auf einen eigenen App-User (siehe Server-Anleitung)
+          # nur die Repo-Variable APP_DIR setzen, z. B. /srv/kudoscare.
+          APP_DIR: ${{ vars.APP_DIR || '/home/marc/projects/kudo_care/kudos_care_backend' }}
         run: |
           set -uo pipefail
 
           cat > /tmp/remote_deploy.sh <<'REMOTE'
           set -e
 
-          cd /home/marc/projects/kudo_care/kudos_care_backend
+          cd "$APP_DIR"
 
           echo "=== Git Pull ==="
           git fetch origin dev
@@ -61,14 +64,19 @@ jobs:
           rsync -a --delete static/ /var/www/kudoscare-static/
 
           echo "=== Restart ==="
-          sudo supervisorctl restart gunicorn celery celery-beat
+          # Einzeln, weil sudoers nur genau diese drei Befehle ohne Passwort erlaubt
+          # (/etc/sudoers.d/marc-deploy). -n: lieber sofort scheitern als auf ein
+          # Passwort warten.
+          sudo -n /usr/bin/supervisorctl restart gunicorn
+          sudo -n /usr/bin/supervisorctl restart celery
+          sudo -n /usr/bin/supervisorctl restart celery-beat
 
           echo "=== Fertig ==="
           REMOTE
 
           for attempt in 1 2 3 4 5; do
             if ssh -i "$HOME/.ssh/id_deploy" -o ConnectTimeout=15 -o BatchMode=yes \
-                 "$DEPLOY_USER@$HOST" bash -s < /tmp/remote_deploy.sh; then
+                 "$DEPLOY_USER@$HOST" "APP_DIR='$APP_DIR' bash -s" < /tmp/remote_deploy.sh; then
               echo "Deploy erfolgreich (Versuch $attempt)"
               exit 0
             fi
