@@ -556,7 +556,8 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   (Token-Refresh + einmaliger Retry bei 401): `POST /api/radcomputer/upload/` (TCX/GPX/FIT,
   multipart) → Strava `/uploads`, `GET upload/<id>/` → Verarbeitungsstand,
   `GET routes/` → gespeicherte Routen des Athleten (Radrouten zuerst, IDs als String, weil
-  länger als JS-Zahlen), `GET routes/<id>/gpx/` → GPX. Der Upload reicht `commute`,
+  länger als JS-Zahlen, `polyline` = Stravas `summary_polyline` für den Umriss in der Liste,
+  leer ohne Kartendaten), `GET routes/<id>/gpx/` → GPX. Der Upload reicht `commute`,
   `trainer` und `description` an Strava durch; was `/uploads` nicht annimmt (`sport_type`,
   `gear_id`, `hide_from_home`), setzt danach `POST activities/<id>/complete/` per
   `PUT /activities/{id}`. Das Rad muss ein eigenes `Bike` mit dieser `strava_bike_id` sein

@@ -130,12 +130,16 @@ class RadcomputerTests(APITestCase):
                     "name": "Runde",
                     "type": 1,
                     "distance": 42000,
+                    "map": {"summary_polyline": "_p~iF~ps|U_ulLnnqC"},
                 },
             ]
         )
         res = self.client.get("/api/radcomputer/routes/")
         self.assertEqual([r["name"] for r in res.data["routes"]], ["Runde", "Lauf"])
         self.assertEqual(res.data["routes"][0]["id"], "3344556677889900113")
+        # Umriss für die Liste; ohne `map` bleibt das Feld leer statt zu fehlen
+        self.assertEqual(res.data["routes"][0]["polyline"], "_p~iF~ps|U_ulLnnqC")
+        self.assertEqual(res.data["routes"][1]["polyline"], "")
         self.assertIn("/athletes/4711/routes", request.call_args.args[1])
 
     @patch("app_auth.api.utils.requests.request", return_value=fake(content=b"<gpx/>"))

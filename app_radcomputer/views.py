@@ -274,6 +274,8 @@ class RouteListView(RadcomputerView):
                 "ride": r.get("type") == 1,
                 "private": bool(r.get("private")),
                 "updated_at": r.get("updated_at"),
+                # Grobe Form der Strecke (Google-Polyline) für den Umriss in der Liste
+                "polyline": (r.get("map") or {}).get("summary_polyline") or "",
             }
             for r in res.json()
         ]
