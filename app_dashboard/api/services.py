@@ -413,7 +413,17 @@ def predict_next_ride_km(bike: Bike) -> float | None:
 class WeatherService:
     @staticmethod
     def get_historical_weather(lat, lon, date):
-        """Ruft das historische Wetter für einen Punkt an einem Datum ab."""
+        """
+        Ruft das historische Wetter für einen Punkt an einem Datum ab.
+
+        `timezone=auto` ist Pflicht: `Ride.start_date` kommt aus Stravas
+        `start_date_local` — Ortszeit, trotz des angehängten `Z`. Ohne den Parameter
+        antwortet Open-Meteo in UTC, und das Wetterfenster jeder Fahrt lag um den
+        UTC-Abstand daneben (im Winter eine, im Sommer zwei Stunden zu spät). Ein
+        Schauer während der Fahrt fiel so regelmäßig aus dem Fenster. Mit `auto`
+        liefert Open-Meteo die Stunden in Ortszeit ohne Zonenangabe, `_to_aware()`
+        liest sie wie `start_date` als „UTC" — beide Seiten zählen dieselbe Uhr.
+        """
         url = "https://archive-api.open-meteo.com/v1/archive"
         params = {
             "latitude": lat,
@@ -421,6 +431,7 @@ class WeatherService:
             "start_date": date,
             "end_date": date,
             "hourly": "temperature_2m,precipitation,wind_speed_10m,wind_direction_10m",
+            "timezone": "auto",
         }
         try:
             response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)

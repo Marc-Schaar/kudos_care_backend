@@ -9,7 +9,8 @@ und das Frontend bietet das Nachholen an.
 Dazu Einstellungen und gespeicherte Orte des Radcomputers (Orte nur verschlüsselt) sowie
 der aktuelle Wind am Standort (Open-Meteo, nur mit Wetter-Einwilligung).
 
-Eine hochgeladene Fahrt landet über den Strava-Webhook automatisch auch in Kudos Care.
+Eine hochgeladene Fahrt importiert `ActivityCompleteView` direkt nach Kudos Care; der
+Strava-Webhook wäre der zweite Weg, läuft aber nicht zuverlässig (siehe CLAUDE.md).
 """
 
 import logging
@@ -27,10 +28,18 @@ from rest_framework.views import APIView
 from app_auth.api.utils import strava_request
 from app_auth.consent import has_weather_consent
 from app_auth.models import StravaProfile
+from app_dashboard.models import Ride
+from app_maintenance.api.tasks import recompute_weather_wear_for_bike
+from app_maintenance.models import Bike
+from app_strava_webhook.api.tasks import process_strava_webhook
 
 from .crypto import InvalidToken
 from .models import RadcomputerSettings, SavedPlace
-from .serializers import RadcomputerSettingsSerializer, SavedPlaceSerializer
+from .serializers import (
+    ActivityCompleteSerializer,
+    RadcomputerSettingsSerializer,
+    SavedPlaceSerializer,
+)
 
 logger = logging.getLogger("my_app_debug")
 
@@ -79,12 +88,18 @@ def _scope_missing() -> Response:
     )
 
 
+def _flag(request, key: str) -> str:
+    return "1" if str(request.data.get(key, "0")).lower() in ("1", "true") else "0"
+
+
 class UploadView(RadcomputerView):
     """
-    POST /api/radcomputer/upload/   multipart: file, data_type, name, commute, external_id
+    POST /api/radcomputer/upload/   multipart: file, data_type, name, commute, trainer,
+                                    description, external_id
 
     Strava verarbeitet die Datei danach im Hintergrund; den Ausgang liefert
-    GET /api/radcomputer/upload/<id>/.
+    GET /api/radcomputer/upload/<id>/. Was der Upload nicht kennt (Radtyp, Rad, Feed),
+    setzt danach POST /api/radcomputer/activities/<id>/complete/.
     """
 
     parser_classes = [MultiPartParser]
@@ -107,11 +122,9 @@ class UploadView(RadcomputerView):
             data={
                 "data_type": data_type,
                 "name": str(request.data.get("name", "")).strip()[:255] or "Radfahrt",
-                "commute": (
-                    "1"
-                    if str(request.data.get("commute", "0")) in ("1", "true")
-                    else "0"
-                ),
+                "description": str(request.data.get("description", "")).strip()[:2000],
+                "commute": _flag(request, "commute"),
+                "trainer": _flag(request, "trainer"),
                 "external_id": str(request.data.get("external_id", ride_file.name))[
                     :255
                 ],
@@ -159,6 +172,77 @@ def _upload_response(res) -> Response:
             status.HTTP_201_CREATED if res.status_code == 201 else status.HTTP_200_OK
         ),
     )
+
+
+class ActivityCompleteView(RadcomputerView):
+    """
+    POST /api/radcomputer/activities/<id>/complete/   {sport_type?, gear_id?, hide_from_home?}
+
+    Schließt einen Upload ab, sobald Strava die Aktivitäts-Id kennt:
+
+    1. Trägt nach, was Stravas Upload-Endpunkt nicht annimmt (Radtyp, Rad, „im Feed
+       ausblenden"), per `PUT /activities/{id}`. Das Rad muss eines der eigenen Räder in
+       Kudos Care sein — es entscheidet, welche Teile die Fahrt verschleißt.
+    2. Importiert die Fahrt sofort nach Kudos Care, statt auf den Webhook zu warten.
+       Ist sie schon da (Webhook war schneller), wird nur das Rad nachgezogen und der
+       Wetter-Verschleiß beider Räder neu gerechnet.
+
+    Ohne Felder bleibt es beim Import. Ob die Aktivität dem Athleten gehört, prüft die
+    Strava-Antwort selbst (fremde Aktivitäten liefern 403/404).
+    """
+
+    def post(self, request, activity_id: int):
+        profile = self.get_athlete()
+        if not profile.has_scope("activity:write"):
+            return _scope_missing()
+        serializer = ActivityCompleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        changes = dict(serializer.validated_data)
+
+        bike = None
+        if "gear_id" in changes:
+            bike = Bike.objects.filter(
+                athlete=profile, strava_bike_id=changes["gear_id"]
+            ).first()
+            if bike is None:
+                return _error("Dieses Rad ist in Kudos Care nicht bekannt.", 400)
+
+        if changes:
+            res, err = self.strava(
+                profile, "PUT", f"/activities/{activity_id}", json=changes
+            )
+        else:
+            res, err = self.strava(profile, "GET", f"/activities/{activity_id}")
+        if err:
+            return err
+        if res.status_code in (403, 404):
+            return _error("Aktivität nicht gefunden.", 404)
+        if res.status_code >= 400:
+            return _error(f"Strava antwortet mit HTTP {res.status_code}.", 502)
+
+        ride = Ride.objects.filter(strava_id=activity_id, athlete=profile).first()
+        if ride is None:
+            process_strava_webhook.delay(
+                {
+                    "object_id": activity_id,
+                    "owner_id": profile.strava_athlete_id,
+                    "aspect_type": "create",
+                }
+            )
+        elif bike is not None and ride.bike_id != bike.pk:
+            previous = ride.bike_id
+            ride.bike = bike
+            ride.save(update_fields=["bike"])
+            for bike_id in {previous, bike.pk} - {None}:
+                recompute_weather_wear_for_bike.delay(bike_id)
+
+        return Response(
+            {
+                "activity_id": activity_id,
+                "applied": sorted(changes),
+                "imported": ride is not None,
+            }
+        )
 
 
 class RouteListView(RadcomputerView):
@@ -331,7 +415,8 @@ class WindView(RadcomputerView):
     """
     GET /api/radcomputer/wind/?lat=..&lon=..  — aktueller Wind am Standort.
 
-    Antwort: {speed_kmh, gusts_kmh, direction_deg, observed_at, lat, lon}. `direction_deg`
+    Antwort: {speed_kmh, gusts_kmh, direction_deg, temperature_c, precipitation_mm,
+    observed_at, lat, lon}. `precipitation_mm` ist die Summe der letzten 15 Minuten. `direction_deg`
     ist meteorologisch, also die Richtung, AUS der der Wind kommt (0 = Nord), wie in
     `app_dashboard/api/wind.py`. `lat`/`lon` sind die gerundeten Koordinaten, für die
     der Wert gilt.
@@ -370,7 +455,13 @@ def _fetch_wind(lat: float, lon: float) -> dict | None:
             params={
                 "latitude": lat,
                 "longitude": lon,
-                "current": "wind_speed_10m,wind_direction_10m,wind_gusts_10m",
+                # Temperatur und Niederschlag kommen im selben Abruf mit: Die
+                # Datenfelder „Temperatur" und „Regen jetzt" kosten so keinen
+                # zweiten Weg zu Open-Meteo.
+                "current": (
+                    "wind_speed_10m,wind_direction_10m,wind_gusts_10m,"
+                    "temperature_2m,precipitation"
+                ),
                 "wind_speed_unit": "kmh",
                 "timezone": "GMT",
             },
@@ -390,10 +481,18 @@ def _fetch_wind(lat: float, lon: float) -> dict | None:
         logger.warning("Open-Meteo lieferte keinen aktuellen Wind")
         return None
     gusts = current.get("wind_gusts_10m")
+    temperature = current.get("temperature_2m")
+    precipitation = current.get("precipitation")
     observed = current.get("time")
     return {
         "speed_kmh": float(speed),
         "gusts_kmh": float(gusts) if isinstance(gusts, (int, float)) else None,
+        "temperature_c": (
+            float(temperature) if isinstance(temperature, (int, float)) else None
+        ),
+        "precipitation_mm": (
+            float(precipitation) if isinstance(precipitation, (int, float)) else None
+        ),
         "direction_deg": float(direction) % 360,
         # timezone=GMT: Open-Meteo liefert die Zeit ohne Zonenangabe.
         "observed_at": f"{observed}Z" if isinstance(observed, str) else None,

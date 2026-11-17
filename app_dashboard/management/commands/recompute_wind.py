@@ -28,10 +28,12 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
 
+        # Auch Fahrten ohne GPS-Stream: ihr Wetter (Regen, Temperatur) hängt nicht am
+        # Stream, und es lag bis zum Zeitzonen-Fix ebenso daneben wie bei allen anderen
+        # (siehe WeatherService.get_historical_weather). Der Wind fällt für sie auf die
+        # Start-Ziel-Gerade zurück, wie beim Import.
         rides = Ride.objects.filter(
             start_latlng__isnull=False,
-            track__isnull=False,
-            streams__isnull=False,
             athlete__weather_consent_at__isnull=False,
         ).select_related("streams")
 
@@ -55,10 +57,15 @@ class Command(BaseCommand):
                 )
                 continue
 
-            stream_data = {
-                "latlng": {"data": ride.streams.latlngs},
-                "time": {"data": ride.streams.time_series},
-            }
+            stream = getattr(ride, "streams", None)
+            stream_data = (
+                {
+                    "latlng": {"data": stream.latlngs},
+                    "time": {"data": stream.time_series},
+                }
+                if stream
+                else {}
+            )
 
             segments, _wind_source = compute_ride_wind(
                 ride, (weather_info or {}).get("hourly") or {}, stream_data
@@ -81,8 +88,9 @@ class Command(BaseCommand):
                 ride.save(update_fields=["weather_data"])
                 # RideStream.avg_headwind spiegelt denselben Wert und lief bisher
                 # beim Backfill auseinander — hier mitziehen.
-                ride.streams.avg_headwind = avg_headwind
-                ride.streams.save(update_fields=["avg_headwind"])
+                if stream:
+                    stream.avg_headwind = avg_headwind
+                    stream.save(update_fields=["avg_headwind"])
                 self.stdout.write(
                     f"Ride {ride.id} ({ride.name}): avg_headwind {old_avg} -> {avg_headwind}"
                 )

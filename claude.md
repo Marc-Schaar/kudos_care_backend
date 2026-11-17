@@ -108,7 +108,14 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   Wetter-Verschleiß-Erklärung — App-Grenze bewusst überschritten statt dupliziert).
   Celery-Task `run_strava_sync` in `api/tasks.py`. Management-Command `recompute_wind.py`
   (Backfill, `--dry-run`) — rechnet `weather_data` inkl. Windrichtung und
-  `RideStream.avg_headwind` neu. `GET /api/activities/<id>/` liefert neben
+  `RideStream.avg_headwind` neu, auch für Fahrten ohne GPS-Stream (Wind dann grob).
+  **`WeatherService.get_historical_weather` fragt mit `timezone=auto`**: `Ride.start_date`
+  ist Stravas `start_date_local`, also Ortszeit trotz `Z`. Ohne den Parameter kamen die
+  Stunden in UTC, und das Wetterfenster jeder Fahrt lag um den UTC-Abstand daneben (Winter
+  1 h, Sommer 2 h zu spät) — Regenfahrten erschienen trocken. Mit `auto` liefert
+  Open-Meteo Ortszeit ohne Zone, `_to_aware()` liest beide Seiten als „UTC“. Altfahrten
+  korrigiert erst `recompute_wind`, danach `recompute_weather_wear` (der Wetter-Verschleiß
+  hängt an `weather_data`) — beides gehört zum Deploy dieser Änderung. `GET /api/activities/<id>/` liefert neben
   `geo_json_full` (nur noch für die Bounds) das Feld `wind_segments`: eine
   GeoJSON-FeatureCollection mit einem Feature je Abschnitt
   (`headwind`/`wind_direction`/`bearing`/`precipitation`), die das Frontend direkt
@@ -549,20 +556,32 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   (Token-Refresh + einmaliger Retry bei 401): `POST /api/radcomputer/upload/` (TCX/GPX/FIT,
   multipart) → Strava `/uploads`, `GET upload/<id>/` → Verarbeitungsstand,
   `GET routes/` → gespeicherte Routen des Athleten (Radrouten zuerst, IDs als String, weil
-  länger als JS-Zahlen), `GET routes/<id>/gpx/` → GPX. Upload braucht `activity:write`;
+  länger als JS-Zahlen), `GET routes/<id>/gpx/` → GPX. Der Upload reicht `commute`,
+  `trainer` und `description` an Strava durch; was `/uploads` nicht annimmt (`sport_type`,
+  `gear_id`, `hide_from_home`), setzt danach `POST activities/<id>/complete/` per
+  `PUT /activities/{id}`. Das Rad muss ein eigenes `Bike` mit dieser `strava_bike_id` sein
+  (400 sonst), `sport_type` nur Rad-Arten. Derselbe Aufruf **importiert die Fahrt sofort**
+  (`process_strava_webhook.delay`), statt auf den Webhook zu warten; ist sie schon da, zieht
+  er nur das Rad nach und rechnet den Wetter-Verschleiß beider Räder neu. Upload braucht `activity:write`;
   der Login fragt es mit an, Strava lässt es aber abwählen — fehlt es in
   `StravaProfile.scope`, antworten Upload-Endpunkte mit 403 `code=scope_missing` und das
-  Frontend holt die Erlaubnis nach. Hochgeladene Fahrten kommen über den
-  Webhook (`app_strava_webhook`) automatisch als `Ride` zurück.
+  Frontend holt die Erlaubnis nach. Hochgeladene Fahrten importiert
+  `activities/<id>/complete/` direkt als `Ride` (siehe oben), der Webhook wäre der zweite Weg.
   `GET wind/?lat=&lon=` liefert den **aktuellen** Wind am Standort (Open-Meteo-Forecast,
-  `speed_kmh`/`gusts_kmh`/`direction_deg` meteorologisch = woher, wie `api/wind.py`). Live-
+  `speed_kmh`/`gusts_kmh`/`direction_deg` meteorologisch = woher, wie `api/wind.py`), aus
+  demselben Abruf außerdem `temperature_c` und `precipitation_mm` (Summe der letzten
+  15 Minuten) für die Datenfelder „Temperatur“ und „Regen jetzt“. Live-
   Koordinaten an einen Dritten → nur mit Wetter-Einwilligung (403
   `weather_consent_required`, nichts verlässt den Server). Koordinaten werden auf 2
   Nachkommastellen (~1 km) gerundet, bevor sie rausgehen; das ist zugleich der
   Cache-Schlüssel (10 min, Djangos Default-Cache). Open-Meteo-Ausfall → 502, wird nicht
   gecacht. Koordinaten nie loggen. Der Radcomputer fragt alle 10 min bzw. 5 km neu.
   Dazu zwei Models, beide per CASCADE am `StravaProfile` (Kontolöschung räumt sie mit
-  ab): `RadcomputerSettings` (1:1, explizite Felder mit Choices/Bereichen statt JSON;
+  ab): `RadcomputerSettings` (1:1, explizite Felder mit Choices/Bereichen statt JSON —
+  einzige Ausnahme `data_pages`, die frei belegten Datenseiten als
+  `[{name, fields: [...]}]`: Seitenzahl und Felder sind frei, der Serializer prüft nur
+  Form und Schlüsselformat, nicht die Feldnamen, damit ein neues Client-Feld keine
+  Backend-Änderung braucht; dazu `map_style` und `bell_button`;
   `GET|PUT settings/`, `PUT` ist ein partielles Upsert, `GET` liefert ohne Datensatz die
   Defaults mit `stored: false`) und `SavedPlace` (feste Ziele, `GET|POST places/`,
   `DELETE places/<id>/`, max. 50, `POST` mit vorhandenem Namen ersetzt). **Name und
@@ -582,7 +601,7 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
 "api/"          -> app_auth             (/api/strava/auth|me|logout/)
 "api/"          -> app_dashboard        (/api/strava/sync*, /api/activities/*)
 "api/"          -> app_maintenance      (/api/maintenance/*)
-"api/radcomputer/" -> app_radcomputer  (/api/radcomputer/upload|routes|wind|settings|places/*)
+"api/radcomputer/" -> app_radcomputer  (/api/radcomputer/upload|activities|routes|wind|settings|places/*)
 ```
 
 ## Auth-Flow
@@ -690,6 +709,9 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   `run_strava_sync`-Task (Success, 403-Reconnect, Generic-Failure) via `unittest.mock`,
   `ActivitySummaryViewTests` (KI-Fahrt-Zusammenfassung, Caching/Refresh, `requests.post`
   gemockt über `app_maintenance.api.ai_providers.requests.post`).
+- `app_dashboard/test_weather_timezone.py`: Open-Meteo wird mit `timezone=auto` gefragt,
+  ein Schauer während der Fahrt landet im Fenster der Fahrt, der Backfill erfasst auch
+  Fahrten ohne GPS-Stream.
 - `app_dashboard/test_wind.py`: reine Formel-Tests (`SimpleTestCase`, keine DB) für
   `api/wind.py`. Kernfall ist `OutAndBackTests` — Hin-und-Rück-Route bei konstantem Wind
   muss auf dem Hinweg Gegenwind, auf dem Rückweg Rückenwind und im Mittel ~0 liefern;
@@ -851,6 +873,10 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
   `AccountDeletionTests` (Bestätigung ist Pflicht, Löschen entfernt User, Profil, Bikes,
   Rides und Komponenten, Session ist danach weg, fremde Athleten bleiben unberührt).
   Keine Tests für `app_strava_webhook`.
+- `app_radcomputer/tests.py`: Upload/Routen/Token-Refresh, Einstellungen, Orte (verschlüsselt),
+  Wind; `RadcomputerLayoutSettingsTests` (Kartenstil, `data_pages` nur nach Form geprüft,
+  unbekannte Feldschlüssel erlaubt) und `ActivityCompleteTests` (Tags per PUT, sofortiger
+  Import, fremdes Rad/fremde Aktivität abgelehnt, schon importierte Fahrt wechselt das Rad).
 
 ---
 

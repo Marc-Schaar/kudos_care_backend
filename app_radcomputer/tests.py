@@ -304,6 +304,8 @@ def open_meteo(current: dict | None = None, status: int = 200) -> Mock:
                 "wind_speed_10m": 18.4,
                 "wind_direction_10m": 250,
                 "wind_gusts_10m": 33.1,
+                "temperature_2m": 7.5,
+                "precipitation": 0.4,
             }
         )
     }
@@ -341,6 +343,8 @@ class WindTests(APITestCase):
             {
                 "speed_kmh": 18.4,
                 "gusts_kmh": 33.1,
+                "temperature_c": 7.5,
+                "precipitation_mm": 0.4,
                 "direction_deg": 250.0,
                 "observed_at": "2026-11-15T10:45Z",
                 "lat": 51.23,
@@ -403,3 +407,177 @@ class WindTests(APITestCase):
         self.client.logout()
         self.assertIn(self.wind().status_code, (401, 403))
         get.assert_not_called()
+
+
+class RadcomputerLayoutSettingsTests(APITestCase):
+    """Kartenstil und frei belegbare Datenseiten."""
+
+    def setUp(self):
+        self.user = User.objects.create(username="strava_4712")
+        self.profile = StravaProfile.objects.create(
+            user=self.user,
+            strava_athlete_id=4712,
+            access_token="a",
+            refresh_token="r",
+            expires_at=0,
+        )
+        login_as(self.client, self.user, 4712)
+
+    def put(self, body):
+        return self.client.put("/api/radcomputer/settings/", body, format="json")
+
+    def test_defaults_to_cycling_map_and_client_layout(self):
+        res = self.client.get("/api/radcomputer/settings/")
+        self.assertEqual(res.data["map_style"], "cyclosm")
+        self.assertEqual(res.data["data_pages"], [])
+
+    def test_stores_pages_and_trims_names(self):
+        pages = [
+            {"name": " Tempo ", "fields": ["speed", "power3s", "hr"]},
+            {"name": "Klingel", "fields": ["bell"]},
+        ]
+        res = self.put({"data_pages": pages, "map_style": "topo"})
+        self.assertEqual(res.status_code, 200)
+        stored = RadcomputerSettings.objects.get(profile=self.profile)
+        self.assertEqual(stored.map_style, "topo")
+        self.assertEqual(
+            stored.data_pages[0], {"name": "Tempo", "fields": pages[0]["fields"]}
+        )
+
+    def test_unknown_field_keys_pass_so_new_client_fields_need_no_backend(self):
+        res = self.put({"data_pages": [{"name": "Neu", "fields": ["somethingNew2"]}]})
+        self.assertEqual(res.status_code, 200)
+
+    def test_rejects_malformed_layouts(self):
+        too_many_pages = [{"name": f"S{i}", "fields": ["speed"]} for i in range(9)]
+        bad = [
+            {"data_pages": "speed"},
+            {"data_pages": too_many_pages},
+            {"data_pages": [{"name": "Leer", "fields": []}]},
+            {"data_pages": [{"name": "Viel", "fields": ["speed"] * 9}]},
+            {"data_pages": [{"name": "", "fields": ["speed"]}]},
+            {"data_pages": [{"name": "x" * 21, "fields": ["speed"]}]},
+            {"data_pages": [{"name": "Böse", "fields": ["<script>"]}]},
+            {"data_pages": [{"name": "Zahl", "fields": [3]}]},
+            {"map_style": "satellite"},
+        ]
+        for body in bad:
+            self.assertEqual(self.put(body).status_code, 400, body)
+
+
+class ActivityCompleteTests(APITestCase):
+    """Tags nach dem Upload nachtragen und die Fahrt sofort importieren."""
+
+    def setUp(self):
+        from app_maintenance.models import Bike, BikeType
+
+        self.user = User.objects.create(username="strava_4713")
+        self.profile = StravaProfile.objects.create(
+            user=self.user,
+            strava_athlete_id=4713,
+            access_token="acc",
+            refresh_token="ref",
+            expires_at=int(time.time()) + 3600,
+            scope="activity:read_all,activity:write",
+        )
+        self.bike = Bike.objects.create(
+            athlete=self.profile,
+            strava_bike_id="b77",
+            name="Gravel",
+            bike_type=BikeType.ROAD,
+        )
+        login_as(self.client, self.user, 4713)
+
+    def complete(self, body=None):
+        return self.client.post(
+            "/api/radcomputer/activities/555/complete/", body or {}, format="json"
+        )
+
+    @patch("app_radcomputer.views.process_strava_webhook.delay")
+    @patch("app_auth.api.utils.requests.request")
+    def test_puts_tags_to_strava_and_queues_import(self, request, delay):
+        request.return_value = fake(json={"id": 555, "athlete": {"id": 4713}})
+        res = self.complete(
+            {"sport_type": "GravelRide", "gear_id": "b77", "hide_from_home": True}
+        )
+        self.assertEqual(res.status_code, 200)
+        method, url = request.call_args.args
+        self.assertEqual(
+            (method, url), ("PUT", "https://www.strava.com/api/v3/activities/555")
+        )
+        self.assertEqual(
+            request.call_args.kwargs["json"],
+            {"sport_type": "GravelRide", "gear_id": "b77", "hide_from_home": True},
+        )
+        self.assertEqual(
+            res.data["applied"], ["gear_id", "hide_from_home", "sport_type"]
+        )
+        delay.assert_called_once_with(
+            {"object_id": 555, "owner_id": 4713, "aspect_type": "create"}
+        )
+
+    @patch("app_radcomputer.views.process_strava_webhook.delay")
+    @patch("app_auth.api.utils.requests.request")
+    def test_without_tags_only_checks_and_imports(self, request, delay):
+        request.return_value = fake(json={"id": 555})
+        res = self.complete()
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(request.call_args.args[0], "GET")
+        delay.assert_called_once()
+
+    @patch("app_auth.api.utils.requests.request")
+    def test_rejects_bike_that_is_not_the_athletes(self, request):
+        res = self.complete({"gear_id": "someone-elses"})
+        self.assertEqual(res.status_code, 400)
+        request.assert_not_called()
+
+    def test_rejects_non_ride_sport_type(self):
+        self.assertEqual(self.complete({"sport_type": "Run"}).status_code, 400)
+
+    @patch("app_radcomputer.views.process_strava_webhook.delay")
+    @patch("app_auth.api.utils.requests.request", return_value=fake(404))
+    def test_foreign_activity_is_not_imported(self, _request, delay):
+        self.assertEqual(self.complete().status_code, 404)
+        delay.assert_not_called()
+
+    @patch("app_radcomputer.views.recompute_weather_wear_for_bike.delay")
+    @patch("app_radcomputer.views.process_strava_webhook.delay")
+    @patch("app_auth.api.utils.requests.request")
+    def test_already_imported_ride_moves_to_the_chosen_bike(
+        self, request, delay, recompute
+    ):
+        from app_dashboard.models import Ride
+
+        ride = Ride.objects.create(strava_id=555, name="Schon da", athlete=self.profile)
+        request.return_value = fake(json={"id": 555})
+        res = self.complete({"gear_id": "b77"})
+        self.assertTrue(res.data["imported"])
+        ride.refresh_from_db()
+        self.assertEqual(ride.bike, self.bike)
+        delay.assert_not_called()
+        recompute.assert_called_once_with(self.bike.pk)
+
+    def test_requires_write_scope(self):
+        self.profile.scope = "activity:read_all"
+        self.profile.save()
+        res = self.complete()
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data["code"], "scope_missing")
+
+    @patch("app_auth.api.utils.requests.request")
+    def test_upload_forwards_trainer_and_description(self, request):
+        request.return_value = fake(201, {"id": 1, "status": "processing"})
+        file = SimpleUploadedFile("f.tcx", b"<xml/>", content_type="application/xml")
+        self.client.post(
+            "/api/radcomputer/upload/",
+            {
+                "file": file,
+                "data_type": "tcx",
+                "trainer": "true",
+                "description": " Nass ",
+            },
+            format="multipart",
+        )
+        data = request.call_args.kwargs["data"]
+        self.assertEqual((data["trainer"], data["commute"]), ("1", "0"))
+        self.assertEqual(data["description"], "Nass")

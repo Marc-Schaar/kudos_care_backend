@@ -9,6 +9,11 @@ urlpatterns = [
         views.UploadStatusView.as_view(),
         name="radcomputer-upload-status",
     ),
+    path(
+        "activities/<int:activity_id>/complete/",
+        views.ActivityCompleteView.as_view(),
+        name="radcomputer-activity-complete",
+    ),
     path("routes/", views.RouteListView.as_view(), name="radcomputer-routes"),
     path(
         "routes/<str:route_id>/gpx/",

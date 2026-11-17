@@ -32,6 +32,13 @@ class RadcomputerSettings(models.Model):
         TREKKING = "trekking"
         FASTBIKE = "fastbike"
 
+    class MapStyle(models.TextChoices):
+        # OSM-Standard, CyclOSM (Radwege, Belag, Radinfrastruktur), OpenTopoMap
+        # (Höhenlinien und Schummerung, für Gravel/MTB). Alle ohne API-Schlüssel.
+        OSM = "osm"
+        CYCLOSM = "cyclosm"
+        TOPO = "topo"
+
     profile = models.OneToOneField(
         StravaProfile, on_delete=models.CASCADE, related_name="radcomputer_settings"
     )
@@ -57,6 +64,17 @@ class RadcomputerSettings(models.Model):
     )
     show_status_bar = models.BooleanField(default=True)
     show_controls = models.BooleanField(default=True)
+    # Klingel in der Bedienleiste der Fahrt (sonst nur als Datenfeld und auf der Karte).
+    bell_button = models.BooleanField(default=True)
+    map_style = models.CharField(
+        max_length=10, choices=MapStyle.choices, default=MapStyle.CYCLOSM
+    )
+    # Eigene Belegung der Datenseiten: [{"name": "Fahrt", "fields": ["speed", ...]}].
+    # Bewusst JSON statt Einzelfelder: Seitenzahl und Felder je Seite sind frei. Der
+    # Serializer prüft nur die Form und das Schlüsselformat, nicht die Feldnamen —
+    # der Client kennt die Felder und überspringt unbekannte, damit ein neues Feld
+    # keine Backend-Änderung braucht. Leer = Standardbelegung des Clients.
+    data_pages = models.JSONField(default=list, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
