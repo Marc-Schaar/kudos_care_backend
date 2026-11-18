@@ -19,6 +19,7 @@ class UserSettingsSerializer(serializers.Serializer):
     email = serializers.EmailField(required=False, allow_blank=True)
     email_notifications_enabled = serializers.BooleanField(required=False)
     weather_consent = serializers.BooleanField(required=False)
+    route_weather_consent = serializers.BooleanField(required=False)
     ai_consent = serializers.BooleanField(required=False)
 
     def validate(self, attrs):

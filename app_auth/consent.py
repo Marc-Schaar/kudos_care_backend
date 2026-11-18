@@ -2,9 +2,12 @@
 Einwilligungen in die Weitergabe von Nutzerdaten an Dritte.
 
 Stravas API Agreement verbietet, Daten eines Nutzers ohne ausdrückliche Einwilligung an
-Dritte zu geben. Betroffen sind zwei Dinge, die sich getrennt schalten lassen:
+Dritte zu geben. Betroffen sind drei Dinge, die sich getrennt schalten lassen:
 
 - Wetter: Startkoordinaten und Datum jeder Fahrt gehen an Open-Meteo.
+- Regen entlang der Strecke: zusätzlich auf rund 1 km gerundete Streckenpunkte an Open-Meteo.
+  Baut auf der Wetter-Einwilligung auf und endet mit ihr. Eine GPS-Strecke verrät mehr als ein
+  Startpunkt, deshalb gilt die Wetter-Einwilligung allein dafür nicht.
 - KI: Fahrtname, Datum, Kennzahlen, Rad- und Teilenamen gehen an Gemini oder Groq.
 
 Die Prüfung gehört direkt vor den Aufruf des Anbieters, nicht an den Anfang der View: eine
@@ -35,3 +38,9 @@ def has_ai_consent(profile: StravaProfile) -> bool:
 
 def has_weather_consent(profile: StravaProfile) -> bool:
     return profile.weather_consent_at is not None
+
+
+def has_route_weather_consent(profile: StravaProfile) -> bool:
+    return has_weather_consent(profile) and (
+        profile.route_weather_consent_at is not None
+    )

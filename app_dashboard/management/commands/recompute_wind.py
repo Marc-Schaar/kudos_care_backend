@@ -1,3 +1,5 @@
+import time
+
 from django.core.management.base import BaseCommand
 
 from app_dashboard.api.services import WeatherService
@@ -24,9 +26,16 @@ class Command(BaseCommand):
             action="store_true",
             help="Nur anzeigen, welche Fahrten aktualisiert wuerden, ohne zu speichern.",
         )
+        parser.add_argument(
+            "--pause",
+            type=float,
+            default=0.0,
+            help="Sekunden Pause je Fahrt, um die Limits von Open-Meteo einzuhalten.",
+        )
 
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
+        pause = options["pause"]
 
         # Auch Fahrten ohne GPS-Stream: ihr Wetter (Regen, Temperatur) hängt nicht am
         # Stream, und es lag bis zum Zeitzonen-Fix ebenso daneben wie bei allen anderen
@@ -35,7 +44,7 @@ class Command(BaseCommand):
         rides = Ride.objects.filter(
             start_latlng__isnull=False,
             athlete__weather_consent_at__isnull=False,
-        ).select_related("streams")
+        ).select_related("streams", "athlete")
 
         updated = 0
         skipped = 0
@@ -84,6 +93,12 @@ class Command(BaseCommand):
                     f"avg_headwind {old_avg} -> {avg_headwind}"
                 )
             else:
+                # Scheitert der Abruf, bleibt ein schon gespeicherter Wert erhalten.
+                ride_rain = WeatherService.get_ride_rain(
+                    ride, lat, lon, stream_data
+                ) or (ride.weather_data or {}).get("ride_rain")
+                if ride_rain:
+                    new_weather_data["ride_rain"] = ride_rain
                 ride.weather_data = new_weather_data
                 ride.save(update_fields=["weather_data"])
                 # RideStream.avg_headwind spiegelt denselben Wert und lief bisher
@@ -96,6 +111,8 @@ class Command(BaseCommand):
                 )
 
             updated += 1
+            if pause:
+                time.sleep(pause)
 
         self.stdout.write(
             self.style.SUCCESS(

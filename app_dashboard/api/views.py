@@ -22,6 +22,7 @@ from app_maintenance.api.services import (
 )
 
 from ..models import Ride
+from .ride_rain import ride_precipitation
 from .serializers import RideSerializer, StravaSyncStatusSerializer
 from .services import build_ride_summary_prompt
 from .tasks import run_strava_sync
@@ -140,6 +141,9 @@ class ActivityDetailView(APIView):
                 "bike_name": ride.bike.name if ride.bike else None,
                 "geo_json_full": geo_json,
                 "weather_timeline": ride.weather_data or {},
+                "ride_precipitation": ride_precipitation(
+                    ride.weather_data, ride.start_date, ride.elapsed_time
+                ),
                 "wind_segments": segments_to_geojson(segments, wind_source),
             }
         )

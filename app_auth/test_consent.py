@@ -61,6 +61,60 @@ class ConsentSettingsTests(ConsentTestCase):
         self.assertIsNone(self.profile.ai_consent_at)
 
 
+class RouteWeatherConsentTests(ConsentTestCase):
+    def _weather_on(self):
+        StravaProfile.objects.filter(pk=self.profile.pk).update(
+            weather_consent_at=timezone.now()
+        )
+
+    def test_is_off_even_with_weather_consent(self):
+        self._weather_on()
+        data = self.client.get(ME_URL).json()
+        self.assertTrue(data["weather_consent"])
+        self.assertFalse(data["route_weather_consent"])
+
+    def test_can_be_given_on_top_of_weather_consent(self):
+        self._weather_on()
+        data = self.client.patch(
+            ME_URL, {"route_weather_consent": True}, format="json"
+        ).json()
+        self.assertTrue(data["route_weather_consent"])
+        self.profile.refresh_from_db()
+        self.assertIsNotNone(self.profile.route_weather_consent_at)
+
+    def test_is_refused_without_weather_consent(self):
+        response = self.client.patch(
+            ME_URL, {"route_weather_consent": True}, format="json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], "weather_consent_required")
+        self.profile.refresh_from_db()
+        self.assertIsNone(self.profile.route_weather_consent_at)
+
+    def test_ends_when_weather_consent_is_revoked(self):
+        StravaProfile.objects.filter(pk=self.profile.pk).update(
+            weather_consent_at=timezone.now(),
+            route_weather_consent_at=timezone.now(),
+        )
+        data = self.client.patch(
+            ME_URL, {"weather_consent": False}, format="json"
+        ).json()
+        self.assertFalse(data["route_weather_consent"])
+        self.profile.refresh_from_db()
+        self.assertIsNone(self.profile.route_weather_consent_at)
+
+    def test_can_be_revoked_alone(self):
+        StravaProfile.objects.filter(pk=self.profile.pk).update(
+            weather_consent_at=timezone.now(),
+            route_weather_consent_at=timezone.now(),
+        )
+        data = self.client.patch(
+            ME_URL, {"route_weather_consent": False}, format="json"
+        ).json()
+        self.assertTrue(data["weather_consent"])
+        self.assertFalse(data["route_weather_consent"])
+
+
 class ConsentAtLoginTests(APITestCase):
     def _login(self, **extra):
         response_data = {
@@ -93,9 +147,12 @@ class ConsentAtLoginTests(APITestCase):
 
 class WeatherConsentImportTests(ConsentTestCase):
     @patch("app_dashboard.api.services.StravaStreamService.fetch_activity_streams")
+    @patch("app_dashboard.api.services.WeatherService.get_ride_rain")
     @patch("app_dashboard.api.services.WeatherService.get_historical_weather")
-    def _import(self, weather, streams):
+    def _import(self, weather, ride_rain, streams):
         weather.return_value = None
+        ride_rain.return_value = None
+        self.ride_rain = ride_rain
         streams.return_value = None
         activity = {
             "id": 9001,
@@ -113,6 +170,7 @@ class WeatherConsentImportTests(ConsentTestCase):
 
     def test_no_coordinates_leave_the_server_without_consent(self):
         self._import().assert_not_called()
+        self.ride_rain.assert_not_called()
         self.assertTrue(Ride.objects.filter(strava_id=9001).exists())
 
     def test_weather_is_fetched_with_consent(self):

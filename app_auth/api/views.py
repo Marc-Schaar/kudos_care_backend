@@ -14,7 +14,11 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from app_auth.consent import has_ai_consent, has_weather_consent
+from app_auth.consent import (
+    has_ai_consent,
+    has_route_weather_consent,
+    has_weather_consent,
+)
 from app_auth.mixins import CsrfExemptSessionAuthentication
 from app_auth.models import StravaProfile
 from app_notifications.tasks import send_welcome_email_task
@@ -159,6 +163,7 @@ class CurrentUserView(APIView):
             "email_notifications_enabled": profile.email_notifications_enabled,
             "needs_email": not email,
             "weather_consent": has_weather_consent(profile),
+            "route_weather_consent": has_route_weather_consent(profile),
             "ai_consent": has_ai_consent(profile),
             # Radcomputer: Upload zu Strava und private Routen brauchen eigene Rechte,
             # die erst auf Wunsch erteilt werden (siehe app_radcomputer).
@@ -184,7 +189,20 @@ class CurrentUserView(APIView):
 
         serializer = UserSettingsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
+        data = dict(serializer.validated_data)
+
+        # Die Strecken-Einwilligung baut auf der Wetter-Einwilligung auf.
+        weather_stays_on = data.get("weather_consent", has_weather_consent(profile))
+        if data.get("route_weather_consent") and not weather_stays_on:
+            return Response(
+                {
+                    "error": "Dafür muss zuerst das Wetter eingeschaltet sein.",
+                    "code": "weather_consent_required",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not weather_stays_on:
+            data["route_weather_consent"] = False
 
         user = profile.user
         had_email = bool(user and user.email)
@@ -199,6 +217,7 @@ class CurrentUserView(APIView):
 
         for key, field in (
             ("weather_consent", "weather_consent_at"),
+            ("route_weather_consent", "route_weather_consent_at"),
             ("ai_consent", "ai_consent_at"),
         ):
             if key not in data:

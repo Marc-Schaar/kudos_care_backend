@@ -6,6 +6,7 @@ from django.db.models import Max, Q
 from django.utils import timezone
 
 from app_auth.models import StravaProfile
+from app_dashboard.api.ride_rain import ride_precipitation
 from app_maintenance.models import (
     Bike,
     Component,
@@ -61,7 +62,10 @@ class WeatherWearCalculator:
 
     @staticmethod
     def ride_multiplier_detail(
-        weather_data: dict | None, coeff: WeatherSensitivityCoefficient
+        weather_data: dict | None,
+        coeff: WeatherSensitivityCoefficient,
+        start_date=None,
+        elapsed_time: int | None = None,
     ) -> dict:
         """
         Wie `ride_multiplier()`, gibt zusätzlich die Einzelbeiträge zurück — Basis für
@@ -71,10 +75,13 @@ class WeatherWearCalculator:
         `contributions` sind die Beiträge VOR dem Cap: greift `MAX_MULTIPLIER`, ist ihre
         Summe größer als `multiplier - 1`. Sie taugen daher zur Frage "welche Bedingung
         hat dominiert", nicht als exakte Zerlegung des Endergebnisses.
+
+        Mit `start_date`/`elapsed_time` zählt nur der Regen, der während der Fahrt fiel
+        (`ride_precipitation`).
         """
         weather_data = weather_data or {}
         return WeatherWearCalculator.conditions_multiplier_detail(
-            _mean(weather_data.get("precipitation")),
+            ride_precipitation(weather_data, start_date, elapsed_time),
             _mean(weather_data.get("temperature_2m")),
             _mean(weather_data.get("wind_speed_10m")),
             coeff,
@@ -148,7 +155,10 @@ class WeatherWearCalculator:
 
     @staticmethod
     def ride_multiplier(
-        weather_data: dict | None, coeff: WeatherSensitivityCoefficient
+        weather_data: dict | None,
+        coeff: WeatherSensitivityCoefficient,
+        start_date=None,
+        elapsed_time: int | None = None,
     ) -> float:
         """
         Multiplikator auf die gefahrene Distanz einer einzelnen Fahrt, basierend
@@ -156,9 +166,9 @@ class WeatherWearCalculator:
         Fehlen/leeren eines der drei Arrays -> neutral (1.0x), kein Teilergebnis
         aus nur einem Teil der Daten.
         """
-        return WeatherWearCalculator.ride_multiplier_detail(weather_data, coeff)[
-            "multiplier"
-        ]
+        return WeatherWearCalculator.ride_multiplier_detail(
+            weather_data, coeff, start_date, elapsed_time
+        )["multiplier"]
 
 
 class WeatherWearService:
@@ -205,14 +215,16 @@ class WeatherWearService:
             window_filter,
             bike_id=component.slot.bike_id,
             distance__isnull=False,
-        ).only("distance", "weather_data")
+        ).only("distance", "weather_data", "start_date", "elapsed_time")
 
         total_km = 0.0
         ride_count = 0
         for ride in rides:
             distance_km = ride.distance / 1000
             multiplier = (
-                WeatherWearCalculator.ride_multiplier(ride.weather_data, coeff)
+                WeatherWearCalculator.ride_multiplier(
+                    ride.weather_data, coeff, ride.start_date, ride.elapsed_time
+                )
                 if ride.weather_data
                 else 1.0
             )
@@ -323,7 +335,9 @@ def ride_wear_breakdown(ride) -> dict:
         if coeff is None:
             continue
 
-        detail = WeatherWearCalculator.ride_multiplier_detail(ride.weather_data, coeff)
+        detail = WeatherWearCalculator.ride_multiplier_detail(
+            ride.weather_data, coeff, ride.start_date, ride.elapsed_time
+        )
         multiplier = detail["multiplier"]
         effective_km = distance_km * multiplier
         extra_km = effective_km - distance_km
@@ -371,7 +385,9 @@ def ride_wear_breakdown(ride) -> dict:
         "distance_km": round(distance_km, 1),
         "conditions": {
             "precipitation": _round(
-                _mean((ride.weather_data or {}).get("precipitation"))
+                ride_precipitation(
+                    ride.weather_data, ride.start_date, ride.elapsed_time
+                )
             ),
             "temperature": _round(
                 _mean((ride.weather_data or {}).get("temperature_2m"))

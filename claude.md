@@ -64,8 +64,8 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   über `user__email` — eine Suche verriete die Adresse auch ohne Anzeige, weil ein
   Treffer sie bestätigt) und **nicht in Logs** (bei Versandfehlern steht die
   Athleten-Id; Logdateien leben länger und werden breiter gelesen als die Datenbank).
-  **Einwilligungen** (`app_auth/consent.py`): `StravaProfile.weather_consent_at` und
-  `ai_consent_at` sind Zeitpunkte statt Flags, weil sie der Nachweis sind; `GET|PATCH me/`
+  **Einwilligungen** (`app_auth/consent.py`): `StravaProfile.weather_consent_at`,
+  `route_weather_consent_at` und `ai_consent_at` sind Zeitpunkte statt Flags, weil sie der Nachweis sind; `GET|PATCH me/`
   bilden sie als Bools ab. Stravas API Agreement verbietet die Weitergabe von Nutzerdaten an
   Dritte ohne ausdrückliche Einwilligung. Ohne Wetter-Einwilligung gehen beim Import keine
   Koordinaten an Open-Meteo (`recompute_wind` überspringt solche Nutzer und holt nach einer
@@ -112,7 +112,19 @@ Zugehöriges Frontend: `kudos_care_frontend` (Angular), siehe dessen `CLAUDE.md`
   **`WeatherService.get_historical_weather` fragt mit `timezone=auto`**: `Ride.start_date`
   ist Stravas `start_date_local`, also Ortszeit trotz `Z`. Ohne den Parameter kamen die
   Stunden in UTC, und das Wetterfenster jeder Fahrt lag um den UTC-Abstand daneben (Winter
-  1 h, Sommer 2 h zu spät) — Regenfahrten erschienen trocken. Mit `auto` liefert
+  1 h, Sommer 2 h zu spät) — Regenfahrten erschienen trocken. **`api/ride_rain.py` ist die
+  einzige Quelle für „wie nass war diese Fahrt"** (`ride_precipitation()`): bevorzugt
+  `weather_data["ride_rain"]` (15-Minuten-Werte der Historical-Forecast-API, nativ nur in
+  Mitteleuropa/Nordamerika), sonst die Stundenwerte, gewichtet mit dem Anteil der Fahrt an
+  jeder Stunde. Liste, Detail, Karte (`apply_ride_rain()`), Verschleiß und KI-Texte lesen
+  daraus. Abgefragt wird **der Startpunkt**, das deckt `weather_consent_at` ab. Punkte entlang
+  der Strecke (je Viertelstunde einer, auf ~1 km gerundet, max. 12 je Fahrt) gehen nur mit der
+  eigenen Einwilligung `StravaProfile.route_weather_consent_at` raus, die auf der
+  Wetter-Einwilligung aufbaut und mit ihr endet; geprüft wird in
+  `WeatherService.get_ride_rain()` direkt vor dem Aufruf. Gespeichert werden nur Regenwerte.
+  Altfahrten bekommen `ride_rain` durch `recompute_wind` (für den Backfill mit `--pause`, wegen
+  der Limits von Open-Meteo), danach `recompute_weather_wear`.
+  Mit `auto` liefert
   Open-Meteo Ortszeit ohne Zone, `_to_aware()` liest beide Seiten als „UTC“. Altfahrten
   korrigiert erst `recompute_wind`, danach `recompute_weather_wear` (der Wetter-Verschleiß
   hängt an `weather_data`) — beides gehört zum Deploy dieser Änderung. `GET /api/activities/<id>/` liefert neben
@@ -713,6 +725,9 @@ Kein pytest, sondern DRF `APITestCase` über `python manage.py test`.
 - `app_dashboard/test_weather_timezone.py`: Open-Meteo wird mit `timezone=auto` gefragt,
   ein Schauer während der Fahrt landet im Fenster der Fahrt, der Backfill erfasst auch
   Fahrten ohne GPS-Stream.
+- `app_dashboard/test_ride_rain.py`: Zuordnung der 15-Minuten-Werte, fehlende Werte gelten
+  als unbekannt statt trocken, Stunden-Fallback nach Fahrtanteil, Streckenpunkte nur mit
+  eigener Einwilligung und gerundet, keine Koordinaten im Log.
 - `app_dashboard/test_wind.py`: reine Formel-Tests (`SimpleTestCase`, keine DB) für
   `api/wind.py`. Kernfall ist `OutAndBackTests` — Hin-und-Rück-Route bei konstantem Wind
   muss auf dem Hinweg Gegenwind, auf dem Rückweg Rückenwind und im Mittel ~0 liefern;

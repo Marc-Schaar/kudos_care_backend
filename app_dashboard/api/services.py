@@ -12,12 +12,20 @@ from django.db.models import F
 from shapely.geometry import LineString as ShapelyLineString
 
 from app_auth.api.utils import strava_get
-from app_auth.consent import has_weather_consent
+from app_auth.consent import has_route_weather_consent, has_weather_consent
 from app_auth.models import StravaProfile
 from app_maintenance.api.tasks import recompute_weather_wear_for_bike
 from app_maintenance.models import Bike
 
 from ..models import Ride, RideStream
+from .ride_rain import (
+    SOURCE_ROUTE,
+    build_ride_rain,
+    merge_route_minutely,
+    ride_precipitation,
+    route_rain_locations,
+    to_aware,
+)
 from .wind import (
     average_headwind,
     compute_ride_wind,
@@ -27,6 +35,7 @@ from .wind import (
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 10
+HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 
 # Fahrt-Vorhersage (siehe predict_next_ride_date / app_notifications) — reine
 # Heuristik auf Basis der juengsten Ride-Historie eines Bikes, keine ML-Prognose.
@@ -238,6 +247,11 @@ class StravaImportService:
                 **get_filtered_weather(ride, weather_info, segments),
                 "avg_headwind": avg_headwind,
             }
+            ride_rain = WeatherService.get_ride_rain(
+                ride, start_latlng[0], start_latlng[1], stream_data
+            )
+            if ride_rain:
+                ride.weather_data["ride_rain"] = ride_rain
             ride.save()
 
         # Auch ohne Wetterdaten (Rolle, kein GPS): die Fahrt zählt für die Teile, und
@@ -297,6 +311,8 @@ def build_ride_summary_prompt(ride: Ride) -> tuple[str, str]:
     weather = ride.weather_data or {}
     distance_km = round(ride.distance / 1000, 1) if ride.distance else None
     duration_min = round(ride.elapsed_time / 60) if ride.elapsed_time else None
+    rain = ride_precipitation(weather, ride.start_date, ride.elapsed_time)
+    precipitation = round(rain, 1) if rain is not None else None
 
     system_prompt = (
         "Du bist ein Assistent für eine Fahrrad-Wartungs-App mit Strava-Integration. Du "
@@ -315,7 +331,7 @@ def build_ride_summary_prompt(ride: Ride) -> tuple[str, str]:
         f"Distanz: {distance_km} km\n"
         f"Dauer: {duration_min} Minuten\n"
         f"Durchschnittstemperatur: {_mean(weather.get('temperature_2m'))} °C\n"
-        f"Durchschnittlicher Niederschlag: {_mean(weather.get('precipitation'))} mm/h\n"
+        f"Durchschnittlicher Niederschlag: {precipitation} mm/h\n"
         f"Durchschnittliche Windgeschwindigkeit: {_mean(weather.get('wind_speed_10m'))} km/h\n"
         f"Durchschnittlicher Gegenwind: {weather.get('avg_headwind')} km/h\n"
     )
@@ -440,3 +456,69 @@ class WeatherService:
         except requests.exceptions.RequestException as e:
             logger.error("Wetterdaten-Abruf fehlgeschlagen (%s, %s): %s", lat, lon, e)
             return None
+
+    @staticmethod
+    def get_ride_rain(ride, lat, lon, stream_data=None) -> dict | None:
+        """
+        Regen in 15-Minuten-Schritten für die Dauer der Fahrt.
+
+        Mit `route_weather_consent_at` und GPS-Stream dort, wo die Fahrt gerade war, sonst
+        am Startpunkt. Die Einwilligung wird hier geprüft, direkt vor dem Aufruf.
+
+        Das Archiv kennt nur Stundenwerte, deshalb die Historical-Forecast-API. Nativ
+        viertelstündlich ist sie in Mitteleuropa und Nordamerika, anderswo interpoliert
+        Open-Meteo die Stundenwerte. Ein Fehlschlag kostet nur die Auflösung: Die Fahrt
+        rechnet dann mit den Stundenwerten weiter.
+        """
+        start = to_aware(ride.start_date)
+        if start is None or not ride.elapsed_time:
+            return None
+
+        if stream_data and has_route_weather_consent(ride.athlete):
+            route_rain = WeatherService._get_route_rain(ride, start, stream_data)
+            if route_rain:
+                return route_rain
+
+        forecasts = WeatherService._fetch_minutely(ride, start, [(lat, lon)])
+        if not forecasts:
+            return None
+        return build_ride_rain(start, ride.elapsed_time, forecasts[0])
+
+    @staticmethod
+    def _get_route_rain(ride, start, stream_data) -> dict | None:
+        locations = route_rain_locations(start, ride.elapsed_time, stream_data)
+        places = list(dict.fromkeys((lat, lon) for _, lat, lon in locations))
+        if not places:
+            return None
+        forecasts = WeatherService._fetch_minutely(ride, start, places)
+        if not forecasts or len(forecasts) != len(places):
+            return None
+        minutely = merge_route_minutely(locations, dict(zip(places, forecasts)))
+        return build_ride_rain(start, ride.elapsed_time, minutely, SOURCE_ROUTE)
+
+    @staticmethod
+    def _fetch_minutely(ride, start, places) -> list[dict] | None:
+        """
+        `minutely_15`-Blöcke in der Reihenfolge von `places`. Die Fehlermeldung bleibt aus
+        dem Log, weil die URL darin die Koordinaten enthält.
+        """
+        end = start + timedelta(seconds=ride.elapsed_time)
+        params = {
+            "latitude": ",".join(str(lat) for lat, _ in places),
+            "longitude": ",".join(str(lon) for _, lon in places),
+            "start_date": start.date().isoformat(),
+            "end_date": end.date().isoformat(),
+            "minutely_15": "precipitation",
+            "timezone": "auto",
+        }
+        try:
+            response = requests.get(
+                HISTORICAL_FORECAST_URL, params=params, timeout=REQUEST_TIMEOUT
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.exceptions.RequestException, ValueError):
+            logger.warning("15-Minuten-Regen für Ride %s nicht abrufbar.", ride.pk)
+            return None
+        results = payload if isinstance(payload, list) else [payload]
+        return [result.get("minutely_15") or {} for result in results]

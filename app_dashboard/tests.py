@@ -250,6 +250,10 @@ class SyncActivityToDbWeatherWearHookTests(APITestCase):
 
     @patch("app_dashboard.api.services.recompute_weather_wear_for_bike.delay")
     @patch("app_dashboard.api.services.StravaStreamService.fetch_activity_streams")
+    @patch(
+        "app_dashboard.api.services.WeatherService.get_ride_rain",
+        new=Mock(return_value=None),
+    )
     @patch("app_dashboard.api.services.WeatherService.get_historical_weather")
     def test_enqueues_recompute_when_bike_matched(
         self, mock_weather, mock_streams, mock_delay
@@ -271,6 +275,10 @@ class SyncActivityToDbWeatherWearHookTests(APITestCase):
 
     @patch("app_dashboard.api.services.recompute_weather_wear_for_bike.delay")
     @patch("app_dashboard.api.services.StravaStreamService.fetch_activity_streams")
+    @patch(
+        "app_dashboard.api.services.WeatherService.get_ride_rain",
+        new=Mock(return_value=None),
+    )
     @patch("app_dashboard.api.services.WeatherService.get_historical_weather")
     def test_does_not_enqueue_when_no_bike_matched(
         self, mock_weather, mock_streams, mock_delay

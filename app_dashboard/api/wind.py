@@ -22,7 +22,8 @@ Funktionen bestanden haette.
 import math
 from datetime import datetime, timedelta, timezone
 
-import dateutil.parser
+from .ride_rain import apply_ride_rain
+from .ride_rain import to_aware as _to_aware
 
 EARTH_RADIUS_KM = 6371.0
 
@@ -66,16 +67,6 @@ def calculate_heading(lat1, lon1, lat2, lon2):
     )
 
     return (math.degrees(math.atan2(y, x)) + 360) % 360
-
-
-def _to_aware(value):
-    """ISO-String oder datetime -> timezone-aware datetime (UTC als Default)."""
-    if value is None:
-        return None
-    dt = dateutil.parser.isoparse(value) if isinstance(value, str) else value
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -432,6 +423,10 @@ def compute_ride_wind(
     Einfaerbung ist ein Overlay, kein Existenzgrund fuer die Route.
     """
     has_weather = bool(hourly and hourly.get("time"))
+    weather_data = getattr(ride, "weather_data", None)
+    ride_rain = (
+        weather_data.get("ride_rain") if isinstance(weather_data, dict) else None
+    )
 
     if stream_data is not None:
         latlngs = (stream_data.get("latlng") or {}).get("data") or []
@@ -443,6 +438,7 @@ def compute_ride_wind(
 
     segments = build_wind_segments(latlngs, times, ride.start_date, hourly or {})
     if segments:
+        apply_ride_rain(segments, ride.start_date, ride_rain)
         return segments, (WIND_SOURCE_STREAM if has_weather else WIND_SOURCE_NONE)
 
     track_coords = list(ride.track.coords) if ride.track else []
@@ -451,6 +447,7 @@ def compute_ride_wind(
     )
     if not coarse:
         return [], WIND_SOURCE_NONE
+    apply_ride_rain(coarse, ride.start_date, ride_rain)
     # Ohne Wetterdaten traegt auch der Grob-Abschnitt keinen Gegenwind — dann ist
     # "none" die ehrlichere Auskunft als "coarse".
     usable = coarse[0].get("headwind") is not None

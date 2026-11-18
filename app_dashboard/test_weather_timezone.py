@@ -63,9 +63,10 @@ class RideWeatherWindowTests(TestCase):
 
     @patch("app_dashboard.api.services.recompute_weather_wear_for_bike.delay")
     @patch("app_dashboard.api.services.StravaStreamService.fetch_activity_streams")
+    @patch("app_dashboard.api.services.WeatherService.get_ride_rain", return_value=None)
     @patch("app_dashboard.api.services.WeatherService.get_historical_weather")
     def test_rain_during_the_ride_lands_in_its_window(
-        self, mock_weather, mock_streams, _delay
+        self, mock_weather, _ride_rain, mock_streams, _delay
     ):
         # Fahrt 16:10–17:00 Ortszeit; geregnet hat es 16–17 Uhr (Wert um 17:00).
         # Mit UTC-Stunden stünde der Schauer bei 16:00 und das Fenster bei 17–18 Uhr.
@@ -121,6 +122,7 @@ class RecomputeWindWithoutStreamTests(TestCase):
         mock_service.get_historical_weather.return_value = _local_hourly(
             "2026-11-17", {17: 1.4}
         )
+        mock_service.get_ride_rain.return_value = None
 
         call_command("recompute_wind", stdout=StringIO())
 

@@ -59,6 +59,11 @@ class StravaProfile(models.Model):
         blank=True,
         help_text="Einwilligung: Startkoordinaten und Datum von Fahrten an Open-Meteo.",
     )
+    route_weather_consent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Einwilligung: gerundete Streckenpunkte von Fahrten an Open-Meteo.",
+    )
     ai_consent_at = models.DateTimeField(
         null=True,
         blank=True,
